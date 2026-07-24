@@ -18,14 +18,12 @@ func applySuccessfulTransactionState(slotCtx *sealevel.SlotCtx, execCtx *sealeve
 	}
 
 	recordMetrics := slotCtx != nil && slotCtx.Replay
-	if executionResult != nil {
+	if executionResult != nil && !accountsDeltaHashRemoved(slotCtx) {
 		var writableStart time.Time
 		if recordMetrics {
 			writableStart = time.Now()
 		}
-		for _, pk := range executionResult.WritableAccounts {
-			slotCtx.RecordWritableAcct(pk)
-		}
+		slotCtx.RecordWritableAccts(executionResult.WritableAccounts)
 		if recordMetrics {
 			metrics.GlobalBlockReplay.TxPublishRecordWritableAcct.AddTimingSince(writableStart)
 		}

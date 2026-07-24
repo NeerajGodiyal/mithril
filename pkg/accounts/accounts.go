@@ -1,7 +1,9 @@
 package accounts
 
 import (
+	"fmt"
 	"io"
+	"math"
 
 	"github.com/Overclock-Validator/mithril/pkg/base58"
 	bin "github.com/gagliardetto/binary"
@@ -14,6 +16,56 @@ type Accounts interface {
 	AllAccounts() []*Account
 	SetAccountWithoutLock(pubkey solana.PublicKey, acc *Account) error
 	GetAccountWithoutLock(pubkey solana.PublicKey) (*Account, error)
+}
+
+func validateTransactionAccountBatch(accountStates []*Account, touched []bool) error {
+	if len(accountStates) != len(touched) {
+		return fmt.Errorf("account states/touched length mismatch: %d != %d", len(accountStates), len(touched))
+	}
+	for idx, acct := range accountStates {
+		if touched[idx] && acct == nil {
+			return fmt.Errorf("touched account state at index %d is nil", idx)
+		}
+	}
+	return nil
+}
+
+// SetTransactionAccounts publishes touched transaction states in message order,
+// canonicalizing zero-lamport states as tombstones. Built-in stores batch their
+// synchronization; other Accounts implementations retain the per-key fallback.
+func SetTransactionAccounts(store Accounts, accountStates []*Account, touched []bool) error {
+	if err := validateTransactionAccountBatch(accountStates, touched); err != nil {
+		return err
+	}
+	switch builtInStore := store.(type) {
+	case MemAccounts:
+		builtInStore.setTransactionAccounts(accountStates, touched)
+		return nil
+	case *MemAccounts:
+		builtInStore.setTransactionAccounts(accountStates, touched)
+		return nil
+	case *OverlayAccounts:
+		builtInStore.setTransactionAccounts(accountStates, touched)
+		return nil
+	}
+	for idx, acct := range accountStates {
+		if !touched[idx] {
+			continue
+		}
+		storedAcct := transactionAccountForStorage(acct)
+		key := [32]byte(storedAcct.Key)
+		if err := store.SetAccount(&key, storedAcct); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func transactionAccountForStorage(acct *Account) *Account {
+	if acct.Lamports == 0 {
+		return &Account{Key: acct.Key, RentEpoch: math.MaxUint64}
+	}
+	return acct
 }
 
 type Account struct {

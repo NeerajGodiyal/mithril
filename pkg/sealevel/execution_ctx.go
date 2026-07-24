@@ -469,12 +469,35 @@ func (slotCtx *SlotCtx) SetAccount(pubkey solana.PublicKey, acct *accounts.Accou
 func (slotCtx *SlotCtx) RecordModifiedAcct(pubkey solana.PublicKey) {
 	slotCtx.AcctMapsMu.Lock()
 	defer slotCtx.AcctMapsMu.Unlock()
-	slotCtx.WritableAccts[pubkey] = true
+	if slotCtx.Features == nil || !slotCtx.Features.IsActive(features.RemoveAccountsDeltaHash) {
+		slotCtx.WritableAccts[pubkey] = true
+	}
 	slotCtx.ModifiedAccts[pubkey] = true
+}
+
+func (slotCtx *SlotCtx) RecordModifiedAccountStates(accountStates []*accounts.Account, touched []bool) {
+	if len(accountStates) != len(touched) {
+		panic("account states/touched length mismatch")
+	}
+	slotCtx.AcctMapsMu.Lock()
+	defer slotCtx.AcctMapsMu.Unlock()
+	for idx, acct := range accountStates {
+		if touched[idx] {
+			slotCtx.ModifiedAccts[acct.Key] = true
+		}
+	}
 }
 
 func (slotCtx *SlotCtx) RecordWritableAcct(pubkey solana.PublicKey) {
 	slotCtx.AcctMapsMu.Lock()
 	defer slotCtx.AcctMapsMu.Unlock()
 	slotCtx.WritableAccts[pubkey] = true
+}
+
+func (slotCtx *SlotCtx) RecordWritableAccts(pubkeys []solana.PublicKey) {
+	slotCtx.AcctMapsMu.Lock()
+	defer slotCtx.AcctMapsMu.Unlock()
+	for _, pubkey := range pubkeys {
+		slotCtx.WritableAccts[pubkey] = true
+	}
 }

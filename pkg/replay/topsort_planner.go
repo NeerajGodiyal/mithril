@@ -25,28 +25,33 @@ func canDeriveAccountsFromMessage(t *solana.Transaction) bool {
 	return !t.Message.IsVersioned() || t.Message.AddressTableLookups.NumLookups() == 0
 }
 
-func messageWritableAccounts(msg *solana.Message) []solana.PublicKey {
-	numStaticAccounts := len(msg.AccountKeys)
-	numWritableLookupAccounts := 0
+func messageAccountLayout(msg *solana.Message) (numStaticAccounts, numWritableLookupAccounts int) {
+	numStaticAccounts = len(msg.AccountKeys)
 	if msg.IsResolved() {
 		numStaticAccounts -= msg.NumLookups()
 		numWritableLookupAccounts = msg.GetAddressTableLookups().NumWritableLookups()
 	}
+	return numStaticAccounts, numWritableLookupAccounts
+}
+
+func messageAccountIsWritable(msg *solana.Message, idx, numStaticAccounts, numWritableLookupAccounts int) bool {
+	switch {
+	case idx >= numStaticAccounts:
+		return idx-numStaticAccounts < numWritableLookupAccounts
+	case idx >= int(msg.Header.NumRequiredSignatures):
+		numUnsignedWritable := (numStaticAccounts - int(msg.Header.NumRequiredSignatures)) - int(msg.Header.NumReadonlyUnsignedAccounts)
+		return idx-int(msg.Header.NumRequiredSignatures) < numUnsignedWritable
+	default:
+		return idx < int(msg.Header.NumRequiredSignatures-msg.Header.NumReadonlySignedAccounts)
+	}
+}
+
+func messageWritableAccounts(msg *solana.Message) []solana.PublicKey {
+	numStaticAccounts, numWritableLookupAccounts := messageAccountLayout(msg)
 	accounts := make([]solana.PublicKey, 0, len(msg.AccountKeys))
 
 	for idx, account := range msg.AccountKeys {
-		isWritable := false
-		switch {
-		case idx >= numStaticAccounts:
-			isWritable = idx-numStaticAccounts < numWritableLookupAccounts
-		case idx >= int(msg.Header.NumRequiredSignatures):
-			numUnsignedWritable := (numStaticAccounts - int(msg.Header.NumRequiredSignatures)) - int(msg.Header.NumReadonlyUnsignedAccounts)
-			isWritable = idx-int(msg.Header.NumRequiredSignatures) < numUnsignedWritable
-		default:
-			isWritable = idx < int(msg.Header.NumRequiredSignatures-msg.Header.NumReadonlySignedAccounts)
-		}
-
-		if isWritable {
+		if messageAccountIsWritable(msg, idx, numStaticAccounts, numWritableLookupAccounts) {
 			accounts = append(accounts, account)
 		}
 	}

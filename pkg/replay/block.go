@@ -348,34 +348,59 @@ func ResolveAddrTableLookupsForTx(ctx context.Context, accountsDb *accountsdb.Ac
 	return tx.Message.ResolveLookups()
 }
 
-func extractAndDedupeBlockAccts(block *b.Block) []solana.PublicKey {
+const transactionPublicationNonTransactionSlack = 8
+const expectedTouchedAccountsPerTransaction = 2
+
+func extractAndDedupeBlockAccts(block *b.Block) ([]solana.PublicKey, int) {
 	var numPubkeys int
 	for _, tx := range block.Transactions {
 		numPubkeys += len(tx.Message.AccountKeys)
 	}
 
 	numPubkeys += len(block.UpdatedAccts)
-
-	pubkeyMap := make(map[solana.PublicKey]struct{}, numPubkeys)
+	pubkeyMap := make(map[solana.PublicKey]bool, numPubkeys)
 
 	for _, tx := range block.Transactions {
-		for _, pk := range tx.Message.AccountKeys {
-			pubkeyMap[pk] = struct{}{}
+		numStaticAccounts, numWritableLookupAccounts := messageAccountLayout(&tx.Message)
+		for idx, pk := range tx.Message.AccountKeys {
+			if messageAccountIsWritable(&tx.Message, idx, numStaticAccounts, numWritableLookupAccounts) {
+				pubkeyMap[pk] = true
+			} else if _, exists := pubkeyMap[pk]; !exists {
+				pubkeyMap[pk] = false
+			}
 		}
 	}
 
 	for _, pk := range block.UpdatedAccts {
-		pubkeyMap[pk] = struct{}{}
+		pubkeyMap[pk] = true
 	}
 
 	pubkeys := make([]solana.PublicKey, len(pubkeyMap))
 	i := 0
-	for pk := range pubkeyMap {
+	writableAccountCount := 0
+	for pk, writable := range pubkeyMap {
 		pubkeys[i] = pk
 		i++
+		if writable {
+			writableAccountCount++
+		}
 	}
 
-	return pubkeys
+	return pubkeys, writableAccountCount
+}
+
+func publicationMapCapacity(block *b.Block, uniqueWritableAccounts int, alpenglow bool) int {
+	// This is an allocation hint, not a shard-count bound. Cap speculative
+	// transaction capacity at the observed transfer workload's touch rate so
+	// failure-heavy blocks do not eagerly allocate for every declared writable
+	// key; maps grow naturally for higher-fanout successful transactions.
+	expectedTransactionTouches := min(uniqueWritableAccounts, len(block.Transactions)*expectedTouchedAccountsPerTransaction)
+	capacity := expectedTransactionTouches + len(block.EpochUpdatedAccts) + transactionPublicationNonTransactionSlack
+	if alpenglow {
+		// Certificate-driven vote writes are absent from transaction message keys.
+		capacity += len(block.EpochStakesPerVoteAcct)
+	}
+	return capacity
 }
 
 func isNativeProgram(pubkey solana.PublicKey) bool {
@@ -466,16 +491,17 @@ func validatePartitionedRewardsResume(slot uint64, epochRewards *sealevel.Sysvar
 	)
 }
 
-func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule, alpenglowClock bool) (accounts.Accounts, accounts.Accounts, error) {
+func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule, alpenglowClock bool) (accounts.Accounts, accounts.Accounts, int, error) {
 	phaseStart := time.Now()
 	err := resolveAddrTableLookups(accountsDb, block)
 	metrics.GlobalBlockReplay.AccountLoader.AddressTableLookups.AddTimingSince(phaseStart)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 
 	phaseStart = time.Now()
-	dedupedAccts := extractAndDedupeBlockAccts(block)
+	dedupedAccts, uniqueWritableAccounts := extractAndDedupeBlockAccts(block)
+	publicationCapacity := publicationMapCapacity(block, uniqueWritableAccounts, alpenglowClock)
 	metrics.GlobalBlockReplay.AccountLoader.DedupeBlockAccounts.AddTimingSince(phaseStart)
 	ctx := context.Background()
 	phaseStart = time.Now()
@@ -483,22 +509,22 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.B
 	metrics.GlobalBlockReplay.AccountLoader.SourceBatch.AddTimingSince(phaseStart)
 	recordAccountLoaderBatchStats(&metrics.GlobalBlockReplay.AccountLoader, batchStats)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 
 	phaseStart = time.Now()
-	numAccts := uint64(len(slotAccts))
-	metrics.GlobalBlockReplay.AccountLoader.ParentAccounts = numAccts
-	parentAccts := accounts.NewMemAccountsWithLen(numAccts)
+	numAccts := len(slotAccts)
+	metrics.GlobalBlockReplay.AccountLoader.ParentAccounts = uint64(numAccts)
+	parentAccts := accounts.NewMemAccountsWithLen(uint64(numAccts))
 	for _, acct := range slotAccts {
 		if err = parentAccts.SetAccountWithoutLock(acct.Key, acct); err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 	}
 
 	// accts is a branch-local overlay over the pristine parent snapshot; execution
 	// copy-on-writes, so parentAccts stays pristine for LtHash "before" values.
-	accts := accounts.NewOverlayAccounts(parentAccts)
+	accts := accounts.NewOverlayAccountsWithSizing(parentAccts, numAccts, publicationCapacity)
 	metrics.GlobalBlockReplay.AccountLoader.ParentMapBuild.AddTimingSince(phaseStart)
 
 	phaseStart = time.Now()
@@ -758,7 +784,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.B
 	}
 
 	metrics.GlobalBlockReplay.AccountLoader.SysvarUpdates.AddTimingSince(phaseStart)
-	return accts, parentAccts, nil
+	return accts, parentAccts, publicationCapacity, nil
 }
 
 func recordAccountLoaderBatchStats(dst *metrics.AccountLoader, src accountsdb.BatchReadStats) {
@@ -3226,7 +3252,11 @@ func EncodeSlotHashes(sysvar *sealevel.SysvarSlotHashes) []state.SlotHashEntry {
 	return result
 }
 
-func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Accounts, acctsDb *accountsdb.AccountsDb, tail unrootedState) *sealevel.SlotCtx {
+func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Accounts, acctsDb *accountsdb.AccountsDb, tail unrootedState, accountMapCapacity int) *sealevel.SlotCtx {
+	writableMapCapacity := accountMapCapacity
+	if block.Features != nil && block.Features.IsActive(features.RemoveAccountsDeltaHash) {
+		writableMapCapacity = 0
+	}
 	slotCtx := &sealevel.SlotCtx{
 		Accounts:        accts,
 		ParentAccts:     parentAccts,
@@ -3238,8 +3268,8 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 		NumSignatures:   block.NumSignatures,
 
 		AcctMapsMu:    &sync.Mutex{},
-		ModifiedAccts: make(map[solana.PublicKey]bool),
-		WritableAccts: make(map[solana.PublicKey]bool),
+		ModifiedAccts: make(map[solana.PublicKey]bool, accountMapCapacity),
+		WritableAccts: make(map[solana.PublicKey]bool, writableMapCapacity),
 
 		Blockhash:              block.Blockhash,
 		LastBlockhash:          block.LastBlockhash,
@@ -3768,7 +3798,7 @@ func ProcessBlock(
 	if tail != nil {
 		blockSrc = tail
 	}
-	accts, parentAccts, err := loadBlockAccountsAndUpdateSysvars(blockSrc, block, epochSchedule, alpenglowClock)
+	accts, parentAccts, accountMapCapacity, err := loadBlockAccountsAndUpdateSysvars(blockSrc, block, epochSchedule, alpenglowClock)
 	loadAcctsRegion.End()
 	if err != nil {
 		panic(fmt.Sprintf("unable to load slot accounts and update sysvars: %s", err))
@@ -3776,7 +3806,7 @@ func ProcessBlock(
 	metrics.GlobalBlockReplay.LoadBlockAccounts.AddTimingSince(start)
 
 	slotCtxSetupStart := time.Now()
-	slotCtx := newSlotCtx(block, accts, parentAccts, acctsDb, tail)
+	slotCtx := newSlotCtx(block, accts, parentAccts, acctsDb, tail, accountMapCapacity)
 	slotCtx.TraceCtx = ctx
 	slotCtx.NumSignatures = executionPlan.processedSignatures
 	metrics.GlobalBlockReplay.SlotCtxSetup.AddTimingSince(slotCtxSetupStart)

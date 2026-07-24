@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"runtime/trace"
 	"strings"
 	"sync"
@@ -211,26 +210,19 @@ type transactionPublicationStats struct {
 
 func handleModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx) transactionPublicationStats {
 	// update account states in slotCtx for all accounts 'touched' during the tx's execution
+	transactionAccounts := &execCtx.TransactionContext.Accounts
 	var stats transactionPublicationStats
-	for idx, newAcctState := range execCtx.TransactionContext.Accounts.Accounts {
-		if execCtx.TransactionContext.Accounts.Touched[idx] {
+	for idx, newAcctState := range transactionAccounts.Accounts {
+		if transactionAccounts.Touched[idx] {
 			// Track touched account stats for profiling
 			stats.touchedAccounts++
 			stats.touchedAccountBytes += uint64(len(newAcctState.Data))
-
-			// clean up accounts closed during the tx (garbage collection)
-			if newAcctState.Lamports == 0 {
-				newAcctState = &accounts.Account{Key: newAcctState.Key, RentEpoch: math.MaxUint64}
-			}
-
-			err := slotCtx.SetAccount(newAcctState.Key, newAcctState)
-			if err != nil {
-				panic(fmt.Sprintf("unable to set slot account for %s to update state: %s", newAcctState.Key, err))
-			}
-			slotCtx.RecordModifiedAcct(newAcctState.Key)
-			//mlog.Log.Debugf("modified account %s after tx", newAcctState.Key)
 		}
 	}
+	if err := accounts.SetTransactionAccounts(slotCtx.Accounts, transactionAccounts.Accounts, transactionAccounts.Touched); err != nil {
+		panic(fmt.Sprintf("unable to publish transaction account states: %s", err))
+	}
+	slotCtx.RecordModifiedAccountStates(transactionAccounts.Accounts, transactionAccounts.Touched)
 
 	// Record touched stats for clone optimization profiling
 	TxAcctsTouched.Add(stats.touchedAccounts)

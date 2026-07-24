@@ -39,9 +39,33 @@ func TestLeanWritableFastPathOmitsExecutionResultWhenADHDisabled(t *testing.T) {
 	assert.Nil(t, output.ExecutionResult, "ADH-disabled lean replay must not materialize writable result collections")
 
 	require.NoError(t, ApplySuccessfulTransaction(slotCtx, output))
+	assert.Empty(t, slotCtx.WritableAccts, "ADH-removed lean publication must not build the unused writable set")
 	destAfter, err := slotCtx.GetAccount(txfixture.DestPubkey())
 	require.NoError(t, err)
 	assert.Greater(t, destAfter.Lamports, destBefore.Lamports, "omitting the result must not skip touched-account publication")
+}
+
+func TestRecordModifiedAcctOnlyTracksLegacyWritableState(t *testing.T) {
+	key := txfixture.DestPubkey()
+
+	t.Run("accounts delta hash removed", func(t *testing.T) {
+		slotCtx, cleanup := newCommitTestSlotCtx()
+		defer cleanup()
+		slotCtx.Features.EnableFeature(features.RemoveAccountsDeltaHash, 0)
+
+		slotCtx.RecordModifiedAcct(key)
+		assert.Contains(t, slotCtx.ModifiedAccts, key)
+		assert.NotContains(t, slotCtx.WritableAccts, key)
+	})
+
+	t.Run("legacy accounts delta hash", func(t *testing.T) {
+		slotCtx, cleanup := newCommitTestSlotCtx()
+		defer cleanup()
+
+		slotCtx.RecordModifiedAcct(key)
+		assert.Contains(t, slotCtx.ModifiedAccts, key)
+		assert.Contains(t, slotCtx.WritableAccts, key)
+	})
 }
 
 func TestLeanWritableFastPathPreservesExecutionResultWhenADHEnabled(t *testing.T) {
@@ -120,6 +144,9 @@ func TestLeanWritableFastPathKeepsRichResultWhenADHDisabled(t *testing.T) {
 	assert.NotEmpty(t, output.ExecutionResult.AccountUpdates)
 	assert.NotEmpty(t, output.ExecutionResult.WritableAccounts)
 	assert.NotEmpty(t, output.ExecutionResult.WritableAccountSet)
+	require.NoError(t, ApplySuccessfulTransaction(slotCtx, output))
+	assert.Empty(t, slotCtx.WritableAccts, "ADH-removed rich publication must not build the unused writable set")
+	assert.Contains(t, slotCtx.ModifiedAccts, txfixture.DestPubkey())
 }
 
 func TestApplySuccessfulTransactionLegacyRecordsWritableUntouchedAccount(t *testing.T) {
