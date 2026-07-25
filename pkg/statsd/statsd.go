@@ -136,6 +136,16 @@ var (
 	ReplaySigverifyGroup           = Metric{"replay_sigverify_group_duration_seconds"}
 	ReplaySigverifyGroupSignatures = Metric{"replay_sigverify_group_signatures_total"}
 	TurbineReplayAdmission         = Metric{"turbine_replay_admission_duration_seconds"}
+	TurbineReceiverActive          = Metric{"turbine_receiver_active"}
+	TurbinePacketsReceived         = Metric{"turbine_packets_received_total"}
+	TurbineDataShredsReceived      = Metric{"turbine_data_shreds_received_total"}
+	TurbineBlocksEmitted           = Metric{"turbine_blocks_emitted_total"}
+	TurbineShredsRejected          = Metric{"turbine_shreds_rejected_total"}
+	TurbineAssemblerActiveSlots    = Metric{"turbine_assembler_active_slots"}
+	TurbineLastPacketTimestamp     = Metric{"turbine_last_packet_timestamp_seconds"}
+	TurbineLastDataSlot            = Metric{"turbine_last_data_slot"}
+	TurbineLastBlockTimestamp      = Metric{"turbine_last_block_timestamp_seconds"}
+	TurbineLastBlockSlot           = Metric{"turbine_last_block_slot"}
 
 	SnapshotWorkerPoolUtilization = Metric{"snapshot_worker_pool_utilization"}
 	TasksSetIfSlotHigherQueueSize = Metric{"tasks_set_if_slot_higher_queue_size"}
@@ -252,6 +262,10 @@ var MetricToType = map[Metric]metricType{
 	ReplaySigverifyGroup:                        TimingT,
 	ReplaySigverifyGroupSignatures:              CountT,
 	TurbineReplayAdmission:                      TimingT,
+	TurbinePacketsReceived:                      CountT,
+	TurbineDataShredsReceived:                   CountT,
+	TurbineBlocksEmitted:                        CountT,
+	TurbineShredsRejected:                       CountT,
 
 	TestCount: CountT,
 
@@ -261,6 +275,12 @@ var MetricToType = map[Metric]metricType{
 	TasksSetIfSlotHigherQueueSize: GaugeT,
 	Epoch:                         GaugeT,
 	Slot:                          GaugeT,
+	TurbineReceiverActive:         GaugeT,
+	TurbineAssemblerActiveSlots:   GaugeT,
+	TurbineLastPacketTimestamp:    GaugeT,
+	TurbineLastDataSlot:           GaugeT,
+	TurbineLastBlockTimestamp:     GaugeT,
+	TurbineLastBlockSlot:          GaugeT,
 }
 var MetricToLabels = map[Metric][]string{
 	PreprocessBlock:      {"phase"},
@@ -362,6 +382,10 @@ var MetricToLabels = map[Metric][]string{
 	ReplaySigverifyGroup:                        {},
 	ReplaySigverifyGroupSignatures:              {},
 	TurbineReplayAdmission:                      {},
+	TurbinePacketsReceived:                      {},
+	TurbineDataShredsReceived:                   {},
+	TurbineBlocksEmitted:                        {},
+	TurbineShredsRejected:                       {"reason"},
 
 	SnapshotWorkerPoolUtilization: {"task"},
 	SnapshotBootstrapActive:       {},
@@ -369,6 +393,12 @@ var MetricToLabels = map[Metric][]string{
 	TasksSetIfSlotHigherQueueSize: {},
 	Epoch:                         {},
 	Slot:                          {},
+	TurbineReceiverActive:         {},
+	TurbineAssemblerActiveSlots:   {},
+	TurbineLastPacketTimestamp:    {},
+	TurbineLastDataSlot:           {},
+	TurbineLastBlockTimestamp:     {},
+	TurbineLastBlockSlot:          {},
 
 	TestCount: {"test"}, // used for testing purposes, not a real metric
 }
@@ -384,9 +414,10 @@ var turbinePipelineDurationBuckets = []float64{
 	3.200, 6.400, 12.800, 30.000, 60.000,
 }
 
-// MetricToBuckets gives duration histograms unit-specific buckets.
+// MetricToBuckets gives duration histograms explicit seconds-based buckets.
+// The generic Timing metrics predate unit-specific naming and retain the
+// Prometheus defaults for compatibility.
 var MetricToBuckets = map[Metric][]float64{
-	SlotReplayDurationMs:                        {1, 2, 5, 10, 20, 50, 100, 200, 400, 800, 1600, 3200, 6400, 10000},
 	BlockProductionParentReadyAge:               blockProductionDurationBuckets,
 	BlockProductionStartCutoffLate:              blockProductionDurationBuckets,
 	BlockProductionStartDecisionTickDeliveryLag: blockProductionDurationBuckets,
@@ -534,6 +565,59 @@ func BeginSnapshotBootstrap() func() {
 	_ = Gauge(SnapshotBootstrapStartedAt, float64(time.Now().Unix()), nil)
 	_ = Gauge(SnapshotBootstrapActive, 1, nil)
 	return func() { _ = Gauge(SnapshotBootstrapActive, 0, nil) }
+}
+
+// TurbineReceiverSnapshot is the bounded receiver state exported to metrics.
+// It lives here so the Turbine package can continue using statsd without an
+// import cycle.
+type TurbineReceiverSnapshot struct {
+	Packets         uint64
+	DataShreds      uint64
+	BlocksEmitted   uint64
+	ParseErrors     uint64
+	SignatureErrors uint64
+	MissingLeaders  uint64
+	AssemblyErrors  uint64
+	ActiveSlots     int
+	LastPacketUnix  int64
+	LastDataSlot    uint64
+	LastBlockUnix   int64
+	LastBlockSlot   uint64
+}
+
+// SetTurbineReceiverActive records whether a native receiver is listening.
+func SetTurbineReceiverActive(active bool) {
+	value := 0.0
+	if active {
+		value = 1
+	}
+	_ = Gauge(TurbineReceiverActive, value, nil)
+}
+
+func addTurbineCounterDelta(metric Metric, current, previous uint64, labels ...string) {
+	delta := current
+	if current >= previous {
+		delta = current - previous
+	}
+	metricsCollection.counters[metric].WithLabelValues(labels...).Add(float64(delta))
+}
+
+// SendTurbineReceiverMetrics publishes one receiver snapshot. Counter deltas
+// remain monotonic when a receiver restarts.
+func SendTurbineReceiverMetrics(current, previous TurbineReceiverSnapshot, active bool) {
+	SetTurbineReceiverActive(active)
+	addTurbineCounterDelta(TurbinePacketsReceived, current.Packets, previous.Packets)
+	addTurbineCounterDelta(TurbineDataShredsReceived, current.DataShreds, previous.DataShreds)
+	addTurbineCounterDelta(TurbineBlocksEmitted, current.BlocksEmitted, previous.BlocksEmitted)
+	addTurbineCounterDelta(TurbineShredsRejected, current.ParseErrors, previous.ParseErrors, "parse")
+	addTurbineCounterDelta(TurbineShredsRejected, current.SignatureErrors, previous.SignatureErrors, "signature")
+	addTurbineCounterDelta(TurbineShredsRejected, current.MissingLeaders, previous.MissingLeaders, "missing_leader")
+	addTurbineCounterDelta(TurbineShredsRejected, current.AssemblyErrors, previous.AssemblyErrors, "assembly")
+	_ = Gauge(TurbineAssemblerActiveSlots, float64(current.ActiveSlots), nil)
+	_ = Gauge(TurbineLastPacketTimestamp, float64(current.LastPacketUnix), nil)
+	_ = Gauge(TurbineLastDataSlot, float64(current.LastDataSlot), nil)
+	_ = Gauge(TurbineLastBlockTimestamp, float64(current.LastBlockUnix), nil)
+	_ = Gauge(TurbineLastBlockSlot, float64(current.LastBlockSlot), nil)
 }
 
 // Create timing function for readability, but under the hood its implemented via distribution
