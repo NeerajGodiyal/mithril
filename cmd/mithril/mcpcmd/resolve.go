@@ -25,11 +25,6 @@ func resolvedConfigWithOverrides(overrides resolvedConfigOverrides) (mcp.Config,
 			return mcp.Config{}, err
 		}
 	}
-	if rawQuiet, configured := os.LookupEnv("MITHRIL_LIGHTBRINGER_QUIET"); configured && rawQuiet != "" {
-		if _, err := strconv.ParseBool(rawQuiet); err != nil {
-			return mcp.Config{}, errors.New("MITHRIL_LIGHTBRINGER_QUIET must be true or false")
-		}
-	}
 	if rawTTL, configured := os.LookupEnv("MITHRIL_MCP_APPROVAL_TTL_SECONDS"); overrides.ApprovalTTLSeconds == nil && configured && rawTTL != "" {
 		ttl, err := strconv.ParseUint(rawTTL, 10, 64)
 		if err != nil || ttl < mcp.MinApprovalTTLSeconds || ttl > mcp.MaxApprovalTTLSeconds {
@@ -53,12 +48,7 @@ func resolvedConfigWithOverrides(overrides resolvedConfigOverrides) (mcp.Config,
 	metricsEnv, metricsEnvSet := os.LookupEnv("MITHRIL_METRICS_URL")
 	rpcEnv, rpcEnvSet := os.LookupEnv("MITHRIL_RPC_URL")
 	pprofEnv, pprofEnvSet := os.LookupEnv("MITHRIL_PPROF_URL")
-	grpcEnv, grpcEnvSet := os.LookupEnv("MITHRIL_LIGHTBRINGER_GRPC_ADDR")
-	influxURLEnv, influxURLEnvSet := os.LookupEnv("MITHRIL_LIGHTBRINGER_INFLUXDB_URL")
-	influxDBEnv, influxDBEnvSet := os.LookupEnv("MITHRIL_LIGHTBRINGER_INFLUXDB_DATABASE")
-	influxTokenEnv, influxTokenEnvSet := os.LookupEnv("MITHRIL_LIGHTBRINGER_INFLUXDB_TOKEN")
 	blockSourceEnv, blockSourceEnvSet := os.LookupEnv("MITHRIL_BLOCK_SOURCE")
-	_, lightbringerQuietEnvSet := os.LookupEnv("MITHRIL_LIGHTBRINGER_QUIET")
 
 	// ConfigFromEnv supplies conventional defaults for standalone MCP use. An
 	// explicitly present environment variable, including an empty one, is still
@@ -89,18 +79,6 @@ func resolvedConfigWithOverrides(overrides resolvedConfigOverrides) (mcp.Config,
 	}
 	if pprofEnvSet {
 		cfg.PprofURL = pprofEnv
-	}
-	if grpcEnvSet {
-		cfg.LightbringerGRPCAddr = grpcEnv
-	}
-	if influxURLEnvSet {
-		cfg.LightbringerInfluxURL = influxURLEnv
-	}
-	if influxDBEnvSet {
-		cfg.LightbringerInfluxDB = influxDBEnv
-	}
-	if influxTokenEnvSet {
-		cfg.LightbringerInfluxTok = influxTokenEnv
 	}
 	if blockSourceEnvSet {
 		cfg.BlockSource = blockSourceEnv
@@ -133,27 +111,8 @@ func resolvedConfigWithOverrides(overrides resolvedConfigOverrides) (mcp.Config,
 			cfg.PprofURL = loopbackHTTPURL(int(configured.PprofPort))
 			pprofExplicitlyDisabled = configured.PprofPort <= 0
 		}
-		if !grpcEnvSet && configured.LightbringerGRPCAddr != "" {
-			cfg.LightbringerGRPCAddr = configured.LightbringerGRPCAddr
-		}
-		if !influxURLEnvSet && configured.LightbringerInfluxURL != nil {
-			cfg.LightbringerInfluxURL = *configured.LightbringerInfluxURL
-		}
-		if !influxDBEnvSet && configured.LightbringerInfluxDB != nil {
-			cfg.LightbringerInfluxDB = *configured.LightbringerInfluxDB
-		}
 		if !blockSourceEnvSet {
 			cfg.BlockSource = configured.BlockSource
-		}
-		if !lightbringerQuietEnvSet {
-			cfg.LightbringerQuiet = configured.LightbringerQuiet
-		}
-		// A token from the node file is scoped to that file's URL. Never carry it
-		// to an environment-selected origin.
-		if !influxTokenEnvSet && !influxURLEnvSet && configured.LightbringerInfluxTok != nil {
-			cfg.LightbringerInfluxTok = *configured.LightbringerInfluxTok
-		} else if !influxTokenEnvSet && influxURLEnvSet {
-			cfg.LightbringerInfluxTok = ""
 		}
 	}
 	if !accountsEnvSet {
@@ -207,18 +166,46 @@ func resolvedConfigWithOverrides(overrides resolvedConfigOverrides) (mcp.Config,
 // configuredNodeSettings contains node settings that affect MCP's local
 // observation targets.
 type configuredNodeSettings struct {
-	Accounts              string
-	Snapshots             string
-	Shredstore            string
-	Logs                  string
-	BlockSource           string
-	LightbringerQuiet     *bool
-	RPCPort               int
-	PprofPort             int64
-	LightbringerGRPCAddr  string
-	LightbringerInfluxURL *string
-	LightbringerInfluxDB  *string
-	LightbringerInfluxTok *string
+	Accounts    string
+	Snapshots   string
+	Shredstore  string
+	Logs        string
+	BlockSource string
+	RPCPort     int
+	PprofPort   int64
+}
+
+func configuredNodeBlockSource(v *viper.Viper) (string, error) {
+	cluster := v.GetString("network.cluster")
+	if cluster == "" {
+		cluster = "alpenglow"
+	}
+
+	var defaultSource string
+	switch cluster {
+	case "alpenglow":
+		defaultSource = "turbine"
+	case "mainnet-beta", "testnet", "devnet":
+		defaultSource = "rpc"
+	default:
+		return "", fmt.Errorf("invalid network.cluster %q - must be 'alpenglow', 'mainnet-beta', 'testnet', or 'devnet'", cluster)
+	}
+
+	source := v.GetString("block.source")
+	sourceExplicit := source != ""
+	if !sourceExplicit {
+		source = defaultSource
+	}
+	if v.GetBool("lightbringer.enabled") && !sourceExplicit {
+		source = "lightbringer"
+	}
+
+	switch source {
+	case "rpc", "lightbringer", "turbine":
+		return source, nil
+	default:
+		return "", fmt.Errorf("invalid block.source %q - must be 'rpc', 'lightbringer', or 'turbine'", source)
+	}
 }
 
 func nodeSettingsFromConfig(path string) (configuredNodeSettings, error) {
@@ -244,27 +231,22 @@ func nodeSettingsFromConfig(path string) (configuredNodeSettings, error) {
 	if shredstore == "" {
 		shredstore = v.GetString("ledger.path")
 	}
-	blockSource := v.GetString("block.source")
-	if blockSource == "" {
-		blockSource = "rpc"
+	blockSource, err := configuredNodeBlockSource(v)
+	if err != nil {
+		return configuredNodeSettings{}, err
 	}
-	if v.GetBool("lightbringer.enabled") && blockSource == "rpc" {
-		blockSource = "lightbringer"
-	}
-	lightbringerQuiet := v.GetBool("lightbringer.quiet")
 	// These are the node command's effective flag defaults when an explicit
 	// config omits the corresponding keys.
 	rpcPort := 0
 	pprofPort := int64(-1)
 	settings := configuredNodeSettings{
-		Accounts:          accounts,
-		Snapshots:         snapshots,
-		Shredstore:        shredstore,
-		Logs:              "/mnt/mithril-logs",
-		BlockSource:       blockSource,
-		LightbringerQuiet: &lightbringerQuiet,
-		RPCPort:           rpcPort,
-		PprofPort:         pprofPort,
+		Accounts:    accounts,
+		Snapshots:   snapshots,
+		Shredstore:  shredstore,
+		Logs:        "/mnt/mithril-logs",
+		BlockSource: blockSource,
+		RPCPort:     rpcPort,
+		PprofPort:   pprofPort,
 	}
 	if v.InConfig("storage.logs") {
 		settings.Logs = v.GetString("storage.logs")
@@ -302,13 +284,6 @@ func nodeSettingsFromConfig(path string) (configuredNodeSettings, error) {
 		}
 		settings.PprofPort = value
 	}
-	settings.LightbringerGRPCAddr = v.GetString("block.lightbringer_endpoint")
-	if settings.LightbringerGRPCAddr == "" {
-		settings.LightbringerGRPCAddr = v.GetString("lightbringer.grpc_addr")
-	}
-	settings.LightbringerInfluxURL = configuredString(v, "lightbringer.influxdb_host")
-	settings.LightbringerInfluxDB = configuredString(v, "lightbringer.influxdb_database")
-	settings.LightbringerInfluxTok = configuredString(v, "lightbringer.influxdb_token")
 	return settings, nil
 }
 
@@ -327,14 +302,6 @@ func configuredInteger(v *viper.Viper, key string) (int64, error) {
 		}
 	}
 	return 0, fmt.Errorf("%s must be an integer", key)
-}
-
-func configuredString(v *viper.Viper, key string) *string {
-	if !v.InConfig(key) {
-		return nil
-	}
-	value := v.GetString(key)
-	return &value
 }
 
 func loopbackHTTPURL(port int) string {

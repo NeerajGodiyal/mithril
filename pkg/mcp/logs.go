@@ -27,7 +27,6 @@ const (
 	maxPatternLength            = 512
 	maxLogSinceBytes            = 128
 	logSourceMithril            = "mithril"
-	logSourceLightbringer       = "lightbringer"
 )
 
 // LogLevel is a log severity serialized as a string.
@@ -230,47 +229,13 @@ func parseLogLine(line string) (LogLine, bool) {
 	return parseKlogLine(line)
 }
 
-var simpleLoggerRe = regexp.MustCompile(`^(\S+) +(DEBUG|INFO|WARN|ERROR) +\[([^\]\r\n]+)\] (.*)$`)
-
-// parseSimpleLoggerLine parses the plain SimpleLogger format emitted by Lightbringer.
-func parseSimpleLoggerLine(line string) (LogLine, bool) {
-	line = strings.TrimRight(line, "\r\n")
-	parts := simpleLoggerRe.FindStringSubmatch(line)
-	if parts == nil {
-		return LogLine{}, false
-	}
-	if _, err := time.Parse(time.RFC3339Nano, parts[1]); err != nil {
-		return LogLine{}, false
-	}
-	level, ok := parseLevelName(parts[2])
-	if !ok {
-		return LogLine{}, false
-	}
-	target := parts[3]
-	return LogLine{Timestamp: parts[1], Level: level, Target: &target, Message: parts[4]}, true
-}
-
 type logSourceSpec struct {
 	name  string
 	file  string
 	parse func(string) (LogLine, bool)
 }
 
-var (
-	mithrilLogSource      = logSourceSpec{name: logSourceMithril, file: "mithril.log", parse: parseLogLine}
-	lightbringerLogSource = logSourceSpec{name: logSourceLightbringer, file: "lightbringer.log", parse: parseSimpleLoggerLine}
-)
-
-func resolveLogSource(source string) (logSourceSpec, error) {
-	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "", logSourceMithril:
-		return mithrilLogSource, nil
-	case logSourceLightbringer:
-		return lightbringerLogSource, nil
-	default:
-		return logSourceSpec{}, fmt.Errorf("invalid source: must be mithril or lightbringer")
-	}
-}
+var mithrilLogSource = logSourceSpec{name: logSourceMithril, file: "mithril.log", parse: parseLogLine}
 
 type logSinceFilter struct {
 	set       bool
@@ -297,17 +262,6 @@ func parseLogSinceFilter(since string) (logSinceFilter, error) {
 		return logSinceFilter{}, fmt.Errorf("since must be an RFC3339 timestamp or mlog elapsed duration such as 1m30s")
 	}
 	return logSinceFilter{set: true, wallTime: wallTime}, nil
-}
-
-func parseLogSinceFilterForSource(source logSourceSpec, since string) (logSinceFilter, error) {
-	filter, err := parseLogSinceFilter(since)
-	if err != nil {
-		return logSinceFilter{}, err
-	}
-	if source.name == logSourceLightbringer && filter.elapsed {
-		return logSinceFilter{}, errors.New("lightbringer since must be an RFC3339 timestamp; elapsed durations apply only to Mithril mlog")
-	}
-	return filter, nil
 }
 
 // applySinceFilter reports whether a line passes and whether its timestamp was
@@ -563,7 +517,7 @@ func searchableLogLine(line LogLine) string {
 }
 
 func tailLogForSourceContextWithMeta(ctx context.Context, logDir string, source logSourceSpec, lines int, levelFilter *LogLevel, since string) ([]LogLine, int, LogScanMeta, error) {
-	sinceFilter, err := parseLogSinceFilterForSource(source, since)
+	sinceFilter, err := parseLogSinceFilter(since)
 	if err != nil {
 		return nil, 0, LogScanMeta{}, err
 	}
@@ -628,7 +582,7 @@ func grepLogForSourceContextWithMeta(ctx context.Context, logDir string, source 
 	if err != nil {
 		return nil, 0, LogScanMeta{}, fmt.Errorf("invalid regex: %w", err)
 	}
-	sinceFilter, err := parseLogSinceFilterForSource(source, since)
+	sinceFilter, err := parseLogSinceFilter(since)
 	if err != nil {
 		return nil, 0, LogScanMeta{}, err
 	}
@@ -695,10 +649,9 @@ func requireConfiguredPath(value, errMsg string) (string, error) {
 }
 
 type tailLogInput struct {
-	Source string `json:"source,omitempty" jsonschema:"fixed log source: mithril (default) or lightbringer"`
-	Lines  int    `json:"lines,omitempty" jsonschema:"number of lines to return (max 100, default 100)"`
-	Level  string `json:"level,omitempty" jsonschema:"minimum level filter: debug, info, warn, or error"`
-	Since  string `json:"since,omitempty" jsonschema:"only lines at/after this time (ISO-8601 for either source, or Mithril mlog elapsed like 1m30s)"`
+	Lines int    `json:"lines,omitempty" jsonschema:"number of lines to return (max 100, default 100)"`
+	Level string `json:"level,omitempty" jsonschema:"minimum level filter: debug, info, warn, or error"`
+	Since string `json:"since,omitempty" jsonschema:"only lines at/after this time (ISO-8601 or Mithril mlog elapsed like 1m30s)"`
 }
 
 type tailLogOutput struct {
@@ -711,9 +664,8 @@ type tailLogOutput struct {
 }
 
 type grepLogInput struct {
-	Source     string `json:"source,omitempty" jsonschema:"fixed log source: mithril (default) or lightbringer"`
 	Pattern    string `json:"pattern" jsonschema:"RE2 regular expression to match against sanitized parsed log fields"`
-	Since      string `json:"since,omitempty" jsonschema:"only lines at/after this time (ISO-8601 for either source, or Mithril mlog elapsed)"`
+	Since      string `json:"since,omitempty" jsonschema:"only lines at/after this time (ISO-8601 or Mithril mlog elapsed)"`
 	MaxMatches int    `json:"max_matches,omitempty" jsonschema:"max matches to return (max 100, default 100)"`
 }
 
@@ -740,13 +692,9 @@ func registerLogTools(server *mcpsdk.Server, cfg Config) {
 	addTool(server, cfg, &mcpsdk.Tool{
 		Name:        "mithril_tail_log",
 		Annotations: annReadOnlyLocal,
-		Description: "Return up to 100 sanitized lines from the newest 8 MiB of the active Mithril or Lightbringer log. The source selects a fixed filename; callers cannot supply paths.",
+		Description: "Return up to 100 sanitized lines from the newest 8 MiB of the active Mithril log.",
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in tailLogInput) (*mcpsdk.CallToolResult, tailLogOutput, error) {
 		logDir, err := requireConfiguredPath(cfg.LogDir, "MITHRIL_LOG_DIR is not configured")
-		if err != nil {
-			return nil, tailLogOutput{}, err
-		}
-		source, err := resolveLogSource(in.Source)
 		if err != nil {
 			return nil, tailLogOutput{}, err
 		}
@@ -762,24 +710,20 @@ func registerLogTools(server *mcpsdk.Server, cfg Config) {
 		if n <= 0 {
 			n = 100
 		}
-		lines, total, scan, err := tailLogForSourceContextWithMeta(ctx, logDir, source, n, levelFilter, in.Since)
+		lines, total, scan, err := tailLogContextWithMeta(ctx, logDir, n, levelFilter, in.Since)
 		if err != nil {
 			return nil, tailLogOutput{}, err
 		}
 		truncated := !scan.Complete || total > len(lines) || anyLogLineTruncated(lines)
-		return nil, tailLogOutput{Source: source.name, LogDir: logDir, Count: len(lines), Truncated: truncated, Scan: scan, Lines: lines}, nil
+		return nil, tailLogOutput{Source: logSourceMithril, LogDir: logDir, Count: len(lines), Truncated: truncated, Scan: scan, Lines: lines}, nil
 	})
 
 	addTool(server, cfg, &mcpsdk.Tool{
 		Name:        "mithril_grep_log",
 		Annotations: annReadOnlyLocal,
-		Description: "Search sanitized fields in the newest 8 MiB of the active Mithril or Lightbringer log with RE2. The source selects a fixed filename; callers cannot supply paths.",
+		Description: "Search sanitized fields in the newest 8 MiB of the active Mithril log with RE2.",
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in grepLogInput) (*mcpsdk.CallToolResult, grepLogOutput, error) {
 		logDir, err := requireConfiguredPath(cfg.LogDir, "MITHRIL_LOG_DIR is not configured")
-		if err != nil {
-			return nil, grepLogOutput{}, err
-		}
-		source, err := resolveLogSource(in.Source)
 		if err != nil {
 			return nil, grepLogOutput{}, err
 		}
@@ -787,11 +731,11 @@ func registerLogTools(server *mcpsdk.Server, cfg Config) {
 		if n <= 0 {
 			n = 100
 		}
-		matches, total, scan, err := grepLogForSourceContextWithMeta(ctx, logDir, source, in.Pattern, n, in.Since)
+		matches, total, scan, err := grepLogForSourceContextWithMeta(ctx, logDir, mithrilLogSource, in.Pattern, n, in.Since)
 		if err != nil {
 			return nil, grepLogOutput{}, err
 		}
 		truncated := !scan.Complete || total > len(matches) || anyLogLineTruncated(matches)
-		return nil, grepLogOutput{Source: source.name, LogDir: logDir, TotalMatches: total, Returned: len(matches), Truncated: truncated, Scan: scan, Matches: matches}, nil
+		return nil, grepLogOutput{Source: logSourceMithril, LogDir: logDir, TotalMatches: total, Returned: len(matches), Truncated: truncated, Scan: scan, Matches: matches}, nil
 	})
 }

@@ -66,32 +66,29 @@ type toolPolicy struct {
 // toolPolicies controls exposure, admission, telemetry labels, and annotations.
 // Unclassified tools cannot register.
 var toolPolicies = map[string]toolPolicy{
-	"mithril_cross_check_slot":           {exposureObservation, annReadOnlyNetwork, "Compare Cluster Slot"},
-	"mithril_diagnose":                   {exposureObservation, annReadOnlyNetwork, "Diagnose Node Health"},
-	"mithril_get_account_info":           {exposureDiagnostic, annRuntimeDiagnostic, "Account Information"},
-	"mithril_get_bank_hash":              {exposureObservation, annReadOnlyNetwork, "Bank Hash"},
-	"mithril_get_block_height":           {exposureObservation, annReadOnlyNetwork, "Block Height"},
-	"mithril_get_latest_blockhash":       {exposureObservation, annReadOnlyNetwork, "Latest Blockhash"},
-	"mithril_get_slot_info":              {exposureObservation, annReadOnlyNetwork, "Current Slot and Epoch"},
-	"mithril_grep_log":                   {exposureObservation, annReadOnlyLocal, "Search Node Logs"},
-	"mithril_host_health":                {exposureObservation, annReadOnlyNetwork, "Host and Bootstrap Health"},
-	"mithril_lightbringer_ingest_health": {exposureObservation, annReadOnlyNetwork, "Lightbringer Ingest Health"},
-	"mithril_lightbringer_memory":        {exposureObservation, annReadOnlyNetwork, "Lightbringer Memory"},
-	"mithril_lightbringer_stream_probe":  {exposureObservation, annReadOnlyNetwork, "Lightbringer Stream Health"},
-	"mithril_mcp_info":                   {exposureObservation, annReadOnlyLocal, "MCP Configuration"},
-	"mithril_metric":                     {exposureObservation, annReadOnlyNetwork, "Prometheus Metric"},
-	"mithril_pprof_heap":                 {exposureDiagnostic, annReadOnlyNetwork, "Heap Profile"},
-	"mithril_pprof_profile":              {exposureDiagnostic, annRuntimeDiagnostic, "CPU Profile"},
-	"mithril_read_divergence":            {exposureObservation, annReadOnlyLocal, "Divergence Events"},
-	"mithril_read_replay_timings":        {exposureObservation, annReadOnlyLocal, "Replay Timing Summary"},
-	"mithril_read_rewards":               {exposureObservation, annReadOnlyLocal, "Reward Verification"},
-	"mithril_read_shutdown_state":        {exposureObservation, annReadOnlyLocal, "Shutdown State"},
-	"mithril_scrape_metrics":             {exposureObservation, annReadOnlyNetwork, "Metrics Summary"},
-	"mithril_service_status":             {exposureControl, annReadOnlyLocal, "Mithril Service Status"},
-	"mithril_prepare_service_action":     {exposureControl, annControlPrepare, "Prepare Service Action"},
-	"mithril_execute_service_action":     {exposureControl, annControlExecute, "Execute Service Action"},
-	"mithril_simulate_transaction":       {exposureDiagnostic, annRuntimeDiagnostic, "Simulate Transaction"},
-	"mithril_tail_log":                   {exposureObservation, annReadOnlyLocal, "Recent Node Logs"},
+	"mithril_cross_check_slot":       {exposureObservation, annReadOnlyNetwork, "Compare Cluster Slot"},
+	"mithril_diagnose":               {exposureObservation, annReadOnlyNetwork, "Diagnose Node Health"},
+	"mithril_get_account_info":       {exposureDiagnostic, annRuntimeDiagnostic, "Account Information"},
+	"mithril_get_bank_hash":          {exposureObservation, annReadOnlyNetwork, "Bank Hash"},
+	"mithril_get_block_height":       {exposureObservation, annReadOnlyNetwork, "Block Height"},
+	"mithril_get_latest_blockhash":   {exposureObservation, annReadOnlyNetwork, "Latest Blockhash"},
+	"mithril_get_slot_info":          {exposureObservation, annReadOnlyNetwork, "Current Slot and Epoch"},
+	"mithril_grep_log":               {exposureObservation, annReadOnlyLocal, "Search Node Logs"},
+	"mithril_host_health":            {exposureObservation, annReadOnlyNetwork, "Host and Bootstrap Health"},
+	"mithril_mcp_info":               {exposureObservation, annReadOnlyLocal, "MCP Configuration"},
+	"mithril_metric":                 {exposureObservation, annReadOnlyNetwork, "Prometheus Metric"},
+	"mithril_pprof_heap":             {exposureDiagnostic, annReadOnlyNetwork, "Heap Profile"},
+	"mithril_pprof_profile":          {exposureDiagnostic, annRuntimeDiagnostic, "CPU Profile"},
+	"mithril_read_divergence":        {exposureObservation, annReadOnlyLocal, "Divergence Events"},
+	"mithril_read_replay_timings":    {exposureObservation, annReadOnlyLocal, "Replay Timing Summary"},
+	"mithril_read_rewards":           {exposureObservation, annReadOnlyLocal, "Reward Verification"},
+	"mithril_read_shutdown_state":    {exposureObservation, annReadOnlyLocal, "Shutdown State"},
+	"mithril_scrape_metrics":         {exposureObservation, annReadOnlyNetwork, "Metrics Summary"},
+	"mithril_service_status":         {exposureControl, annReadOnlyLocal, "Mithril Service Status"},
+	"mithril_prepare_service_action": {exposureControl, annControlPrepare, "Prepare Service Action"},
+	"mithril_execute_service_action": {exposureControl, annControlExecute, "Execute Service Action"},
+	"mithril_simulate_transaction":   {exposureDiagnostic, annRuntimeDiagnostic, "Simulate Transaction"},
+	"mithril_tail_log":               {exposureObservation, annReadOnlyLocal, "Recent Node Logs"},
 }
 
 func (e toolExposure) allows(profile Profile) bool {
@@ -368,7 +365,6 @@ func registerTools(server *mcpsdk.Server, cfg Config, approvalKey []byte) {
 	registerDivergenceTool(server, cfg)
 	registerRewardsTool(server, cfg)
 	registerDiagnoseTool(server, cfg)
-	registerLightbringerTools(server, cfg)
 	registerHostTools(server, cfg)
 	registerControlTools(server, cfg, approvalKey)
 }
@@ -376,36 +372,30 @@ func registerTools(server *mcpsdk.Server, cfg Config, approvalKey []byte) {
 type infoInput struct{}
 
 type infoOutput struct {
-	ServerVersion                string               `json:"server_version"`
-	Profile                      Profile              `json:"profile"`
-	DiagnosticToolsExposed       bool                 `json:"diagnostic_tools_exposed"`
-	OperatorToolsExposed         bool                 `json:"operator_tools_exposed"`
-	Limits                       infoLimitsOutput     `json:"limits"`
-	Thresholds                   infoThresholdsOutput `json:"thresholds"`
-	MetricsConfigured            bool                 `json:"metrics_configured"`
-	MetricsOrigin                string               `json:"metrics_origin,omitempty"`
-	RPCConfigured                bool                 `json:"rpc_configured"`
-	RPCOrigin                    string               `json:"rpc_origin,omitempty"`
-	PprofOrigin                  string               `json:"pprof_origin,omitempty"`
-	LogDir                       string               `json:"log_dir,omitempty"`
-	AccountsDir                  string               `json:"accounts_dir,omitempty"`
-	SnapshotsDir                 string               `json:"snapshots_dir,omitempty"`
-	ShredstoreDir                string               `json:"shredstore_dir,omitempty"`
-	StatePath                    string               `json:"state_path,omitempty"`
-	ReplayPath                   string               `json:"replay_path,omitempty"`
-	ReferenceRPC                 bool                 `json:"reference_rpc_configured"`
-	LightbringerGRPCAddr         string               `json:"lightbringer_grpc_addr,omitempty"`
-	LightbringerInfluxConfigured bool                 `json:"lightbringer_influx_configured"`
-	LightbringerInfluxOrigin     string               `json:"lightbringer_influx_origin,omitempty"`
-	LightbringerInfluxDB         string               `json:"lightbringer_influx_database,omitempty"`
-	LightbringerTokenConfigured  *bool                `json:"lightbringer_influx_token_configured,omitempty"`
-	BlockSource                  string               `json:"block_source,omitempty"`
-	LightbringerQuiet            *bool                `json:"lightbringer_quiet,omitempty"`
-	NodeCgroupConfigured         bool                 `json:"node_cgroup_configured"`
-	ControlConfigured            bool                 `json:"control_configured"`
-	ServiceUnit                  string               `json:"service_unit,omitempty"`
-	SystemdScope                 string               `json:"systemd_scope,omitempty"`
-	ApprovalTTLSeconds           uint64               `json:"approval_ttl_seconds,omitempty"`
+	ServerVersion          string               `json:"server_version"`
+	Profile                Profile              `json:"profile"`
+	DiagnosticToolsExposed bool                 `json:"diagnostic_tools_exposed"`
+	OperatorToolsExposed   bool                 `json:"operator_tools_exposed"`
+	Limits                 infoLimitsOutput     `json:"limits"`
+	Thresholds             infoThresholdsOutput `json:"thresholds"`
+	MetricsConfigured      bool                 `json:"metrics_configured"`
+	MetricsOrigin          string               `json:"metrics_origin,omitempty"`
+	RPCConfigured          bool                 `json:"rpc_configured"`
+	RPCOrigin              string               `json:"rpc_origin,omitempty"`
+	PprofOrigin            string               `json:"pprof_origin,omitempty"`
+	LogDir                 string               `json:"log_dir,omitempty"`
+	AccountsDir            string               `json:"accounts_dir,omitempty"`
+	SnapshotsDir           string               `json:"snapshots_dir,omitempty"`
+	ShredstoreDir          string               `json:"shredstore_dir,omitempty"`
+	StatePath              string               `json:"state_path,omitempty"`
+	ReplayPath             string               `json:"replay_path,omitempty"`
+	ReferenceRPC           bool                 `json:"reference_rpc_configured"`
+	BlockSource            string               `json:"block_source,omitempty"`
+	NodeCgroupConfigured   bool                 `json:"node_cgroup_configured"`
+	ControlConfigured      bool                 `json:"control_configured"`
+	ServiceUnit            string               `json:"service_unit,omitempty"`
+	SystemdScope           string               `json:"systemd_scope,omitempty"`
+	ApprovalTTLSeconds     uint64               `json:"approval_ttl_seconds,omitempty"`
 }
 
 type infoThresholdsOutput struct {
@@ -436,7 +426,6 @@ func registerInfoTool(server *mcpsdk.Server, cfg Config) {
 		diagnostic := cfg.Profile == ProfileDiagnostic
 		operator := cfg.Profile == ProfileOperator
 		metricsConfigured := cfg.MetricsURL != ""
-		influxConfigured := cfg.LightbringerInfluxURL != ""
 		frameRate, frameBurst := stdioFrameLimits(cfg)
 		out := infoOutput{
 			ServerVersion:          serverVersion,
@@ -459,22 +448,19 @@ func registerInfoTool(server *mcpsdk.Server, cfg Config) {
 				DiskWarnPercent:     cfg.DiskWarnPercent,
 				DiskCriticalPercent: cfg.DiskCriticalPercent,
 			},
-			MetricsConfigured:            metricsConfigured,
-			RPCConfigured:                cfg.RPCURL != "",
-			RPCOrigin:                    configuredOrigin(cfg.RPCURL),
-			LogDir:                       cfg.LogDir,
-			AccountsDir:                  cfg.AccountsDir,
-			SnapshotsDir:                 cfg.SnapshotsDir,
-			ShredstoreDir:                cfg.ShredstoreDir,
-			StatePath:                    cfg.StatePath,
-			ReplayPath:                   cfg.ReplayPath,
-			ReferenceRPC:                 cfg.ReferenceRPCURL != "",
-			LightbringerGRPCAddr:         cfg.LightbringerGRPCAddr,
-			LightbringerInfluxConfigured: influxConfigured,
-			BlockSource:                  cfg.BlockSource,
-			LightbringerQuiet:            cfg.LightbringerQuiet,
-			NodeCgroupConfigured:         cfg.NodeCgroupPath != "",
-			ControlConfigured:            operator && cfg.ControlEnabled && cfg.ApprovalKeyPath != "",
+			MetricsConfigured:    metricsConfigured,
+			RPCConfigured:        cfg.RPCURL != "",
+			RPCOrigin:            configuredOrigin(cfg.RPCURL),
+			LogDir:               cfg.LogDir,
+			AccountsDir:          cfg.AccountsDir,
+			SnapshotsDir:         cfg.SnapshotsDir,
+			ShredstoreDir:        cfg.ShredstoreDir,
+			StatePath:            cfg.StatePath,
+			ReplayPath:           cfg.ReplayPath,
+			ReferenceRPC:         cfg.ReferenceRPCURL != "",
+			BlockSource:          cfg.BlockSource,
+			NodeCgroupConfigured: cfg.NodeCgroupPath != "",
+			ControlConfigured:    operator && cfg.ControlEnabled && cfg.ApprovalKeyPath != "",
 		}
 		if metricsConfigured {
 			out.MetricsOrigin = sanitizeEndpointForDisplay(cfg.MetricsURL)
@@ -486,11 +472,6 @@ func registerInfoTool(server *mcpsdk.Server, cfg Config) {
 		}
 		if diagnostic {
 			out.PprofOrigin = configuredOrigin(cfg.PprofURL)
-		}
-		if influxConfigured {
-			out.LightbringerInfluxOrigin = configuredOrigin(cfg.LightbringerInfluxURL)
-			out.LightbringerInfluxDB = cfg.LightbringerInfluxDB
-			out.LightbringerTokenConfigured = boolPtr(cfg.LightbringerInfluxTok != "")
 		}
 		return nil, out, nil
 	})

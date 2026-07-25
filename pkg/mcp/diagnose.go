@@ -33,6 +33,8 @@ const (
 	checkSkipped  = "skipped"
 
 	diagnoseReplayCaveat = "phase sum is not wall-clock latency; complete fields do not prove each phase ran, and asynchronous timing can be assigned to another slot"
+	turbineFreshness     = 60 * time.Second // Six normal ten-second publisher intervals.
+	maxUnixTimestamp     = uint64(1<<63 - 1)
 )
 
 // DiagnosticCheck records one health source and its evidence.
@@ -64,9 +66,6 @@ type diagnoseOutput struct {
 	SlotsBehind         *SlotComparison             `json:"slots_behind"`
 	DivergenceArtifacts []DivergenceArtifactSummary `json:"divergence_artifacts"`
 	HostHealth          *hostHealthOutput           `json:"host_health"`
-	LightbringerStream  *streamProbeOutput          `json:"lightbringer_stream,omitempty"`
-	LightbringerIngest  *ingestHealthOutput         `json:"lightbringer_ingest,omitempty"`
-	LightbringerMemory  *lightbringerMemoryOutput   `json:"lightbringer_memory,omitempty"`
 }
 
 // mergeDiagnosticStatus applies the fail-closed overall precedence:
@@ -135,53 +134,90 @@ func incompleteLogScanEvidence(scan LogScanMeta) string {
 	)
 }
 
-func diagnoseLightbringerStreamEvidence(stream streamProbeOutput) (string, string) {
-	switch stream.State {
-	case "active":
-		return checkOK, fmt.Sprintf("Lightbringer stream returned %d messages across %d distinct slots; completion-order delivery is not chain-continuity evidence", stream.SlotsSeen, stream.DistinctSlots)
-	case "unreachable", "backend_error", "incomplete", "no_progress":
-		return checkDegraded, fmt.Sprintf("Lightbringer stream state is %s", stream.State)
-	default:
-		return checkUnknown, fmt.Sprintf("Lightbringer stream state is %s", stream.State)
+func diagnoseTurbineEvidence(summary *MetricsSummary, now time.Time) (string, string) {
+	if summary == nil || summary.TurbineReceiverActive == nil {
+		return checkUnknown, "native Turbine receiver metrics are absent"
 	}
-}
+	if !*summary.TurbineReceiverActive {
+		return checkDegraded, "native Turbine receiver was not active at this scrape"
+	}
+	if summary.TurbineLastPacketTimestampSeconds == nil || *summary.TurbineLastPacketTimestampSeconds == 0 {
+		return checkUnknown, "native Turbine receiver is active but has no packet activity yet"
+	}
+	if *summary.TurbineLastPacketTimestampSeconds > maxUnixTimestamp {
+		return checkUnknown, "native Turbine last-packet timestamp is invalid"
+	}
 
-func diagnoseLightbringerIngestEvidence(ingest ingestHealthOutput) (string, string) {
-	if ingest.LastCompletionAgeSec == nil || ingest.LatestCompletedSlot == nil {
-		return checkUnknown, "Lightbringer has no completed-slot telemetry"
+	packetAt := time.Unix(int64(*summary.TurbineLastPacketTimestampSeconds), 0)
+	if packetAt.After(now) {
+		return checkUnknown, "native Turbine last-packet timestamp is in the future"
 	}
-	if ingest.ObservationState == "stale" {
-		return checkDegraded, fmt.Sprintf("latest Lightbringer completion is %.1fs old with %d completed slots in the five-minute window", *ingest.LastCompletionAgeSec, ingest.CompletedSlots)
+	packetAge := now.Sub(packetAt)
+	if packetAge > turbineFreshness {
+		return checkDegraded, fmt.Sprintf("native Turbine receiver is active but its last packet is %s old", packetAge.Round(time.Second))
 	}
-	if ingest.ObservationState != "observed" {
-		return checkUnknown, fmt.Sprintf("Lightbringer ingest telemetry state is %s", ingest.ObservationState)
+
+	if summary.TurbineLastBlockTimestampSeconds == nil || *summary.TurbineLastBlockTimestampSeconds == 0 {
+		return checkUnknown, "native Turbine packets are fresh but no assembled block has been emitted yet"
 	}
-	if ingest.CompletedSlots == 0 || *ingest.LastCompletionAgeSec > lightbringerIngestWindow.Seconds() {
-		return checkDegraded, fmt.Sprintf("latest Lightbringer completion is %.1fs old with %d completed slots in the five-minute window", *ingest.LastCompletionAgeSec, ingest.CompletedSlots)
+	if *summary.TurbineLastBlockTimestampSeconds > maxUnixTimestamp {
+		return checkUnknown, "native Turbine last-block timestamp is invalid"
 	}
+	blockAt := time.Unix(int64(*summary.TurbineLastBlockTimestampSeconds), 0)
+	if blockAt.After(now) {
+		return checkUnknown, "native Turbine last-block timestamp is in the future"
+	}
+	blockAge := now.Sub(blockAt)
+	if blockAge > turbineFreshness {
+		return checkDegraded, fmt.Sprintf("native Turbine packets are fresh but its last assembled block is %s old", blockAge.Round(time.Second))
+	}
+	if summary.TurbineLastDataSlot == nil || summary.TurbineLastBlockSlot == nil {
+		return checkUnknown, "native Turbine activity timestamps are fresh but last-observed slot metrics are absent"
+	}
+
 	return checkOK, fmt.Sprintf(
-		"latest Lightbringer completion is %.1fs old; %d completed and %d repair-started slots in the five-minute window",
-		*ingest.LastCompletionAgeSec, ingest.CompletedSlots, ingest.WindowRepairStartedSlots,
+		"native Turbine point-in-time activity observed at this scrape: last packet %s ago; latest parsed data-shred slot %d (before leader/signature checks); last assembled block %s ago at slot %d; this does not prove sustained continuity or consensus correctness",
+		packetAge.Round(time.Second), *summary.TurbineLastDataSlot, blockAge.Round(time.Second), *summary.TurbineLastBlockSlot,
 	)
 }
 
-func diagnoseLightbringerMemoryEvidence(memory lightbringerMemoryOutput) (string, string) {
-	if memory.LatestSampleAgeSec == nil || memory.CurrentRSSBytes == nil {
-		return checkUnknown, "Lightbringer has no process-memory telemetry in the 15-minute window"
+func stateEvidenceSlotSpan(earliest, latest *uint64) string {
+	if earliest == nil || latest == nil {
+		return "slot range unavailable"
 	}
-	if memory.ObservationState == "stale" {
-		return checkDegraded, fmt.Sprintf("latest Lightbringer process-memory sample is %.1fs old", *memory.LatestSampleAgeSec)
+	if *earliest == *latest {
+		return fmt.Sprintf("slot %d", *earliest)
 	}
-	if memory.ObservationState != "observed" {
-		return checkUnknown, fmt.Sprintf("Lightbringer memory telemetry state is %s", memory.ObservationState)
+	return fmt.Sprintf("slots %d-%d", *earliest, *latest)
+}
+
+func diagnoseStateEvidence(summary *ShutdownStateSummary) (string, string) {
+	if summary == nil || !summary.SchemaSupported {
+		return checkUnknown, "persisted safety evidence cannot be evaluated without a supported state schema"
 	}
-	if *memory.LatestSampleAgeSec > lightbringerMemoryFreshness.Seconds() {
-		return checkDegraded, fmt.Sprintf("latest Lightbringer process-memory sample is %.1fs old", *memory.LatestSampleAgeSec)
+	if summary.AlpenglowEvidence == nil || summary.ReplayDivergenceEvidence == nil {
+		return checkUnknown, "persisted safety evidence summary is unavailable"
 	}
-	return checkOK, fmt.Sprintf(
-		"Lightbringer RSS is %d bytes from a %.1fs-old sample across %d sample(s); no host-limit health threshold is inferred",
-		*memory.CurrentRSSBytes, *memory.LatestSampleAgeSec, memory.SampleCount,
-	)
+	alpenglow := summary.AlpenglowEvidence
+	replay := summary.ReplayDivergenceEvidence
+	if alpenglow.Count == 0 && replay.Count == 0 {
+		return checkOK, "state contains no unresolved Alpenglow finality or replay-divergence evidence"
+	}
+
+	var evidence []string
+	if alpenglow.Count > 0 {
+		evidence = append(evidence, fmt.Sprintf(
+			"Alpenglow finality evidence is present: count=%d, %s, conflicts=%d; mismatches require an exact finality match before promotion and conflicts require operator triage",
+			alpenglow.Count, stateEvidenceSlotSpan(alpenglow.EarliestSlot, alpenglow.LatestSlot), alpenglow.ConflictCount,
+		))
+	}
+	if replay.Count > 0 {
+		evidence = append(evidence, fmt.Sprintf(
+			"replay-divergence evidence is present: count=%d, %s; folds are blocked at or after the earliest recorded slot until operator triage",
+			replay.Count, stateEvidenceSlotSpan(replay.EarliestSlot, replay.LatestSlot),
+		))
+	}
+	return checkCritical, strings.Join(evidence, "; ")
 }
 
 type diagnoseHostCollector func(context.Context, Config, *MetricsSummary, *ShutdownStateSummary) hostHealthOutput
@@ -189,11 +225,12 @@ type diagnoseHostCollector func(context.Context, Config, *MetricsSummary, *Shutd
 func runDiagnosisWithHostCollector(ctx context.Context, cfg Config, in diagnoseInput, collectHost diagnoseHostCollector) diagnoseOutput {
 	includeLogs := in.IncludeLogs == nil || *in.IncludeLogs
 	includeReplay := in.IncludeReplayTrend == nil || *in.IncludeReplayTrend
+	observedAt := time.Now().UTC()
 
 	out := diagnoseOutput{
 		Status:              diagnosticHealthy,
 		AssessmentScope:     "point_in_time_snapshot",
-		ObservedAt:          time.Now().UTC().Format(time.RFC3339Nano),
+		ObservedAt:          observedAt.Format(time.RFC3339Nano),
 		SafeForAutomation:   false,
 		EvidenceComplete:    true,
 		Checks:              []DiagnosticCheck{},
@@ -233,6 +270,13 @@ func runDiagnosisWithHostCollector(ctx context.Context, cfg Config, in diagnoseI
 		}
 	}
 
+	if strings.ToLower(strings.TrimSpace(cfg.BlockSource)) != "turbine" {
+		addCheck("turbine_receiver", checkSkipped, "configured block source is not native Turbine")
+	} else {
+		status, evidence := diagnoseTurbineEvidence(out.MetricsSnapshot, time.Now().UTC())
+		addCheck("turbine_receiver", status, evidence)
+	}
+
 	// Probe Mithril RPC directly even when no external reference RPC is configured.
 	if cfg.RPCURL == "" {
 		addCheck("rpc", checkUnknown, "Mithril RPC endpoint is not configured")
@@ -249,12 +293,15 @@ func runDiagnosisWithHostCollector(ctx context.Context, cfg Config, in diagnoseI
 	// database can still carry an abnormal shutdown that requires review.
 	if cfg.StatePath == "" {
 		addCheck("state", checkSkipped, "state path is not configured")
+		addCheck("state_evidence", checkSkipped, "persisted safety evidence is unavailable because state is not configured")
 		addCheck("shutdown", checkSkipped, "shutdown history unavailable because state is not configured")
 	} else if state, err := readShutdownStateContext(ctx, cfg.StatePath); err != nil {
 		addCheck("state", checkUnknown, fmt.Sprintf("configured state file is unavailable: %v", err))
+		addCheck("state_evidence", checkUnknown, "persisted safety evidence cannot be evaluated without readable state")
 		addCheck("shutdown", checkUnknown, "shutdown history cannot be evaluated without readable state")
 	} else if state == nil {
 		addCheck("state", checkUnknown, "configured state file does not exist")
+		addCheck("state_evidence", checkUnknown, "persisted safety evidence cannot be evaluated because state is missing")
 		addCheck("shutdown", checkUnknown, "shutdown history cannot be evaluated because state is missing")
 	} else {
 		out.ShutdownState = summarizeShutdownState(state)
@@ -286,6 +333,8 @@ func runDiagnosisWithHostCollector(ctx context.Context, cfg Config, in diagnoseI
 				addCheck("state", checkUnknown, fmt.Sprintf("state stage %q is unrecognized", stage))
 			}
 		}
+		evidenceStatus, evidence := diagnoseStateEvidence(out.ShutdownState)
+		addCheck("state_evidence", evidenceStatus, evidence)
 
 		safeShutdownReason := ""
 		if out.ShutdownState.LastShutdownReason != nil {
@@ -347,7 +396,7 @@ func runDiagnosisWithHostCollector(ctx context.Context, cfg Config, in diagnoseI
 		if len(artifacts) == 0 && (incomplete > 0 || meta.Truncated) {
 			addCheck("divergence_artifacts", checkUnknown, fmt.Sprintf("divergence artifact scan is incomplete: invalid=%d oversized=%d unreadable=%d truncated=%v", meta.Invalid, meta.Oversized, meta.Unreadable, meta.Truncated))
 		} else if len(artifacts) == 0 {
-			addCheck("divergence_artifacts", checkOK, "no bank-hash mismatch artifacts found; this does not prove consensus verification ran or the node is healthy")
+			addCheck("divergence_artifacts", checkOK, "no legacy bank-hash mismatch artifacts found; persisted state evidence is checked separately, and this does not prove consensus verification ran or the node is healthy")
 		} else {
 			var slots []string
 			for _, artifact := range artifacts {
@@ -422,49 +471,11 @@ func runDiagnosisWithHostCollector(ctx context.Context, cfg Config, in diagnoseI
 	}
 	addCheck("host", hostStatus, fmt.Sprintf("host health is %s across %d disk, memory, cgroup, and bootstrap checks; inspect host_health for evidence", host.Status, len(host.Checks)))
 
-	if strings.ToLower(strings.TrimSpace(cfg.BlockSource)) != "lightbringer" {
-		addCheck("lightbringer_stream", checkSkipped, "configured block source is not Lightbringer")
-		addCheck("lightbringer_ingest", checkSkipped, "configured block source is not Lightbringer")
-		addCheck("lightbringer_memory", checkSkipped, "configured block source is not Lightbringer")
-	} else {
-		stream, err := lightbringerStreamProbe(ctx, cfg.LightbringerGRPCAddr)
-		if err != nil {
-			addCheck("lightbringer_stream", checkUnknown, fmt.Sprintf("Lightbringer stream probe failed: %v", err))
-		} else {
-			out.LightbringerStream = &stream
-			status, evidence := diagnoseLightbringerStreamEvidence(stream)
-			addCheck("lightbringer_stream", status, evidence)
-		}
-
-		if cfg.LightbringerInfluxURL == "" {
-			addCheck("lightbringer_ingest", checkSkipped, "Lightbringer InfluxDB is not configured")
-			addCheck("lightbringer_memory", checkSkipped, "Lightbringer InfluxDB is not configured")
-		} else {
-			ingest, err := lightbringerIngestHealth(ctx, cfg, cfg.LightbringerInfluxURL, cfg.LightbringerInfluxDB)
-			if err != nil {
-				addCheck("lightbringer_ingest", checkUnknown, fmt.Sprintf("Lightbringer ingest telemetry is unavailable: %v", err))
-			} else {
-				out.LightbringerIngest = &ingest
-				status, evidence := diagnoseLightbringerIngestEvidence(ingest)
-				addCheck("lightbringer_ingest", status, evidence)
-			}
-
-			memory, err := lightbringerMemory(ctx, cfg, cfg.LightbringerInfluxURL, cfg.LightbringerInfluxDB)
-			if err != nil {
-				addCheck("lightbringer_memory", checkUnknown, fmt.Sprintf("Lightbringer memory telemetry is unavailable: %v", err))
-			} else {
-				out.LightbringerMemory = &memory
-				status, evidence := diagnoseLightbringerMemoryEvidence(memory)
-				addCheck("lightbringer_memory", status, evidence)
-			}
-		}
-	}
-
 	if len(out.Findings) == 0 {
 		out.Findings = append(out.Findings, Finding{
 			Severity: "info",
 			Category: "overall",
-			Message:  "available checks passed; this snapshot does not prove sustained consensus activity, slot progress, voting, rewards, or Lightbringer health",
+			Message:  "available checks passed; this snapshot does not prove sustained consensus activity, slot progress, voting, or rewards",
 		})
 	}
 	return out
@@ -478,7 +489,7 @@ func registerDiagnoseToolWithHostCollector(server *mcpsdk.Server, cfg Config, co
 	addTool(server, cfg, &mcpsdk.Tool{
 		Name:        "mithril_diagnose",
 		Annotations: annReadOnlyNetwork,
-		Description: "Assess configured health sources and return evidence plus healthy, degraded, critical, or unknown. safe_for_automation is false because this snapshot does not prove consensus activity, progress, voting, rewards, or Lightbringer use.",
+		Description: "Assess configured health sources and return evidence plus healthy, degraded, critical, or unknown. safe_for_automation is false because this snapshot does not prove sustained consensus activity, slot progress, voting, or rewards.",
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in diagnoseInput) (*mcpsdk.CallToolResult, diagnoseOutput, error) {
 		return nil, runDiagnosisWithHostCollector(ctx, cfg, in, collectHost), nil
 	})

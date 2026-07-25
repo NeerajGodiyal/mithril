@@ -75,11 +75,31 @@ type SnapshotWorkerPoolUtilizationSummary struct {
 	MayBeStale      bool    `json:"may_be_stale"`
 }
 
+// TurbineShredRejectionsSummary keeps the receiver's fixed rejection reasons
+// outside the bounded generic metric set.
+type TurbineShredRejectionsSummary struct {
+	Parse          *uint64 `json:"parse"`
+	Signature      *uint64 `json:"signature"`
+	MissingLeader  *uint64 `json:"missing_leader"`
+	Assembly       *uint64 `json:"assembly"`
+	SamplesOmitted int     `json:"samples_omitted"`
+}
+
 // MetricsSummary is a structured summary of Mithril's Prometheus metrics.
 // Well-known fields remain present as null when a metric is absent.
 type MetricsSummary struct {
 	Slot                                     *uint64                               `json:"slot"`
 	Epoch                                    *uint64                               `json:"epoch"`
+	TurbineReceiverActive                    *bool                                 `json:"turbine_receiver_active"`
+	TurbinePacketsReceived                   *uint64                               `json:"turbine_packets_received_total"`
+	TurbineDataShredsReceived                *uint64                               `json:"turbine_data_shreds_received_total"`
+	TurbineBlocksEmitted                     *uint64                               `json:"turbine_blocks_emitted_total"`
+	TurbineShredsRejected                    *TurbineShredRejectionsSummary        `json:"turbine_shreds_rejected_total"`
+	TurbineAssemblerActiveSlots              *uint64                               `json:"turbine_assembler_active_slots"`
+	TurbineLastPacketTimestampSeconds        *uint64                               `json:"turbine_last_packet_timestamp_seconds"`
+	TurbineLastDataSlot                      *uint64                               `json:"turbine_last_data_slot"`
+	TurbineLastBlockTimestampSeconds         *uint64                               `json:"turbine_last_block_timestamp_seconds"`
+	TurbineLastBlockSlot                     *uint64                               `json:"turbine_last_block_slot"`
 	ProcessRSSBytes                          *uint64                               `json:"process_resident_memory_bytes"`
 	ProcessVirtualBytes                      *uint64                               `json:"process_virtual_memory_bytes"`
 	SlotReplayMsP50                          *float64                              `json:"slot_replay_duration_ms_p50"`
@@ -99,6 +119,12 @@ type MetricsSummary struct {
 // knownMetricFamilies are summarized or excluded instead of repeated in Other.
 var knownMetricFamilies = map[string]bool{
 	"slot": true, "epoch": true, "slot_replays": true,
+	"turbine_receiver_active": true, "turbine_packets_received_total": true,
+	"turbine_data_shreds_received_total": true, "turbine_blocks_emitted_total": true,
+	"turbine_shreds_rejected_total":  true,
+	"turbine_assembler_active_slots": true, "turbine_last_packet_timestamp_seconds": true,
+	"turbine_last_data_slot": true, "turbine_last_block_timestamp_seconds": true,
+	"turbine_last_block_slot":       true,
 	"process_resident_memory_bytes": true, "process_virtual_memory_bytes": true,
 	"snapshot_tar_bytes_read": true, "snapshot_bootstrap_active": true,
 	"snapshot_bootstrap_started_timestamp_seconds": true, "snapshot_worker_pool_utilization": true,
@@ -118,6 +144,60 @@ func safeUint64(v float64) (uint64, bool) {
 		return 0, false
 	}
 	return uint64(v), true
+}
+
+func familyUint64(families map[string]*dto.MetricFamily, name string) *uint64 {
+	value, ok := familyValue(families, name)
+	if !ok {
+		return nil
+	}
+	result, ok := safeUint64(value)
+	if !ok {
+		return nil
+	}
+	return &result
+}
+
+func turbineShredRejections(families map[string]*dto.MetricFamily) *TurbineShredRejectionsSummary {
+	family := families["turbine_shreds_rejected_total"]
+	if family == nil {
+		return nil
+	}
+	summary := &TurbineShredRejectionsSummary{}
+	for _, metric := range family.Metric {
+		if len(metric.Label) != 1 || metric.Label[0].GetName() != "reason" {
+			summary.SamplesOmitted++
+			continue
+		}
+		value, ok := metricValue(metric)
+		if !ok {
+			summary.SamplesOmitted++
+			continue
+		}
+		result, ok := safeUint64(value)
+		if !ok {
+			summary.SamplesOmitted++
+			continue
+		}
+		switch metric.Label[0].GetValue() {
+		case "parse":
+			summary.Parse = &result
+		case "signature":
+			summary.Signature = &result
+		case "missing_leader":
+			summary.MissingLeader = &result
+		case "assembly":
+			summary.Assembly = &result
+		default:
+			summary.SamplesOmitted++
+		}
+	}
+	if summary.Parse == nil && summary.Signature == nil &&
+		summary.MissingLeader == nil && summary.Assembly == nil &&
+		summary.SamplesOmitted == 0 {
+		return nil
+	}
+	return summary
 }
 
 // parseMetrics builds a MetricsSummary with Prometheus's expfmt parser.
@@ -149,6 +229,19 @@ func parseMetrics(body string) (*MetricsSummary, error) {
 			sum.Epoch = &u
 		}
 	}
+	if v, ok := familyValue(families, "turbine_receiver_active"); ok && (v == 0 || v == 1) {
+		active := v == 1
+		sum.TurbineReceiverActive = &active
+	}
+	sum.TurbinePacketsReceived = familyUint64(families, "turbine_packets_received_total")
+	sum.TurbineDataShredsReceived = familyUint64(families, "turbine_data_shreds_received_total")
+	sum.TurbineBlocksEmitted = familyUint64(families, "turbine_blocks_emitted_total")
+	sum.TurbineShredsRejected = turbineShredRejections(families)
+	sum.TurbineAssemblerActiveSlots = familyUint64(families, "turbine_assembler_active_slots")
+	sum.TurbineLastPacketTimestampSeconds = familyUint64(families, "turbine_last_packet_timestamp_seconds")
+	sum.TurbineLastDataSlot = familyUint64(families, "turbine_last_data_slot")
+	sum.TurbineLastBlockTimestampSeconds = familyUint64(families, "turbine_last_block_timestamp_seconds")
+	sum.TurbineLastBlockSlot = familyUint64(families, "turbine_last_block_slot")
 	if v, ok := familyValue(families, "process_resident_memory_bytes"); ok {
 		if u, ok := safeUint64(v); ok {
 			sum.ProcessRSSBytes = &u

@@ -27,8 +27,7 @@ var MCPCmd = cobra.Command{
 	SilenceUsage:  true,
 	RunE:          runServe,
 	Long: `Run a Model Context Protocol (MCP) server that exposes this node's
-metrics, RPC, logs, state, replay timings, pprof, and the Lightbringer sidecar
-as typed tools.
+metrics, RPC, logs, state, replay timings, and pprof as typed tools.
 
 An MCP client launches the stdio server as a child process. It is not a daemon
 or listening service. For remote use, launch "ssh -T NODE mithril mcp" as the
@@ -62,11 +61,8 @@ clients may launch from another directory. Environment variables take precedence
   MITHRIL_SHREDSTORE_PATH, MITHRIL_STATE_PATH, MITHRIL_REPLAY_PATH
     (default: effective storage layout)
   MITHRIL_NODE_CGROUP_PATH (optional cgroup-v2 directory)
-  MITHRIL_BLOCK_SOURCE, MITHRIL_LIGHTBRINGER_QUIET
+  MITHRIL_BLOCK_SOURCE
   MITHRIL_REFERENCE_RPC_URL (optional trusted external Solana RPC)
-  MITHRIL_LIGHTBRINGER_GRPC_ADDR (default 127.0.0.1:3001; insecure loopback only)
-  MITHRIL_LIGHTBRINGER_INFLUXDB_URL, MITHRIL_LIGHTBRINGER_INFLUXDB_DATABASE
-  MITHRIL_LIGHTBRINGER_INFLUXDB_TOKEN (secret; never reported by MCP)
   MITHRIL_REPLAY_P99_WARN_MS, MITHRIL_SLOTS_BEHIND_WARN
   MITHRIL_DISK_WARN_PERCENT, MITHRIL_DISK_CRITICAL_PERCENT
   MITHRIL_MCP_PROFILE   (monitor, diagnostic, or operator; default monitor)

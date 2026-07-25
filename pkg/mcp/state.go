@@ -32,7 +32,7 @@ const (
 	shutdownError          = "Error"
 )
 
-// ShutdownState contains the operational fields from a schema-v2 state file.
+// ShutdownState contains operational fields from current and legacy state files.
 // Extra preserves unknown fields for forward compatibility.
 type ShutdownState struct {
 	StateSchemaVersion       *uint32 `json:"state_schema_version,omitempty"`
@@ -40,6 +40,8 @@ type ShutdownState struct {
 	LastEpoch                *uint64 `json:"last_epoch,omitempty"`
 	LastBankhash             *string `json:"last_bankhash,omitempty"`
 	LastBlockHeight          *uint64 `json:"last_block_height,omitempty"`
+	LastRootedSlot           *uint64 `json:"last_rooted_slot,omitempty"`
+	LastRootedBankhash       *string `json:"last_rooted_bankhash,omitempty"`
 	SnapshotSlot             *uint64 `json:"snapshot_slot,omitempty"`
 	SnapshotEpoch            *uint64 `json:"snapshot_epoch,omitempty"`
 	Stage                    *string `json:"stage,omitempty"`
@@ -58,6 +60,9 @@ type ShutdownState struct {
 	LastWriterBranch         *string `json:"last_writer_branch,omitempty"`
 	ManifestTransactionCount *uint64 `json:"manifest_transaction_count,omitempty"`
 
+	AlpenglowEvidence        []corestate.AlpenglowFinalityEvidence `json:"alpenglow_finality_evidence,omitempty"`
+	ReplayDivergenceEvidence []corestate.ReplayDivergenceRecord    `json:"replay_divergence_evidence,omitempty"`
+
 	// Extra is retained only for omitted-field metadata and forward-compatible
 	// round trips. MCP responses never include these raw values.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -69,12 +74,14 @@ type ShutdownState struct {
 // lands in Extra.
 var knownStateKeys = map[string]bool{
 	"state_schema_version": true, "last_slot": true, "last_epoch": true,
-	"last_bankhash": true, "last_block_height": true, "snapshot_slot": true,
-	"snapshot_epoch": true, "stage": true, "build_mode": true,
+	"last_bankhash": true, "last_block_height": true, "last_rooted_slot": true,
+	"last_rooted_bankhash": true, "snapshot_slot": true, "snapshot_epoch": true,
+	"stage": true, "build_mode": true,
 	"build_started_at": true, "build_completed_at": true, "cluster": true, "genesis_hash": true,
 	"corruption_reason": true, "corruption_detected_at": true, "last_shutdown_reason": true,
 	"last_shutdown_at": true, "current_run_id": true, "last_writer_version": true,
 	"last_writer_commit": true, "last_writer_branch": true, "manifest_transaction_count": true,
+	"alpenglow_finality_evidence": true, "replay_divergence_evidence": true,
 }
 
 // stateAlias avoids infinite recursion in (Un)MarshalJSON.
@@ -196,6 +203,21 @@ func (r *contextReader) Read(p []byte) (int, error) {
 
 type shutdownStateInput struct{}
 
+// AlpenglowFinalityEvidenceSummary reports only bounded operational metadata.
+type AlpenglowFinalityEvidenceSummary struct {
+	Count         int     `json:"count"`
+	ConflictCount int     `json:"conflict_count"`
+	EarliestSlot  *uint64 `json:"earliest_slot,omitempty"`
+	LatestSlot    *uint64 `json:"latest_slot,omitempty"`
+}
+
+// ReplayDivergenceEvidenceSummary reports only bounded operational metadata.
+type ReplayDivergenceEvidenceSummary struct {
+	Count        int     `json:"count"`
+	EarliestSlot *uint64 `json:"earliest_slot,omitempty"`
+	LatestSlot   *uint64 `json:"latest_slot,omitempty"`
+}
+
 // ShutdownStateSummary omits large manifest and resume values while reporting
 // their names and aggregate size.
 type ShutdownStateSummary struct {
@@ -205,6 +227,8 @@ type ShutdownStateSummary struct {
 	LastEpoch                *uint64  `json:"last_epoch,omitempty"`
 	LastBankhash             *string  `json:"last_bankhash,omitempty"`
 	LastBlockHeight          *uint64  `json:"last_block_height,omitempty"`
+	LastRootedSlot           *uint64  `json:"last_rooted_slot,omitempty"`
+	LastRootedBankhash       *string  `json:"last_rooted_bankhash,omitempty"`
 	SnapshotSlot             *uint64  `json:"snapshot_slot,omitempty"`
 	SnapshotEpoch            *uint64  `json:"snapshot_epoch,omitempty"`
 	Stage                    *string  `json:"stage,omitempty"`
@@ -227,6 +251,9 @@ type ShutdownStateSummary struct {
 	OmittedExtraBytes        int64    `json:"omitted_extra_bytes"`
 	OmittedExtraFields       []string `json:"omitted_extra_fields"`
 	ExtraFieldsTruncated     bool     `json:"extra_fields_truncated"`
+
+	AlpenglowEvidence        *AlpenglowFinalityEvidenceSummary `json:"alpenglow_finality_evidence_summary,omitempty"`
+	ReplayDivergenceEvidence *ReplayDivergenceEvidenceSummary  `json:"replay_divergence_evidence_summary,omitempty"`
 }
 
 func boundedStateString(value *string) *string {
@@ -247,18 +274,68 @@ func boundedStateTimestamp(value *string) *string {
 	return boundedStateString(value)
 }
 
+func summarizeAlpenglowEvidence(evidence []corestate.AlpenglowFinalityEvidence) *AlpenglowFinalityEvidenceSummary {
+	summary := &AlpenglowFinalityEvidenceSummary{Count: len(evidence)}
+	if len(evidence) == 0 {
+		return summary
+	}
+	earliest, latest := evidence[0].Slot, evidence[0].Slot
+	for _, item := range evidence {
+		if item.Slot < earliest {
+			earliest = item.Slot
+		}
+		if item.Slot > latest {
+			latest = item.Slot
+		}
+		if item.Conflict {
+			summary.ConflictCount++
+		}
+	}
+	summary.EarliestSlot = &earliest
+	summary.LatestSlot = &latest
+	return summary
+}
+
+func summarizeReplayDivergenceEvidence(evidence []corestate.ReplayDivergenceRecord) *ReplayDivergenceEvidenceSummary {
+	summary := &ReplayDivergenceEvidenceSummary{Count: len(evidence)}
+	if len(evidence) == 0 {
+		return summary
+	}
+	earliest, latest := evidence[0].Slot, evidence[0].Slot
+	for _, item := range evidence[1:] {
+		if item.Slot < earliest {
+			earliest = item.Slot
+		}
+		if item.Slot > latest {
+			latest = item.Slot
+		}
+	}
+	summary.EarliestSlot = &earliest
+	summary.LatestSlot = &latest
+	return summary
+}
+
 func summarizeShutdownState(state *ShutdownState) *ShutdownStateSummary {
 	if state == nil {
 		return nil
 	}
 	keys, omittedBytes, truncated := boundedExtraMetadata(state.Extra, maxStateExtraFieldNames, maxStateExtraNameBytes)
+	schemaSupported := state.StateSchemaVersion != nil && *state.StateSchemaVersion == corestate.CurrentStateSchemaVersion
+	var alpenglowEvidence *AlpenglowFinalityEvidenceSummary
+	var replayDivergenceEvidence *ReplayDivergenceEvidenceSummary
+	if schemaSupported {
+		alpenglowEvidence = summarizeAlpenglowEvidence(state.AlpenglowEvidence)
+		replayDivergenceEvidence = summarizeReplayDivergenceEvidence(state.ReplayDivergenceEvidence)
+	}
 	return &ShutdownStateSummary{
 		StateSchemaVersion:       state.StateSchemaVersion,
-		SchemaSupported:          state.StateSchemaVersion != nil && *state.StateSchemaVersion == corestate.CurrentStateSchemaVersion,
+		SchemaSupported:          schemaSupported,
 		LastSlot:                 state.LastSlot,
 		LastEpoch:                state.LastEpoch,
 		LastBankhash:             boundedStateString(state.LastBankhash),
 		LastBlockHeight:          state.LastBlockHeight,
+		LastRootedSlot:           state.LastRootedSlot,
+		LastRootedBankhash:       boundedStateString(state.LastRootedBankhash),
 		SnapshotSlot:             state.SnapshotSlot,
 		SnapshotEpoch:            state.SnapshotEpoch,
 		Stage:                    boundedStateString(state.Stage),
@@ -281,6 +358,9 @@ func summarizeShutdownState(state *ShutdownState) *ShutdownStateSummary {
 		OmittedExtraBytes:        omittedBytes,
 		OmittedExtraFields:       keys,
 		ExtraFieldsTruncated:     truncated,
+
+		AlpenglowEvidence:        alpenglowEvidence,
+		ReplayDivergenceEvidence: replayDivergenceEvidence,
 	}
 }
 
@@ -296,7 +376,7 @@ func registerStateTools(server *mcpsdk.Server, cfg Config) {
 		Name:         "mithril_read_shutdown_state",
 		Annotations:  annReadOnlyLocal,
 		OutputSchema: nil,
-		Description:  "Read an operational state summary: schema, replay, snapshot, writer, shutdown, and omitted-field metadata. An Error shutdown means the node stopped abnormally.",
+		Description:  "Read a bounded operational state summary: schema, replay and rooted positions, snapshot, persisted safety evidence, writer, shutdown, and omitted-field metadata. An Error shutdown means the node stopped abnormally.",
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, _ shutdownStateInput) (*mcpsdk.CallToolResult, shutdownStateOutput, error) {
 		statePath, err := requireConfiguredPath(cfg.StatePath, "MITHRIL_STATE_PATH is not configured")
 		if err != nil {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"k8s.io/klog/v2"
 )
@@ -32,6 +33,10 @@ const (
 	DefaultRatePerSecond     = 5.0
 	DefaultRateBurst         = 10
 	DefaultOutputBudgetBytes = 1 << 20 // 1 MiB
+	// DefaultToolCallTimeout bounds one tool call. mithril_diagnose chains
+	// several 10s outbound requests, so the ceiling sits well above them.
+	DefaultToolCallTimeout = 90 * time.Second
+	MaxToolCallTimeout     = 10 * time.Minute
 
 	// The minimum leaves room for the fixed output-rejection result.
 	MinOutputBudgetBytes = 256
@@ -66,7 +71,7 @@ func ParseProfile(raw string) (Profile, error) {
 	}
 }
 
-// ParseBlockSource validates the node block-source name used by diagnostics.
+// ParseBlockSource validates the configured node block source.
 func ParseBlockSource(raw string) (string, error) {
 	source := strings.ToLower(strings.TrimSpace(raw))
 	switch source {
@@ -97,7 +102,6 @@ type Config struct {
 	DiskCriticalPercent float64
 	NodeCgroupPath      string // Explicit cgroup-v2 directory for OOM/limit evidence (optional).
 	BlockSource         string // Configured node block source when known.
-	LightbringerQuiet   *bool  // Configured Lightbringer log mode when known.
 
 	// Operator-only lifecycle controls. The unit and executable are fixed at
 	// process startup; tools never accept either as input.
@@ -108,16 +112,11 @@ type Config struct {
 	ApprovalKeyPath    string
 	ApprovalTTLSeconds uint64
 
-	// Optional Lightbringer stream and InfluxDB endpoints.
-	LightbringerGRPCAddr  string
-	LightbringerInfluxURL string
-	LightbringerInfluxDB  string
-	LightbringerInfluxTok string
-
 	MaxConcurrent     int
 	RatePerSecond     float64
 	RateBurst         int
 	OutputBudgetBytes int
+	ToolCallTimeout   time.Duration
 }
 
 // ConfigFromEnv reads configuration from environment variables with sensible
@@ -141,7 +140,6 @@ func ConfigFromEnv() Config {
 		DiskCriticalPercent: parseEnvPositiveFloat("MITHRIL_DISK_CRITICAL_PERCENT", DefaultDiskCriticalPercent),
 		NodeCgroupPath:      os.Getenv("MITHRIL_NODE_CGROUP_PATH"),
 		BlockSource:         os.Getenv("MITHRIL_BLOCK_SOURCE"),
-		LightbringerQuiet:   parseEnvOptionalBool("MITHRIL_LIGHTBRINGER_QUIET"),
 
 		ControlEnabled:     parseEnvBool("MITHRIL_MCP_CONTROL_ENABLED", false),
 		SystemdUnit:        envOr("MITHRIL_MCP_SYSTEMD_UNIT", "mithril.service"),
@@ -150,15 +148,11 @@ func ConfigFromEnv() Config {
 		ApprovalKeyPath:    os.Getenv("MITHRIL_MCP_APPROVAL_KEY_FILE"),
 		ApprovalTTLSeconds: parseEnvApprovalTTL(),
 
-		LightbringerGRPCAddr:  envOrWhenUnset("MITHRIL_LIGHTBRINGER_GRPC_ADDR", "127.0.0.1:3001"),
-		LightbringerInfluxURL: os.Getenv("MITHRIL_LIGHTBRINGER_INFLUXDB_URL"),
-		LightbringerInfluxDB:  envOr("MITHRIL_LIGHTBRINGER_INFLUXDB_DATABASE", "lightbringer"),
-		LightbringerInfluxTok: os.Getenv("MITHRIL_LIGHTBRINGER_INFLUXDB_TOKEN"),
-
 		MaxConcurrent:     parseEnvPositiveInt("MITHRIL_MCP_MAX_CONCURRENT", DefaultMaxConcurrent),
 		RatePerSecond:     parseEnvPositiveFloat("MITHRIL_MCP_RATE_PER_SECOND", DefaultRatePerSecond),
 		RateBurst:         parseEnvPositiveInt("MITHRIL_MCP_RATE_BURST", DefaultRateBurst),
 		OutputBudgetBytes: parseEnvOutputBudget("MITHRIL_MCP_OUTPUT_BUDGET_BYTES", DefaultOutputBudgetBytes),
+		ToolCallTimeout:   parseEnvToolCallTimeout("MITHRIL_MCP_TOOL_TIMEOUT_SECONDS"),
 	}
 	return cfg.normalized()
 }
@@ -236,7 +230,21 @@ func (cfg Config) normalized() Config {
 	if cfg.OutputBudgetBytes > MaxOutputBudgetBytes {
 		cfg.OutputBudgetBytes = MaxOutputBudgetBytes
 	}
+	if cfg.ToolCallTimeout <= 0 || cfg.ToolCallTimeout > MaxToolCallTimeout {
+		cfg.ToolCallTimeout = DefaultToolCallTimeout
+	}
 	return cfg
+}
+
+// parseEnvToolCallTimeout clamps before scaling so a huge value cannot wrap
+// into a tiny duration.
+func parseEnvToolCallTimeout(key string) time.Duration {
+	maxSecs := int(MaxToolCallTimeout / time.Second)
+	secs := parseEnvPositiveInt(key, int(DefaultToolCallTimeout/time.Second))
+	if secs > maxSecs {
+		secs = maxSecs
+	}
+	return time.Duration(secs) * time.Second
 }
 
 func envOr(key, def string) string {
@@ -318,19 +326,6 @@ func parseEnvBool(key string, def bool) bool {
 		return def
 	}
 	return v
-}
-
-func parseEnvOptionalBool(key string) *bool {
-	raw, configured := os.LookupEnv(key)
-	if !configured || raw == "" {
-		return nil
-	}
-	v, err := strconv.ParseBool(raw)
-	if err != nil {
-		klog.Warningf("mcp: ignoring invalid value for %s=%q", key, raw)
-		return nil
-	}
-	return &v
 }
 
 func parseEnvOutputBudget(key string, def int) int {

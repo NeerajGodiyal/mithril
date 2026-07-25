@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/internal/mcpwire"
@@ -68,8 +69,15 @@ func resolvePinnedIPs(ctx context.Context, resolver ipResolver, u *url.URL) ([]n
 	if len(addresses) == 0 {
 		return nil, fmt.Errorf("URL hostname %q resolved to no addresses", host)
 	}
+	localhost := strings.EqualFold(strings.TrimSuffix(host, "."), "localhost")
 	result := make([]net.IP, 0, len(addresses))
 	for _, address := range addresses {
+		if address.IP.IsLoopback() != localhost {
+			if localhost {
+				return nil, errors.New("localhost must resolve only to loopback addresses")
+			}
+			return nil, errors.New("non-local hostname resolves to a loopback address")
+		}
 		if isBlockedIP(address.IP) {
 			return nil, fmt.Errorf("URL hostname resolves to blocked address: %s", address.IP)
 		}

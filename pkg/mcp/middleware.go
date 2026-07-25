@@ -46,6 +46,7 @@ type toolCallMiddleware struct {
 	gate         chan struct{}
 	rate         *tokenBucket
 	outputBudget int
+	callTimeout  time.Duration
 	telemetry    telemetrySink
 }
 
@@ -59,6 +60,7 @@ func newToolCallMiddlewareWithTelemetry(cfg Config, telemetry telemetrySink) mcp
 		gate:         make(chan struct{}, cfg.MaxConcurrent),
 		rate:         newTokenBucket(cfg.RatePerSecond, cfg.RateBurst, time.Now()),
 		outputBudget: cfg.OutputBudgetBytes,
+		callTimeout:  cfg.ToolCallTimeout,
 		telemetry:    telemetry,
 	}
 	return m.wrap
@@ -132,7 +134,12 @@ func (m *toolCallMiddleware) wrap(next mcpsdk.MethodHandler) mcpsdk.MethodHandle
 			return result, nil
 		}
 
-		result, err, panicked := callToolHandler(ctx, next, method, req)
+		// Bound each call so a slow endpoint or a large scan cannot hold a
+		// concurrency slot indefinitely. Scan loops poll ctx per line.
+		callCtx, cancelCall := context.WithTimeout(ctx, m.callTimeout)
+		defer cancelCall()
+
+		result, err, panicked := callToolHandler(callCtx, next, method, req)
 		if panicked {
 			finish("handler_panic", resultSize(result.(*mcpsdk.CallToolResult)))
 			return result, nil
@@ -157,6 +164,11 @@ func (m *toolCallMiddleware) wrap(next mcpsdk.MethodHandler) mcpsdk.MethodHandle
 		status := "ok"
 		if callResult.IsError {
 			status = "tool_error"
+		}
+		// Only the call budget expiring counts as a timeout; a cancelled parent
+		// is the client going away, which is reported as "cancelled" elsewhere.
+		if ctx.Err() == nil && errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+			status = "timed_out"
 		}
 		finish(status, size)
 		return callResult, nil

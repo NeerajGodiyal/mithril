@@ -199,35 +199,6 @@ func canonicalOrigin(raw string) (string, error) {
 	return u.Scheme + "://" + net.JoinHostPort(host, port), nil
 }
 
-func sameOrigin(a, b string) (bool, error) {
-	aOrigin, err := canonicalOrigin(a)
-	if err != nil {
-		return false, err
-	}
-	bOrigin, err := canonicalOrigin(b)
-	if err != nil {
-		return false, err
-	}
-	return aOrigin == bOrigin, nil
-}
-
-// credentialForTarget binds a configured secret only to the configured
-// endpoint's exact origin. Target selection remains process configuration,
-// never call-time authority.
-func credentialForTarget(configuredURL, targetURL, secret string) (string, error) {
-	if secret == "" || configuredURL == "" {
-		return "", nil
-	}
-	match, err := sameOrigin(configuredURL, targetURL)
-	if err != nil {
-		return "", fmt.Errorf("cannot bind endpoint credential: %w", err)
-	}
-	if !match {
-		return "", nil
-	}
-	return secret, nil
-}
-
 // sanitizeEndpointForDisplay returns a canonical origin with an explicit port
 // and no trailing slash. It is useful in structured endpoint fields and for
 // origin-bound credential diagnostics.
@@ -265,16 +236,22 @@ func sanitizeHTTPError(err error) error {
 	if err == nil {
 		return nil
 	}
-	message := err.Error()
+	message := ""
 	var uerr *url.Error
 	if errors.As(err, &uerr) {
-		cause := "request failed"
+		cause := errors.New("request failed")
 		if uerr.Err != nil {
-			cause = uerr.Err.Error()
+			cause = uerr.Err
 		}
-		message = fmt.Sprintf("%s %s: %s", uerr.Op, sanitizeEndpointForDisplay(uerr.URL), cause)
+		message = fmt.Sprintf(
+			"%s %s: %s",
+			redactUntrustedText(uerr.Op),
+			sanitizeEndpointForDisplay(uerr.URL),
+			redactUntrustedText(cause.Error()),
+		)
+	} else {
+		message = redactUntrustedText(err.Error())
 	}
-	message = redactUntrustedText(message)
 	message, _ = truncateUTF8Bytes(message, maxHTTPErrorBytes)
 	return sanitizedHTTPError{err: err, message: message}
 }
