@@ -122,3 +122,62 @@ func TestStageEpochInflationAccountRollsStateAndCapitalization(t *testing.T) {
 	require.Equal(t, updated.Data, stored.Data)
 	require.Equal(t, updated.Lamports, stored.Lamports)
 }
+
+func TestLoadEpochInflationAccountStateForReplayPrefersStagedBoundaryAccount(t *testing.T) {
+	const (
+		parentSlot   = uint64(7_019_999)
+		boundarySlot = uint64(7_020_008)
+	)
+
+	parentState := EpochInflationAccountState{
+		Current: EpochInflationState{Epoch: 129, SlotsPerEpoch: 54_000},
+	}
+	stagedState := EpochInflationAccountState{
+		Current: EpochInflationState{Epoch: 130, SlotsPerEpoch: 54_000},
+		Prev:    &parentState.Current,
+	}
+	key := VoteRewardAccountAddr()
+	parent := &accounts.Account{
+		Key:  key,
+		Data: encodeEpochInflationAccountState(parentState),
+	}
+	staged := &accounts.Account{
+		Key:  key,
+		Data: encodeEpochInflationAccountState(stagedState),
+	}
+
+	bankAccounts := accounts.NewMemAccounts()
+	require.NoError(t, bankAccounts.SetAccountWithoutLock(key, staged))
+	slotCtx := &sealevel.SlotCtx{
+		Accounts:     bankAccounts,
+		Slot:         boundarySlot,
+		ParentSlot:   parentSlot,
+		UnrootedRead: rewardAccountReader{acct: parent},
+	}
+
+	loaded, err := loadEpochInflationAccountStateForReplay(slotCtx)
+	require.NoError(t, err)
+	require.Equal(t, stagedState, loaded,
+		"the first executed bank after eight boundary skips must see its staged epoch inflation state")
+}
+
+func TestLoadEpochInflationAccountStateForReplayFallsBackToSpeculativeParent(t *testing.T) {
+	parentState := EpochInflationAccountState{
+		Current: EpochInflationState{Epoch: 129, SlotsPerEpoch: 54_000},
+	}
+	key := VoteRewardAccountAddr()
+	parent := &accounts.Account{
+		Key:  key,
+		Data: encodeEpochInflationAccountState(parentState),
+	}
+	slotCtx := &sealevel.SlotCtx{
+		Accounts:     accounts.NewMemAccounts(),
+		Slot:         7_019_999,
+		ParentSlot:   7_019_998,
+		UnrootedRead: rewardAccountReader{acct: parent},
+	}
+
+	loaded, err := loadEpochInflationAccountStateForReplay(slotCtx)
+	require.NoError(t, err)
+	require.Equal(t, parentState, loaded)
+}

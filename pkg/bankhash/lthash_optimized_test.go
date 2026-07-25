@@ -364,13 +364,6 @@ func benchmarkCalculateDeltaLtHash(b *testing.B, accountCount int) {
 			benchmarkDeltaLtHashByte = result.Hash()[0]
 		}
 	})
-	b.Run("worker_partials_unique_input", func(b *testing.B) {
-		b.ReportAllocs()
-		for range b.N {
-			result := calculateDeltaLtHashInternal(ctx, modified, true)
-			benchmarkDeltaLtHashByte = result.Hash()[0]
-		}
-	})
 	b.Run("legacy_per_account", func(b *testing.B) {
 		b.ReportAllocs()
 		for range b.N {

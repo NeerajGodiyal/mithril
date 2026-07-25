@@ -3204,9 +3204,6 @@ func runIncinerator(slotCtx *sealevel.SlotCtx) {
 func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, rentAccts []*accounts.Account) ([]*accounts.Account, []*accounts.Account) {
 	adhRemoved := accountsDeltaHashRemoved(slotCtx)
 	sysvarAccts := collectAndUpdateSysvarAcctsForAdh(slotCtx)
-	if modifiedAccts, ok := uniqueOverlayModifiedAccounts(slotCtx, block.EpochUpdatedAccts, rentAccts, sysvarAccts); ok {
-		return nil, modifiedAccts
-	}
 	var writableAccts []*accounts.Account
 	var alreadyAdded map[solana.PublicKey]bool
 	if !adhRemoved {
@@ -3302,14 +3299,6 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 	if block.Features != nil && block.Features.IsActive(features.RemoveAccountsDeltaHash) {
 		writableMapCapacity = 0
 	}
-	_, overlayBacked := accts.(*accounts.OverlayAccounts)
-	modifiedAccountsFromDelta := overlayBacked &&
-		block.Features != nil &&
-		block.Features.IsActive(features.RemoveAccountsDeltaHash)
-	modifiedMapCapacity := accountMapCapacity
-	if modifiedAccountsFromDelta {
-		modifiedMapCapacity = 0
-	}
 	slotCtx := &sealevel.SlotCtx{
 		Accounts:        accts,
 		ParentAccts:     parentAccts,
@@ -3320,10 +3309,9 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 		FeeRateGovernor: block.FeeRateGovernor,
 		NumSignatures:   block.NumSignatures,
 
-		AcctMapsMu:                &sync.Mutex{},
-		ModifiedAccts:             make(map[solana.PublicKey]bool, modifiedMapCapacity),
-		WritableAccts:             make(map[solana.PublicKey]bool, writableMapCapacity),
-		ModifiedAccountsFromDelta: modifiedAccountsFromDelta,
+		AcctMapsMu:    &sync.Mutex{},
+		ModifiedAccts: make(map[solana.PublicKey]bool, accountMapCapacity),
+		WritableAccts: make(map[solana.PublicKey]bool, writableMapCapacity),
 
 		Blockhash:              block.Blockhash,
 		LastBlockhash:          block.LastBlockhash,
@@ -3938,11 +3926,7 @@ func ProcessBlock(
 
 	start = time.Now()
 	setReplayStage("bankhash")
-	if slotCtx.ModifiedAccountsFromDelta {
-		slotCtx.FinalBankhash = bankhash.CalculateBankHashUniqueModified(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, slotCtx.NumSignatures, block.Blockhash)
-	} else {
-		slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, slotCtx.NumSignatures, block.Blockhash)
-	}
+	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, slotCtx.NumSignatures, block.Blockhash)
 	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
 	if alpenglowClock {
 		footerVerificationStart := time.Now()

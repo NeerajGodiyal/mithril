@@ -364,32 +364,51 @@ func TestCompileLeaderAccountsGatesWritableListOnADH(t *testing.T) {
 	}
 }
 
-func TestOverlayModifiedFastPathAvoidsGlobalMapAndKeepsUniqueNewestValues(t *testing.T) {
+func TestNewSlotCtxRetainsCanonicalModifiedJournalAfterADHRemoval(t *testing.T) {
+	featureSet := features.NewFeaturesDefault()
+	featureSet.EnableFeature(features.RemoveAccountsDeltaHash, 0)
+	parent := accounts.NewMemAccounts()
+	overlay := accounts.NewOverlayAccounts(parent)
+	block := &b.Block{
+		Slot:     43,
+		Features: featureSet,
+	}
+	slotCtx := newSlotCtx(block, overlay, parent, nil, nil, 8)
+
+	key := solana.PublicKey{0xa1}
+	acct := &accounts.Account{Key: key, Lamports: 10}
+	require.NoError(t, slotCtx.SetAccount(key, acct))
+	slotCtx.RecordModifiedAcct(key)
+
+	assert.Contains(t, slotCtx.ModifiedAccts, key,
+		"the canonical journal remains required even when AccountsDeltaHash is removed")
+	assert.Empty(t, slotCtx.WritableAccts,
+		"AccountsDeltaHash removal may omit only the writable-account journal")
+}
+
+func TestCanonicalModifiedJournalDoesNotResurrectBurnedEpochVAT(t *testing.T) {
 	slotCtx, cleanup := newCommitTestSlotCtx()
 	defer cleanup()
 	slotCtx.Features.EnableFeature(features.RemoveAccountsDeltaHash, 0)
 	overlay := accounts.NewOverlayAccounts(slotCtx.Accounts)
 	slotCtx.Accounts = overlay
-	slotCtx.ModifiedAccountsFromDelta = true
 
-	firstKey := solana.PublicKey{0xa1}
-	first := &accounts.Account{Key: firstKey, Lamports: 10}
-	require.NoError(t, slotCtx.SetAccount(firstKey, first))
-	slotCtx.RecordModifiedAcct(firstKey)
-	slotCtx.RecordModifiedAccountStates([]*accounts.Account{first}, []bool{true})
-	assert.Empty(t, slotCtx.ModifiedAccts, "overlay-backed replay must not contend on the legacy modified map")
-
-	replacement := &accounts.Account{Key: firstKey, Lamports: 20}
-	second := &accounts.Account{Key: solana.PublicKey{0xa2}, Lamports: 30}
-	modified, ok := uniqueOverlayModifiedAccounts(slotCtx, []*accounts.Account{replacement, second, nil})
-	require.True(t, ok)
-	require.Len(t, modified, 2)
-	byKey := make(map[solana.PublicKey]*accounts.Account, len(modified))
-	for _, acct := range modified {
-		byKey[acct.Key] = acct
+	stagedVAT := &accounts.Account{
+		Key:       addresses.IncineratorAddr,
+		Lamports:  76_800_000_000,
+		Owner:     addresses.SystemProgramAddr,
+		RentEpoch: math.MaxUint64,
 	}
-	assert.Same(t, replacement, byKey[firstKey])
-	assert.Same(t, second, byKey[second.Key])
+	require.NoError(t, slotCtx.SetAccount(addresses.IncineratorAddr, stagedVAT))
+
+	runIncinerator(slotCtx)
+	require.Equal(t, uint64(76_800_000_000), slotCtx.LamportsBurnt)
+
+	_, modified := compileLeaderAccounts(slotCtx, &b.Block{EpochUpdatedAccts: []*accounts.Account{stagedVAT}}, nil)
+	require.Len(t, modified, 1)
+	require.Equal(t, solana.PublicKey(addresses.IncineratorAddr), modified[0].Key)
+	require.Zero(t, modified[0].Lamports, "bank hash/store input must contain the post-burn account")
+	require.Equal(t, uint64(math.MaxUint64), modified[0].RentEpoch)
 }
 
 func TestCompileWritableAndModifiedAcctsGatesWritableListOnADH(t *testing.T) {
@@ -435,6 +454,8 @@ func TestCompileWritableAndModifiedAcctsGatesWritableListOnADH(t *testing.T) {
 				{Key: sealevel.SysvarSlotHashesAddr, Lamports: 1, Data: slotHashes.MustMarshal()},
 				{Key: sealevel.SysvarSlotHistoryAddr, Lamports: 1, Data: slotHistory.MustMarshal()},
 			}
+			originalRecentData := append([]byte(nil), sysvarAccts[1].Data...)
+			originalSlotHistoryData := append([]byte(nil), sysvarAccts[3].Data...)
 			for _, acct := range sysvarAccts {
 				require.NoError(t, slotCtx.SetAccount(acct.Key, acct))
 			}
@@ -458,6 +479,30 @@ func TestCompileWritableAndModifiedAcctsGatesWritableListOnADH(t *testing.T) {
 				assert.Empty(t, writable)
 			}
 			assert.ElementsMatch(t, wantKeys, replayTestAccountKeys(modified), "ADH removal must not discard LtHash/store inputs")
+
+			modifiedByKey := make(map[solana.PublicKey]*accounts.Account, len(modified))
+			for _, acct := range modified {
+				modifiedByKey[acct.Key] = acct
+			}
+			compiledRecent := modifiedByKey[sealevel.SysvarRecentBlockHashesAddr]
+			compiledSlotHistory := modifiedByKey[sealevel.SysvarSlotHistoryAddr]
+			require.NotNil(t, compiledRecent)
+			require.NotNil(t, compiledSlotHistory)
+			expectedRecentData := sealevel.SysvarCache.RecentBlockHashes.Sysvar.MustMarshal()
+			assert.Equal(t, expectedRecentData, compiledRecent.Data[:len(expectedRecentData)],
+				"bank-hash input must retain the cloned RecentBlockhashes update")
+			assert.Equal(t, slotHistory.MustMarshal(), compiledSlotHistory.Data,
+				"bank-hash input must retain the cloned SlotHistory update")
+
+			storedRecent, err := slotCtx.GetAccount(sealevel.SysvarRecentBlockHashesAddr)
+			require.NoError(t, err)
+			storedSlotHistory, err := slotCtx.GetAccount(sealevel.SysvarSlotHistoryAddr)
+			require.NoError(t, err)
+			assert.Equal(t, originalRecentData, storedRecent.Data,
+				"the test must exercise a clone-only sysvar update, not an overlay write")
+			assert.Equal(t, originalSlotHistoryData, storedSlotHistory.Data,
+				"the test must exercise a clone-only sysvar update, not an overlay write")
+
 			assert.Equal(t, slotCtx.Slot+1, slotHistory.NextSlot, "required sysvar updates must still run when ADH is removed")
 			assert.NotZero(t, slotHistory.Bits.Bits.Blocks[0]&(uint64(1)<<(slotCtx.Slot%64)))
 			assert.Equal(t, slotCtx.Blockhash, (*sealevel.SysvarCache.RecentBlockHashes.Sysvar)[0].Blockhash)

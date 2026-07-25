@@ -79,16 +79,12 @@ type SlotCtx struct {
 	AcctMapsMu      *sync.Mutex // AcctMapsMu protects the next 2 maps
 	ModifiedAccts   map[solana.PublicKey]bool
 	WritableAccts   map[solana.PublicKey]bool
-	// ModifiedAccountsFromDelta lets replay use OverlayAccounts' already-unique
-	// branch delta as the LtHash/store input after AccountsDeltaHash removal.
-	// Transaction publication then avoids the residual global ModifiedAccts lock.
-	ModifiedAccountsFromDelta bool
-	NumSignatures             uint64 // signatures processed in this bank (resets for every child bank)
-	Blockhash                 [32]byte
-	LastBlockhash             [32]byte
-	SlotBank                  SlotBank
-	Features                  *features.Features
-	VoteTimestampMu           *sync.Mutex
+	NumSignatures   uint64 // signatures processed in this bank (resets for every child bank)
+	Blockhash       [32]byte
+	LastBlockhash   [32]byte
+	SlotBank        SlotBank
+	Features        *features.Features
+	VoteTimestampMu *sync.Mutex
 	// VoteTimestampsMu protects VoteTimestamps
 	VoteTimestamps            map[solana.PublicKey]BlockTimestamp
 	VoteAccts                 map[solana.PublicKey]uint64
@@ -471,9 +467,6 @@ func (slotCtx *SlotCtx) SetAccount(pubkey solana.PublicKey, acct *accounts.Accou
 }
 
 func (slotCtx *SlotCtx) RecordModifiedAcct(pubkey solana.PublicKey) {
-	if slotCtx.ModifiedAccountsFromDelta {
-		return
-	}
 	slotCtx.AcctMapsMu.Lock()
 	defer slotCtx.AcctMapsMu.Unlock()
 	if slotCtx.Features == nil || !slotCtx.Features.IsActive(features.RemoveAccountsDeltaHash) {
@@ -485,9 +478,6 @@ func (slotCtx *SlotCtx) RecordModifiedAcct(pubkey solana.PublicKey) {
 func (slotCtx *SlotCtx) RecordModifiedAccountStates(accountStates []*accounts.Account, touched []bool) {
 	if len(accountStates) != len(touched) {
 		panic("account states/touched length mismatch")
-	}
-	if slotCtx.ModifiedAccountsFromDelta {
-		return
 	}
 	slotCtx.AcctMapsMu.Lock()
 	defer slotCtx.AcctMapsMu.Unlock()
