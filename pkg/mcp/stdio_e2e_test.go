@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,14 +15,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/Overclock-Validator/mithril/pkg/overcast"
+	corestate "github.com/Overclock-Validator/mithril/pkg/state"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
-	"google.golang.org/grpc"
 )
 
 const (
@@ -39,8 +35,6 @@ const (
 	stdioE2EReferencePathSecret   = "STDIO_REFERENCE_PATH_SECRET"
 	stdioE2EReferenceQuerySecret  = "STDIO_REFERENCE_QUERY_SECRET"
 	stdioE2EPprofQuerySecret      = "STDIO_PPROF_QUERY_SECRET"
-	stdioE2EInfluxQuerySecret     = "STDIO_INFLUX_QUERY_SECRET"
-	stdioE2EInfluxTokenSecret     = "STDIO_INFLUX_TOKEN_SECRET"
 	stdioE2ELogSecret             = "STDIO_LOG_SECRET"
 	stdioE2ELogBearerSecret       = "STDIO_LOG_BEARER_SECRET"
 	stdioE2EStatePathSecret       = "STDIO_STATE_PATH_SECRET"
@@ -64,64 +58,15 @@ func TestMCPStdioHelperProcess(_ *testing.T) {
 	os.Exit(0)
 }
 
-type stdioE2ERequestTracker struct {
-	mu            sync.Mutex
-	influxAuth    string
-	influxQueries map[string]int
-}
-
-func (r *stdioE2ERequestTracker) recordInflux(value, query string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.influxAuth = value
-	if r.influxQueries == nil {
-		r.influxQueries = make(map[string]int)
-	}
-	r.influxQueries[query]++
-}
-
-func (r *stdioE2ERequestTracker) getInfluxAuth() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.influxAuth
-}
-
-func (r *stdioE2ERequestTracker) getInfluxQueryCount(query string) int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.influxQueries[query]
-}
-
-type stdioE2ESlotServer struct {
-	overcast.UnimplementedSlotStreamServer
-	streams atomic.Int32
-}
-
-func (s *stdioE2ESlotServer) StreamSlots(_ *overcast.SlotStreamRequest, stream grpc.ServerStreamingServer[overcast.SlotResponse]) error {
-	s.streams.Add(1)
-	for _, response := range []*overcast.SlotResponse{
-		{Slot: 500, ParentSlot: 499},
-		{Slot: 501, ParentSlot: 500},
-		{Slot: 503, ParentSlot: 501}, // skipped numeric slots are valid when parents connect
-	} {
-		if err := stream.Send(response); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 type stdioE2EFixture struct {
-	env        []string
-	secrets    []string
-	tracker    *stdioE2ERequestTracker
-	slotServer *stdioE2ESlotServer
+	env     []string
+	secrets []string
 }
 
 func newStdioE2EFixture(t *testing.T) stdioE2EFixture {
 	t.Helper()
 
-	tracker := &stdioE2ERequestTracker{}
+	observedUnix := time.Now().Unix()
 	metricsBody := fmt.Sprintf(`# HELP slot Current slot
 # TYPE slot gauge
 slot 500
@@ -159,10 +104,20 @@ process_virtual_memory_bytes 536870912
 # HELP snapshot_bootstrap_active Snapshot bootstrap state
 # TYPE snapshot_bootstrap_active gauge
 snapshot_bootstrap_active 0
+# TYPE turbine_receiver_active gauge
+turbine_receiver_active 1
+# TYPE turbine_last_packet_timestamp_seconds gauge
+turbine_last_packet_timestamp_seconds %d
+# TYPE turbine_last_data_slot gauge
+turbine_last_data_slot 500
+# TYPE turbine_last_block_timestamp_seconds gauge
+turbine_last_block_timestamp_seconds %d
+# TYPE turbine_last_block_slot gauge
+turbine_last_block_slot 500
 # HELP custom_metric token=%s
 # TYPE custom_metric gauge
 custom_metric{source="https://metrics.invalid/%s?api-key=label-value"} 1
-`, stdioE2EMetricRawSecret, stdioE2EMetricLabelSecret)
+`, observedUnix, observedUnix, stdioE2EMetricRawSecret, stdioE2EMetricLabelSecret)
 
 	metricsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -305,51 +260,6 @@ custom_metric{source="https://metrics.invalid/%s?api-key=label-value"} 1
 	}))
 	t.Cleanup(pprofServer.Close)
 
-	influxServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v3/query_sql" {
-			t.Errorf("Influx request = %s %s", r.Method, r.URL.Path)
-		}
-		if got := r.URL.Query().Get("api-key"); got != stdioE2EInfluxQuerySecret {
-			t.Errorf("Influx query credential = %q", got)
-		}
-		var request struct {
-			DB     string `json:"db"`
-			Query  string `json:"q"`
-			Format string `json:"format"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Errorf("decode Influx request: %v", err)
-		}
-		if request.DB != "lightbringer_e2e" || request.Format != "json" {
-			t.Errorf("Influx request body = %+v", request)
-		}
-		tracker.recordInflux(r.Header.Get("Authorization"), request.Query)
-		w.Header().Set("Content-Type", "application/json")
-		switch request.Query {
-		case lightbringerCompletionSQL:
-			_, _ = io.WriteString(w, `[{"age_seconds":1.5,"latest_slot":500,"completed_slots":100,"repair_started_slots":10,"repaired_completed_slots":8,"unresolved_repair_slots":2,"repair_duration_p95_ms":42.5,"oldest_unresolved_repair_age_seconds":12}]`)
-		case lightbringerMemorySQL:
-			_, _ = io.WriteString(w, `[{"sample_count":30,"latest_sample_age_seconds":2,"current_rss_bytes":104857600,"current_virtual_bytes":536870912,"peak_rss_bytes":106954752,"rss_change_bytes":1048576,"observed_span_seconds":840,"rss_growth_bytes_per_second":1248.304761904762}]`)
-		default:
-			t.Errorf("unexpected Influx query")
-			_, _ = io.WriteString(w, `[]`)
-		}
-	}))
-	t.Cleanup(influxServer.Close)
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen for Lightbringer fixture: %v", err)
-	}
-	slotServer := &stdioE2ESlotServer{}
-	grpcServer := grpc.NewServer()
-	overcast.RegisterSlotStreamServer(grpcServer, slotServer)
-	go func() { _ = grpcServer.Serve(listener) }()
-	t.Cleanup(func() {
-		grpcServer.Stop()
-		_ = listener.Close()
-	})
-
 	root := t.TempDir()
 	logDir := filepath.Join(root, "logs")
 	rewardsDir := filepath.Join(logDir, "rewards")
@@ -371,8 +281,15 @@ custom_metric{source="https://metrics.invalid/%s?api-key=label-value"} 1
 
 	statePath := filepath.Join(root, "mithril_state.json")
 	stdioE2EWriteJSON(t, statePath, map[string]any{
-		"state_schema_version": 2, "stage": "ready", "last_slot": stdioE2ESlot, "last_epoch": 7,
+		"state_schema_version": corestate.CurrentStateSchemaVersion, "stage": "ready", "last_slot": stdioE2ESlot, "last_epoch": 7,
 		"last_bankhash": testHash, "last_block_height": 800, "last_shutdown_reason": "graceful shutdown (Ctrl+C)",
+		"last_rooted_slot": 490, "last_rooted_bankhash": testHash,
+		"alpenglow_finality_evidence": []map[string]any{
+			{"slot": 499, "conflict": true},
+		},
+		"replay_divergence_evidence": []map[string]any{
+			{"slot": 498, "tx_index": 2, "kind": "tx_record", "detail": stdioE2EStatePathSecret},
+		},
 		"operator_note": "https://state.invalid/" + stdioE2EStatePathSecret + "?api-key=" + stdioE2EStateQuerySecret,
 	})
 
@@ -408,7 +325,6 @@ custom_metric{source="https://metrics.invalid/%s?api-key=label-value"} 1
 	rpcURL := rpcServer.URL + "/rpc/" + stdioE2ERPCPathSecret + "?api-key=" + stdioE2ERPCQuerySecret
 	referenceURL := referenceServer.URL + "/reference/" + stdioE2EReferencePathSecret + "?api-key=" + stdioE2EReferenceQuerySecret
 	pprofURL := pprofServer.URL + "/ignored?api-key=" + stdioE2EPprofQuerySecret
-	influxURL := influxServer.URL + "/ignored?api-key=" + stdioE2EInfluxQuerySecret
 
 	return stdioE2EFixture{
 		env: []string{
@@ -426,11 +342,7 @@ custom_metric{source="https://metrics.invalid/%s?api-key=label-value"} 1
 			"MITHRIL_REFERENCE_RPC_URL=" + referenceURL,
 			"MITHRIL_REPLAY_P99_WARN_MS=400",
 			"MITHRIL_SLOTS_BEHIND_WARN=5",
-			"MITHRIL_LIGHTBRINGER_GRPC_ADDR=" + listener.Addr().String(),
-			"MITHRIL_LIGHTBRINGER_INFLUXDB_URL=" + influxURL,
-			"MITHRIL_LIGHTBRINGER_INFLUXDB_DATABASE=lightbringer_e2e",
-			"MITHRIL_LIGHTBRINGER_INFLUXDB_TOKEN=" + stdioE2EInfluxTokenSecret,
-			"MITHRIL_BLOCK_SOURCE=lightbringer",
+			"MITHRIL_BLOCK_SOURCE=turbine",
 			"MITHRIL_MCP_MAX_CONCURRENT=64",
 			"MITHRIL_MCP_RATE_PER_SECOND=10000",
 			"MITHRIL_MCP_RATE_BURST=128",
@@ -439,12 +351,11 @@ custom_metric{source="https://metrics.invalid/%s?api-key=label-value"} 1
 		secrets: []string{
 			stdioE2EMetricsPathSecret, stdioE2EMetricsQuerySecret, stdioE2EMetricLabelSecret, stdioE2EMetricRawSecret,
 			stdioE2ERPCPathSecret, stdioE2ERPCQuerySecret, stdioE2EReferencePathSecret, stdioE2EReferenceQuerySecret,
-			stdioE2EPprofQuerySecret, stdioE2EInfluxQuerySecret, stdioE2EInfluxTokenSecret,
+			stdioE2EPprofQuerySecret,
 			stdioE2ELogSecret, stdioE2ELogBearerSecret, stdioE2EStatePathSecret, stdioE2EStateQuerySecret,
 			stdioE2EReplaySecret, stdioE2EDivergencePathSecret, stdioE2EDivergenceQuerySecret,
 			"SUPER_PATH_SECRET", "SUPER_QUERY_SECRET", "SUPER_ERROR_SECRET",
 		},
-		tracker: tracker, slotServer: slotServer,
 	}
 }
 
@@ -473,29 +384,26 @@ type stdioE2EToolCase struct {
 
 func stdioE2EToolCases() map[string]stdioE2EToolCase {
 	return map[string]stdioE2EToolCase{
-		"mithril_mcp_info":                   {arguments: map[string]any{}, expectedText: []string{`"server_version":"` + serverVersion + `"`, `"profile":"diagnostic"`, `"max_concurrent":64`, `"rate_burst":128`, `"max_input_frame_bytes":65536`, `"input_frames_per_second":1000`, `"input_frame_burst":128`, `"reference_rpc_configured":true`}},
-		"mithril_scrape_metrics":             {arguments: map[string]any{"include_raw": true}, expectedText: []string{`"slot":500`, `"epoch":7`, `"raw":`, "[REDACTED]"}},
-		"mithril_metric":                     {arguments: map[string]any{"metric": "slot"}, expectedText: []string{`"metric":"slot"`, `"value":500`}},
-		"mithril_get_slot_info":              {arguments: map[string]any{}, expectedText: []string{`"absolute_slot":500`, `"block_height":800`, `"epoch":7`}},
-		"mithril_get_bank_hash":              {arguments: map[string]any{"slot": stdioE2ESlot}, expectedText: []string{`"slot":500`, `"bank_hash":"` + testHash + `"`}},
-		"mithril_get_latest_blockhash":       {arguments: map[string]any{}, expectedText: []string{`"slot":500`, `"last_valid_block_height":900`, `"status":"ready"`, `"consistency":"node_reported_non_atomic"`, `"finality":"local_unfinalized"`}},
-		"mithril_get_block_height":           {arguments: map[string]any{}, expectedText: []string{`"block_height":800`, `"finality":"local_unfinalized"`}},
-		"mithril_get_account_info":           {arguments: map[string]any{"pubkey": "11111111111111111111111111111111", "data_length": uint64(3)}, expectedText: []string{`"found":true`, `"lamports":"9007199254740993"`, `"rent_epoch":"18446744073709551615"`, `"data_length":3`}},
-		"mithril_simulate_transaction":       {arguments: map[string]any{"transaction": "AQ=="}, expectedText: []string{`"slot":500`, `"err":null`, `"fee":9007199254740993`, `"unitsConsumed":321`, `"simulation complete"`}},
-		"mithril_tail_log":                   {arguments: map[string]any{"lines": 10, "level": "info"}, expectedText: []string{`"count":3`, `"startup complete"`, "[REDACTED]"}},
-		"mithril_grep_log":                   {arguments: map[string]any{"pattern": "startup", "max_matches": 10}, expectedText: []string{`"total_matches":1`, `"returned":1`, `"startup complete"`}},
-		"mithril_read_shutdown_state":        {arguments: map[string]any{}, expectedText: []string{`"found":true`, `"schema_supported":true`, `"parsed_shutdown_reason":"Normal"`, `"is_error_shutdown":false`, `"omitted_extra_fields":["operator_note"]`}},
-		"mithril_read_replay_timings":        {arguments: map[string]any{"last_n": minReplayHealthSamples, "timing_field": "block_total"}, expectedText: []string{`"timing_field":"block_total"`, `"field_found":true`, `"count":20`, `"source_layout":"flat"`, "[REDACTED]"}},
-		"mithril_pprof_heap":                 {arguments: map[string]any{}, expectedText: []string{`"profile_bytes_b64":"aGVhcC1wcm9maWxl"`, `"size_bytes":12`}},
-		"mithril_pprof_profile":              {arguments: map[string]any{"seconds": 1}, expectedText: []string{`"profile_bytes_b64":"Y3B1LXByb2ZpbGU="`, `"size_bytes":11`}},
-		"mithril_cross_check_slot":           {arguments: map[string]any{"commitment": "confirmed"}, expectedText: []string{`"mithril_slot":500`, `"reference_slot":500`, `"slots_behind":0`, `"status":"in_sync"`}},
-		"mithril_read_divergence":            {arguments: map[string]any{}, expectedText: []string{`"diverged":true`, `"count":1`, `"scan_complete":true`, `"checked_slot":500`, `"omitted_extra_fields":["operator_note"]`}},
-		"mithril_read_rewards":               {arguments: map[string]any{"slot": stdioE2ESlot}, expectedText: []string{`"found":true`, `"artifact_state":"complete"`, `"verification_state":"reference_matched"`, `"summary_only":true`}},
-		"mithril_diagnose":                   {arguments: map[string]any{}, expectedText: []string{`"status":"critical"`, `"evidence_complete":true`, `"name":"divergence_artifacts","status":"critical"`, "[REDACTED]"}},
-		"mithril_lightbringer_stream_probe":  {arguments: map[string]any{}, expectedText: []string{`"state":"active"`, `"activity_observed":true`, `"slots_seen":3`, `"distinct_slots":3`}},
-		"mithril_lightbringer_ingest_health": {arguments: map[string]any{}, expectedText: []string{`"observation_state":"observed"`, `"last_completion_age_seconds":1.5`, `"latest_completed_slot":500`, `"window_repair_started_slots":10`}},
-		"mithril_lightbringer_memory":        {arguments: map[string]any{}, expectedText: []string{`"observation_state":"observed"`, `"sample_count":30`, `"current_rss_bytes":104857600`, `"rss_growth_bytes_per_second":1248.304761904762`}},
-		"mithril_host_health":                {arguments: map[string]any{}, expectedText: []string{`"assessment_scope":"point_in_time_host_snapshot"`, `"node_rss_bytes":104857600`, `"assessment":"ready"`}},
+		"mithril_mcp_info":             {arguments: map[string]any{}, expectedText: []string{`"server_version":"` + serverVersion + `"`, `"profile":"diagnostic"`, `"max_concurrent":64`, `"rate_burst":128`, `"max_input_frame_bytes":65536`, `"input_frames_per_second":1000`, `"input_frame_burst":128`, `"reference_rpc_configured":true`}},
+		"mithril_scrape_metrics":       {arguments: map[string]any{"include_raw": true}, expectedText: []string{`"slot":500`, `"epoch":7`, `"raw":`, "[REDACTED]"}},
+		"mithril_metric":               {arguments: map[string]any{"metric": "slot"}, expectedText: []string{`"metric":"slot"`, `"value":500`}},
+		"mithril_get_slot_info":        {arguments: map[string]any{}, expectedText: []string{`"absolute_slot":500`, `"block_height":800`, `"epoch":7`}},
+		"mithril_get_bank_hash":        {arguments: map[string]any{"slot": stdioE2ESlot}, expectedText: []string{`"slot":500`, `"bank_hash":"` + testHash + `"`}},
+		"mithril_get_latest_blockhash": {arguments: map[string]any{}, expectedText: []string{`"slot":500`, `"last_valid_block_height":900`, `"status":"ready"`, `"consistency":"node_reported_non_atomic"`, `"finality":"local_unfinalized"`}},
+		"mithril_get_block_height":     {arguments: map[string]any{}, expectedText: []string{`"block_height":800`, `"finality":"local_unfinalized"`}},
+		"mithril_get_account_info":     {arguments: map[string]any{"pubkey": "11111111111111111111111111111111", "data_length": uint64(3)}, expectedText: []string{`"found":true`, `"lamports":"9007199254740993"`, `"rent_epoch":"18446744073709551615"`, `"data_length":3`}},
+		"mithril_simulate_transaction": {arguments: map[string]any{"transaction": "AQ=="}, expectedText: []string{`"slot":500`, `"err":null`, `"fee":9007199254740993`, `"unitsConsumed":321`, `"simulation complete"`}},
+		"mithril_tail_log":             {arguments: map[string]any{"lines": 10, "level": "info"}, expectedText: []string{`"count":3`, `"startup complete"`, "[REDACTED]"}},
+		"mithril_grep_log":             {arguments: map[string]any{"pattern": "startup", "max_matches": 10}, expectedText: []string{`"total_matches":1`, `"returned":1`, `"startup complete"`}},
+		"mithril_read_shutdown_state":  {arguments: map[string]any{}, expectedText: []string{`"found":true`, `"schema_supported":true`, `"last_rooted_slot":490`, `"alpenglow_finality_evidence_summary":{`, `"conflict_count":1`, `"earliest_slot":499`, `"replay_divergence_evidence_summary":{`, `"earliest_slot":498`, `"parsed_shutdown_reason":"Normal"`, `"is_error_shutdown":false`, `"omitted_extra_fields":["operator_note"]`}},
+		"mithril_read_replay_timings":  {arguments: map[string]any{"last_n": minReplayHealthSamples, "timing_field": "block_total"}, expectedText: []string{`"timing_field":"block_total"`, `"field_found":true`, `"count":20`, `"source_layout":"flat"`, "[REDACTED]"}},
+		"mithril_pprof_heap":           {arguments: map[string]any{}, expectedText: []string{`"profile_bytes_b64":"aGVhcC1wcm9maWxl"`, `"size_bytes":12`}},
+		"mithril_pprof_profile":        {arguments: map[string]any{"seconds": 1}, expectedText: []string{`"profile_bytes_b64":"Y3B1LXByb2ZpbGU="`, `"size_bytes":11`}},
+		"mithril_cross_check_slot":     {arguments: map[string]any{"commitment": "confirmed"}, expectedText: []string{`"mithril_slot":500`, `"reference_slot":500`, `"slots_behind":0`, `"status":"in_sync"`}},
+		"mithril_read_divergence":      {arguments: map[string]any{}, expectedText: []string{`"diverged":true`, `"count":1`, `"scan_complete":true`, `"checked_slot":500`, `"omitted_extra_fields":["operator_note"]`}},
+		"mithril_read_rewards":         {arguments: map[string]any{"slot": stdioE2ESlot}, expectedText: []string{`"found":true`, `"artifact_state":"complete"`, `"verification_state":"reference_matched"`, `"summary_only":true`}},
+		"mithril_diagnose":             {arguments: map[string]any{}, expectedText: []string{`"status":"critical"`, `"evidence_complete":true`, `"name":"turbine_receiver","status":"ok"`, `"name":"state_evidence","status":"critical"`, `"name":"divergence_artifacts","status":"critical"`, "[REDACTED]"}},
+		"mithril_host_health":          {arguments: map[string]any{}, expectedText: []string{`"assessment_scope":"point_in_time_host_snapshot"`, `"node_rss_bytes":104857600`, `"assessment":"ready"`}},
 	}
 }
 
@@ -638,18 +546,6 @@ func TestMCPStdioSubprocessE2E(t *testing.T) {
 		}
 	}
 
-	if got := fixture.tracker.getInfluxAuth(); got != "Bearer "+stdioE2EInfluxTokenSecret {
-		t.Errorf("Influx Authorization = %q, want configured origin-bound bearer token", got)
-	}
-	if got := fixture.tracker.getInfluxQueryCount(lightbringerCompletionSQL); got != 2 {
-		t.Errorf("Lightbringer completion query count = %d, want 2", got)
-	}
-	if got := fixture.tracker.getInfluxQueryCount(lightbringerMemorySQL); got != 2 {
-		t.Errorf("Lightbringer memory query count = %d, want 2", got)
-	}
-	if got := fixture.slotServer.streams.Load(); got != 2 {
-		t.Errorf("Lightbringer stream count = %d, want 2", got)
-	}
 }
 
 func TestMCPStdioSubprocessRejectsOversizedInputFrame(t *testing.T) {

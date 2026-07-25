@@ -3,6 +3,7 @@ package mcp
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 var admissionEnvKeys = []string{
@@ -12,7 +13,6 @@ var admissionEnvKeys = []string{
 	"MITHRIL_MCP_RATE_BURST",
 	"MITHRIL_MCP_OUTPUT_BUDGET_BYTES",
 	"MITHRIL_REPLAY_P99_WARN_MS",
-	"MITHRIL_LIGHTBRINGER_QUIET",
 	"MITHRIL_MCP_APPROVAL_TTL_SECONDS",
 }
 
@@ -46,7 +46,6 @@ func TestConfigFromEnvAdmissionOverridesAndClamp(t *testing.T) {
 	t.Setenv("MITHRIL_MCP_RATE_BURST", "3")
 	t.Setenv("MITHRIL_MCP_OUTPUT_BUDGET_BYTES", "999999999")
 	t.Setenv("MITHRIL_REPLAY_P99_WARN_MS", "321.5")
-	t.Setenv("MITHRIL_LIGHTBRINGER_QUIET", "false")
 
 	cfg := ConfigFromEnv()
 	if cfg.Profile != ProfileDiagnostic || cfg.MaxConcurrent != 7 || cfg.RatePerSecond != 2.5 || cfg.RateBurst != 3 || cfg.ReplayP99WarnMs != 321.5 {
@@ -54,9 +53,6 @@ func TestConfigFromEnvAdmissionOverridesAndClamp(t *testing.T) {
 	}
 	if cfg.OutputBudgetBytes != MaxOutputBudgetBytes {
 		t.Fatalf("OutputBudgetBytes = %d, want hard maximum %d", cfg.OutputBudgetBytes, MaxOutputBudgetBytes)
-	}
-	if cfg.LightbringerQuiet == nil || *cfg.LightbringerQuiet {
-		t.Fatalf("LightbringerQuiet = %v, want configured false", cfg.LightbringerQuiet)
 	}
 }
 
@@ -139,9 +135,8 @@ func TestConfigPreservesExplicitApprovalTTLForValidation(t *testing.T) {
 func TestConfigFromEnvPreservesExplicitlyDisabledEndpoints(t *testing.T) {
 	t.Setenv("MITHRIL_METRICS_URL", "")
 	t.Setenv("MITHRIL_RPC_URL", "")
-	t.Setenv("MITHRIL_LIGHTBRINGER_GRPC_ADDR", "")
 	cfg := ConfigFromEnv()
-	if cfg.MetricsURL != "" || cfg.RPCURL != "" || cfg.LightbringerGRPCAddr != "" {
+	if cfg.MetricsURL != "" || cfg.RPCURL != "" {
 		t.Fatalf("explicitly disabled endpoints were defaulted: %+v", cfg)
 	}
 }
@@ -156,5 +151,19 @@ func TestParseBlockSource(t *testing.T) {
 		if _, err := ParseBlockSource(source); err == nil {
 			t.Errorf("invalid block source %q was accepted", source)
 		}
+	}
+}
+
+func TestToolCallTimeoutFromEnv(t *testing.T) {
+	t.Setenv("MITHRIL_MCP_TOOL_TIMEOUT_SECONDS", "45")
+	if got := ConfigFromEnv().normalized().ToolCallTimeout; got != 45*time.Second {
+		t.Errorf("ToolCallTimeout = %v, want 45s", got)
+	}
+	t.Setenv("MITHRIL_MCP_TOOL_TIMEOUT_SECONDS", "0")
+	if got := ConfigFromEnv().normalized().ToolCallTimeout; got != DefaultToolCallTimeout {
+		t.Errorf("invalid value should fall back to default, got %v", got)
+	}
+	if got := (Config{ToolCallTimeout: MaxToolCallTimeout + time.Second}).normalized().ToolCallTimeout; got != DefaultToolCallTimeout {
+		t.Errorf("over-max should fall back to default, got %v", got)
 	}
 }

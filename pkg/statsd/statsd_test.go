@@ -153,6 +153,98 @@ func TestBeginSnapshotBootstrap(t *testing.T) {
 	}
 }
 
+func TestSendTurbineReceiverMetrics(t *testing.T) {
+	readGauge := func(metric Metric) float64 {
+		m := &dto.Metric{}
+		if err := metricsCollection.gauges[metric].WithLabelValues().Write(m); err != nil {
+			t.Fatal(err)
+		}
+		return m.GetGauge().GetValue()
+	}
+	readCounter := func(metric Metric, labels ...string) float64 {
+		m := &dto.Metric{}
+		if err := metricsCollection.counters[metric].WithLabelValues(labels...).Write(m); err != nil {
+			t.Fatal(err)
+		}
+		return m.GetCounter().GetValue()
+	}
+
+	beforePackets := readCounter(TurbinePacketsReceived)
+	beforeData := readCounter(TurbineDataShredsReceived)
+	beforeBlocks := readCounter(TurbineBlocksEmitted)
+	beforeRejected := map[string]float64{}
+	for _, reason := range []string{"parse", "signature", "missing_leader", "assembly"} {
+		beforeRejected[reason] = readCounter(TurbineShredsRejected, reason)
+	}
+
+	first := TurbineReceiverSnapshot{
+		Packets:         10,
+		DataShreds:      7,
+		ParseErrors:     1,
+		SignatureErrors: 2,
+		MissingLeaders:  3,
+		AssemblyErrors:  4,
+		BlocksEmitted:   5,
+		LastPacketUnix:  1_700_000_000,
+		LastDataSlot:    123,
+		LastBlockUnix:   1_700_000_001,
+		LastBlockSlot:   122,
+		ActiveSlots:     6,
+	}
+	SendTurbineReceiverMetrics(first, TurbineReceiverSnapshot{}, true)
+
+	if got := readCounter(TurbinePacketsReceived) - beforePackets; got != 10 {
+		t.Errorf("packet delta = %v, want 10", got)
+	}
+	if got := readCounter(TurbineDataShredsReceived) - beforeData; got != 7 {
+		t.Errorf("data-shred delta = %v, want 7", got)
+	}
+	if got := readCounter(TurbineBlocksEmitted) - beforeBlocks; got != 5 {
+		t.Errorf("block delta = %v, want 5", got)
+	}
+	for reason, want := range map[string]float64{
+		"parse": 1, "signature": 2, "missing_leader": 3, "assembly": 4,
+	} {
+		if got := readCounter(TurbineShredsRejected, reason) - beforeRejected[reason]; got != want {
+			t.Errorf("%s rejection delta = %v, want %v", reason, got, want)
+		}
+	}
+	for metric, want := range map[Metric]float64{
+		TurbineReceiverActive:       1,
+		TurbineAssemblerActiveSlots: 6,
+		TurbineLastPacketTimestamp:  1_700_000_000,
+		TurbineLastDataSlot:         123,
+		TurbineLastBlockTimestamp:   1_700_000_001,
+		TurbineLastBlockSlot:        122,
+	} {
+		if got := readGauge(metric); got != want {
+			t.Errorf("%s = %v, want %v", metric, got, want)
+		}
+	}
+
+	second := first
+	second.Packets += 4
+	second.DataShreds += 3
+	second.BlocksEmitted += 2
+	second.ParseErrors++
+	SendTurbineReceiverMetrics(second, first, true)
+	if got := readCounter(TurbinePacketsReceived) - beforePackets; got != 14 {
+		t.Errorf("packet total after delta = %v, want 14", got)
+	}
+	if got := readCounter(TurbineShredsRejected, "parse") - beforeRejected["parse"]; got != 2 {
+		t.Errorf("parse total after delta = %v, want 2", got)
+	}
+
+	reset := TurbineReceiverSnapshot{Packets: 2, DataShreds: 1, BlocksEmitted: 1}
+	SendTurbineReceiverMetrics(reset, second, false)
+	if got := readCounter(TurbinePacketsReceived) - beforePackets; got != 16 {
+		t.Errorf("packet total after receiver reset = %v, want 16", got)
+	}
+	if got := readGauge(TurbineReceiverActive); got != 0 {
+		t.Errorf("receiver active after stop = %v, want 0", got)
+	}
+}
+
 func TestTimingWithLabelValues(t *testing.T) {
 	val := uint64(25)
 	Timing(PreprocessBlock, val, []string{"testLabel"})
@@ -304,30 +396,6 @@ func TestBlockProductionMetricLabelsStayBounded(t *testing.T) {
 	assert.Equal(t, []string{"outcome"}, MetricToLabels[BlockProductionStartDecisionTickDeliveryLag])
 	assert.Equal(t, []string{"outcome"}, MetricToLabels[BlockProductionStartDecisionTickWork])
 	assert.Equal(t, []string{"result"}, MetricToLabels[BlockProductionStartAttempt])
-}
-
-func TestSlotReplayDurationUsesMillisecondBuckets(t *testing.T) {
-	histogramVec := metricsCollection.histograms[SlotReplayDurationMs]
-	metric, err := histogramVec.GetMetricWithLabelValues()
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded := &dto.Metric{}
-	if err := metric.(prometheus.Metric).Write(encoded); err != nil {
-		t.Fatal(err)
-	}
-
-	want := map[float64]bool{50: false, 400: false, 800: false, 10000: false}
-	for _, bucket := range encoded.GetHistogram().GetBucket() {
-		if _, ok := want[bucket.GetUpperBound()]; ok {
-			want[bucket.GetUpperBound()] = true
-		}
-	}
-	for upperBound, found := range want {
-		if !found {
-			t.Errorf("slot replay histogram is missing %gms bucket", upperBound)
-		}
-	}
 }
 
 func TestBlockReplayMetrics(t *testing.T) {

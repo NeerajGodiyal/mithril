@@ -29,15 +29,6 @@ func mustMlog(t *testing.T, s string) LogLine {
 	return l
 }
 
-func mustSimpleLogger(t *testing.T, s string) LogLine {
-	t.Helper()
-	l, ok := parseSimpleLoggerLine(s)
-	if !ok {
-		t.Fatalf("parseSimpleLoggerLine(%q) failed", s)
-	}
-	return l
-}
-
 func mustSinceFilter(t *testing.T, s string) logSinceFilter {
 	t.Helper()
 	filter, err := parseLogSinceFilter(s)
@@ -165,79 +156,6 @@ func TestParseLogDispatcher(t *testing.T) {
 		if _, ok := parseLogLine(s); ok {
 			t.Errorf("dispatcher should reject %q", s)
 		}
-	}
-}
-
-func TestParseSimpleLogger(t *testing.T) {
-	cases := []struct {
-		line   string
-		level  LogLevel
-		target string
-		msg    string
-	}{
-		{"2026-07-20T10:11:12.123456Z INFO  [lightbringer] stream ready", LevelInfo, "lightbringer", "stream ready"},
-		{"2026-07-20T10:11:13Z WARN  [lightbringer::repair] slot delayed", LevelWarn, "lightbringer::repair", "slot delayed"},
-		{"2026-07-20T10:11:14+00:00 ERROR [overcast::writer] sink failed", LevelError, "overcast::writer", "sink failed"},
-	}
-	for _, tc := range cases {
-		line := mustSimpleLogger(t, tc.line)
-		if line.Level != tc.level || line.Target == nil || *line.Target != tc.target || line.Message != tc.msg || line.Timestamp == "" || line.File != nil || line.ElapsedMs != nil {
-			t.Errorf("parse %q = %+v", tc.line, line)
-		}
-	}
-	for _, line := range []string{"", "INFO [target] no timestamp", "2026-07-20T10:11:12Z TRACE [target] trace", "2026-07-20T10:11:12Z INFO no-target"} {
-		if _, ok := parseSimpleLoggerLine(line); ok {
-			t.Errorf("parseSimpleLoggerLine(%q) should fail", line)
-		}
-	}
-}
-
-func TestLightbringerLogSource(t *testing.T) {
-	root := t.TempDir()
-	run := filepath.Join(root, "20260720-run")
-	if err := os.Mkdir(run, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeNamedLogFixture(t, run, "lightbringer.log",
-		"2026-07-20T10:11:12Z INFO  [lightbringer::stream] ready\n"+
-			"2026-07-20T10:11:13Z WARN  [lightbringer::repair] delayed slot\n")
-	writeLogFixture(t, run, "(+    1s) mithril only\n")
-	if err := os.Symlink(filepath.Base(run), filepath.Join(root, "latest")); err != nil {
-		t.Fatal(err)
-	}
-
-	lightbringer, err := resolveLogSource(logSourceLightbringer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	warn := LevelWarn
-	lines, total, meta, err := tailLogForSourceContextWithMeta(context.Background(), root, lightbringer, 10, &warn, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if total != 1 || len(lines) != 1 || lines[0].Target == nil || *lines[0].Target != "lightbringer::repair" || lines[0].Message != "delayed slot" || !meta.Complete {
-		t.Fatalf("Lightbringer tail = total:%d lines:%+v meta:%+v", total, lines, meta)
-	}
-	matches, total, _, err := grepLogForSourceContextWithMeta(context.Background(), root, lightbringer, "stream", 10, "2026-07-20T10:11:12Z")
-	if err != nil || total != 1 || len(matches) != 1 || matches[0].Message != "ready" {
-		t.Fatalf("Lightbringer grep = total:%d matches:%+v err:%v", total, matches, err)
-	}
-	defaultSource, err := resolveLogSource("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defaultLines, _, _, err := tailLogForSourceContextWithMeta(context.Background(), root, defaultSource, 10, nil, "")
-	if err != nil || len(defaultLines) != 1 || defaultLines[0].Message != "mithril only" {
-		t.Fatalf("default source = %+v, err=%v", defaultLines, err)
-	}
-	if _, err := resolveLogSource("other"); err == nil {
-		t.Fatal("unknown source should be rejected")
-	}
-	if _, _, _, err := tailLogForSourceContextWithMeta(context.Background(), root, lightbringer, 10, nil, "5m"); err == nil {
-		t.Fatal("Lightbringer tail accepted an elapsed since value")
-	}
-	if _, _, _, err := grepLogForSourceContextWithMeta(context.Background(), root, lightbringer, ".", 10, "5m"); err == nil {
-		t.Fatal("Lightbringer grep accepted an elapsed since value")
 	}
 }
 

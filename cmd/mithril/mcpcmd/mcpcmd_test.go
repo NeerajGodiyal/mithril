@@ -24,9 +24,7 @@ func clearMCPNodeSettingEnv(t *testing.T) {
 	for _, name := range []string{
 		"MITHRIL_ACCOUNTS_PATH", "MITHRIL_SNAPSHOTS_PATH", "MITHRIL_SHREDSTORE_PATH",
 		"MITHRIL_LOG_DIR", "MITHRIL_STATE_PATH", "MITHRIL_REPLAY_PATH", "MITHRIL_NODE_CGROUP_PATH",
-		"MITHRIL_METRICS_URL", "MITHRIL_RPC_URL", "MITHRIL_PPROF_URL", "MITHRIL_LIGHTBRINGER_GRPC_ADDR",
-		"MITHRIL_LIGHTBRINGER_INFLUXDB_URL", "MITHRIL_LIGHTBRINGER_INFLUXDB_DATABASE",
-		"MITHRIL_LIGHTBRINGER_INFLUXDB_TOKEN", "MITHRIL_BLOCK_SOURCE", "MITHRIL_LIGHTBRINGER_QUIET",
+		"MITHRIL_METRICS_URL", "MITHRIL_RPC_URL", "MITHRIL_PPROF_URL", "MITHRIL_BLOCK_SOURCE",
 		"MITHRIL_MCP_APPROVAL_TTL_SECONDS",
 	} {
 		value, present := os.LookupEnv(name)
@@ -317,6 +315,19 @@ func TestResolvedConfigRejectsInvalidBlockSource(t *testing.T) {
 	}
 }
 
+func TestResolvedConfigWithoutNodeConfigLeavesBlockSourceUnknown(t *testing.T) {
+	clearMCPNodeSettingEnv(t)
+	setConfigFileForTest(t, "")
+
+	cfg, err := resolvedConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BlockSource != "" {
+		t.Fatalf("standalone block source = %q, want unknown", cfg.BlockSource)
+	}
+}
+
 func TestResolvedConfigRejectsInvalidApprovalTTL(t *testing.T) {
 	clearMCPNodeSettingEnv(t)
 	setConfigFileForTest(t, "")
@@ -346,15 +357,8 @@ path = '/older/shredstore'
 port = 7788
 [tuning.pprof]
 port = 6677
-[block]
-lightbringer_endpoint = '127.0.0.1:5556'
 [lightbringer]
 enabled = true
-quiet = false
-grpc_addr = '127.0.0.1:5555'
-influxdb_host = 'http://127.0.0.1:8181'
-influxdb_database = 'node_metrics'
-influxdb_token = 'NODE_INFLUX_TOKEN'
 `)
 	setConfigFileForTest(t, path)
 	cfg, err := resolvedConfig()
@@ -363,10 +367,103 @@ influxdb_token = 'NODE_INFLUX_TOKEN'
 	}
 	if cfg.AccountsDir != "/node/accounts" || cfg.SnapshotsDir != "/node/snapshots" || cfg.ShredstoreDir != "/node/shredstore" ||
 		cfg.LogDir != "/node/logs" || cfg.StatePath != "/node/accounts/mithril_state.json" || cfg.ReplayPath != "/node/logs/replay_timings.jsonl" ||
-		cfg.RPCURL != "http://127.0.0.1:7788" || cfg.PprofURL != "http://127.0.0.1:6677" ||
-		cfg.LightbringerGRPCAddr != "127.0.0.1:5556" || cfg.LightbringerInfluxURL != "http://127.0.0.1:8181" ||
-		cfg.LightbringerInfluxDB != "node_metrics" || cfg.LightbringerInfluxTok != "NODE_INFLUX_TOKEN" || cfg.BlockSource != "lightbringer" || cfg.LightbringerQuiet == nil || *cfg.LightbringerQuiet {
+		cfg.RPCURL != "http://127.0.0.1:7788" || cfg.PprofURL != "http://127.0.0.1:6677" || cfg.BlockSource != "lightbringer" {
 		t.Fatalf("node storage paths were not applied: %+v", cfg)
+	}
+}
+
+func TestResolvedConfigMatchesNodeBlockSourceRules(t *testing.T) {
+	tests := []struct {
+		name string
+		toml string
+		want string
+	}{
+		{
+			name: "omitted cluster and source",
+			toml: "[storage]\naccounts = '/node/accounts'\n",
+			want: "turbine",
+		},
+		{
+			name: "alpenglow default",
+			toml: "[network]\ncluster = 'alpenglow'\n",
+			want: "turbine",
+		},
+		{
+			name: "mainnet beta default",
+			toml: "[network]\ncluster = 'mainnet-beta'\n",
+			want: "rpc",
+		},
+		{
+			name: "testnet default",
+			toml: "[network]\ncluster = 'testnet'\n",
+			want: "rpc",
+		},
+		{
+			name: "devnet default",
+			toml: "[network]\ncluster = 'devnet'\n",
+			want: "rpc",
+		},
+		{
+			name: "lightbringer replaces protocol default",
+			toml: "[lightbringer]\nenabled = true\n",
+			want: "lightbringer",
+		},
+		{
+			name: "explicit rpc survives lightbringer",
+			toml: "[network]\ncluster = 'alpenglow'\n[block]\nsource = 'rpc'\n[lightbringer]\nenabled = true\n",
+			want: "rpc",
+		},
+		{
+			name: "explicit turbine on classic cluster",
+			toml: "[network]\ncluster = 'mainnet-beta'\n[block]\nsource = 'turbine'\n",
+			want: "turbine",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearMCPNodeSettingEnv(t)
+			setConfigFileForTest(t, writeConfigFile(t, test.toml))
+
+			cfg, err := resolvedConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.BlockSource != test.want {
+				t.Fatalf("block source = %q, want %q", cfg.BlockSource, test.want)
+			}
+		})
+	}
+}
+
+func TestResolvedConfigRejectsInvalidNodeClusterOrBlockSource(t *testing.T) {
+	tests := []struct {
+		name    string
+		toml    string
+		wantErr string
+	}{
+		{
+			name:    "cluster",
+			toml:    "[network]\ncluster = 'localnet'\n",
+			wantErr: "invalid network.cluster",
+		},
+		{
+			name:    "block source",
+			toml:    "[block]\nsource = 'unknown'\n",
+			wantErr: "invalid block.source",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearMCPNodeSettingEnv(t)
+			t.Setenv("MITHRIL_BLOCK_SOURCE", "rpc")
+			setConfigFileForTest(t, writeConfigFile(t, test.toml))
+
+			if _, err := resolvedConfig(); err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("invalid node config error = %v, want %q", err, test.wantErr)
+			}
+		})
 	}
 }
 
@@ -396,11 +493,6 @@ shredstore = '/node/shredstore'
 port = 7788
 [tuning.pprof]
 port = 6677
-[lightbringer]
-grpc_addr = '127.0.0.1:5555'
-influxdb_host = 'http://127.0.0.1:8181'
-influxdb_database = 'node_metrics'
-influxdb_token = 'NODE_INFLUX_TOKEN'
 `)
 	setConfigFileForTest(t, path)
 	t.Setenv("MITHRIL_LOG_DIR", "/env/logs")
@@ -411,12 +503,7 @@ influxdb_token = 'NODE_INFLUX_TOKEN'
 	t.Setenv("MITHRIL_REPLAY_PATH", "/env/replay.jsonl")
 	t.Setenv("MITHRIL_RPC_URL", "http://127.0.0.1:8898")
 	t.Setenv("MITHRIL_PPROF_URL", "http://127.0.0.1:6068")
-	t.Setenv("MITHRIL_LIGHTBRINGER_GRPC_ADDR", "127.0.0.1:3008")
-	t.Setenv("MITHRIL_LIGHTBRINGER_INFLUXDB_URL", "http://127.0.0.1:8188")
-	t.Setenv("MITHRIL_LIGHTBRINGER_INFLUXDB_DATABASE", "env_metrics")
-	t.Setenv("MITHRIL_LIGHTBRINGER_INFLUXDB_TOKEN", "ENV_INFLUX_TOKEN")
 	t.Setenv("MITHRIL_BLOCK_SOURCE", "turbine")
-	t.Setenv("MITHRIL_LIGHTBRINGER_QUIET", "true")
 
 	cfg, err := resolvedConfig()
 	if err != nil {
@@ -424,9 +511,7 @@ influxdb_token = 'NODE_INFLUX_TOKEN'
 	}
 	if cfg.AccountsDir != "/env/accounts" || cfg.SnapshotsDir != "/env/snapshots" || cfg.ShredstoreDir != "/env/shredstore" ||
 		cfg.LogDir != "/env/logs" || cfg.StatePath != "/env/state.json" || cfg.ReplayPath != "/env/replay.jsonl" ||
-		cfg.RPCURL != "http://127.0.0.1:8898" || cfg.PprofURL != "http://127.0.0.1:6068" ||
-		cfg.LightbringerGRPCAddr != "127.0.0.1:3008" || cfg.LightbringerInfluxURL != "http://127.0.0.1:8188" ||
-		cfg.LightbringerInfluxDB != "env_metrics" || cfg.LightbringerInfluxTok != "ENV_INFLUX_TOKEN" || cfg.BlockSource != "turbine" || cfg.LightbringerQuiet == nil || !*cfg.LightbringerQuiet {
+		cfg.RPCURL != "http://127.0.0.1:8898" || cfg.PprofURL != "http://127.0.0.1:6068" || cfg.BlockSource != "turbine" {
 		t.Fatalf("environment did not override node config: %+v", cfg)
 	}
 }
@@ -492,18 +577,11 @@ func TestResolvedConfigExplicitEmptyEnvironmentOverridesNodeConfig(t *testing.T)
 port = 8891
 [tuning.pprof]
 port = 6061
-[lightbringer]
-grpc_addr = '127.0.0.1:3001'
-influxdb_host = 'http://127.0.0.1:8181'
-influxdb_database = 'node_metrics'
-influxdb_token = 'NODE_INFLUX_TOKEN'
 `)
 	setConfigFileForTest(t, path)
 	for _, name := range []string{
 		"MITHRIL_ACCOUNTS_PATH", "MITHRIL_SNAPSHOTS_PATH", "MITHRIL_SHREDSTORE_PATH",
-		"MITHRIL_RPC_URL", "MITHRIL_PPROF_URL", "MITHRIL_LIGHTBRINGER_GRPC_ADDR",
-		"MITHRIL_LIGHTBRINGER_INFLUXDB_URL", "MITHRIL_LIGHTBRINGER_INFLUXDB_DATABASE",
-		"MITHRIL_LIGHTBRINGER_INFLUXDB_TOKEN", "MITHRIL_BLOCK_SOURCE", "MITHRIL_LIGHTBRINGER_QUIET",
+		"MITHRIL_RPC_URL", "MITHRIL_PPROF_URL", "MITHRIL_BLOCK_SOURCE",
 	} {
 		t.Setenv(name, "")
 	}
@@ -513,28 +591,8 @@ influxdb_token = 'NODE_INFLUX_TOKEN'
 		t.Fatal(err)
 	}
 	if cfg.AccountsDir != "" || cfg.SnapshotsDir != "" || cfg.ShredstoreDir != "" ||
-		cfg.RPCURL != "" || cfg.PprofURL != "" || cfg.LightbringerGRPCAddr != "" ||
-		cfg.LightbringerInfluxURL != "" || cfg.LightbringerInfluxDB != "" || cfg.LightbringerInfluxTok != "" {
+		cfg.RPCURL != "" || cfg.PprofURL != "" {
 		t.Fatalf("explicit empty environment values did not clear node settings: %+v", cfg)
-	}
-}
-
-func TestResolvedConfigDoesNotMoveNodeInfluxTokenToEnvironmentOrigin(t *testing.T) {
-	clearMCPNodeSettingEnv(t)
-	path := writeConfigFile(t, `
-[lightbringer]
-influxdb_host = 'https://node-influx.example.com'
-influxdb_token = 'NODE_INFLUX_TOKEN'
-`)
-	setConfigFileForTest(t, path)
-	t.Setenv("MITHRIL_LIGHTBRINGER_INFLUXDB_URL", "https://environment-influx.example.com")
-
-	cfg, err := resolvedConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.LightbringerInfluxURL != "https://environment-influx.example.com" || cfg.LightbringerInfluxTok != "" {
-		t.Fatalf("node token crossed into an environment-selected origin: %+v", cfg)
 	}
 }
 
@@ -610,7 +668,7 @@ func TestCLIExplainsClientOwnedStdioAndRemoteCommand(t *testing.T) {
 	if strings.Contains(strings.ToLower(text), "ssh tunnel") {
 		t.Fatalf("CLI help still describes stdio as an SSH tunnel:\n%s", text)
 	}
-	for _, want := range []string{"stdio has no authentication", "SSH identity is the", "insecure loopback only"} {
+	for _, want := range []string{"stdio has no authentication", "SSH identity is the"} {
 		if !strings.Contains(normalized, want) {
 			t.Errorf("CLI help is missing trust-boundary text %q:\n%s", want, text)
 		}

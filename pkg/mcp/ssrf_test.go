@@ -152,31 +152,6 @@ func TestCanonicalOrigin(t *testing.T) {
 	}
 }
 
-func TestSameOriginAndCredentialBinding(t *testing.T) {
-	match, err := sameOrigin("https://RPC.example.com/a?token=one", "https://rpc.example.com:443/other")
-	if err != nil || !match {
-		t.Fatalf("same default-port origin = %v, %v; want true", match, err)
-	}
-	match, err = sameOrigin("https://rpc.example.com", "https://rpc.example.com:444")
-	if err != nil || match {
-		t.Fatalf("different-port origin = %v, %v; want false", match, err)
-	}
-
-	const secret = "INFLUX-TOKEN-SHOULD-NOT-LEAK"
-	if got, err := credentialForTarget("https://rpc.example.com/config", "https://RPC.example.com:443/override", secret); err != nil || got != secret {
-		t.Fatalf("same-origin credential = %q, %v; want configured secret", got, err)
-	}
-	if got, err := credentialForTarget("https://rpc.example.com", "https://rpc.example.com:444", secret); err != nil || got != "" {
-		t.Fatalf("cross-origin credential = %q, %v; want empty", got, err)
-	}
-	if got, err := credentialForTarget("", "https://rpc.example.com", secret); err != nil || got != "" {
-		t.Fatalf("unbound credential = %q, %v; want empty", got, err)
-	}
-	if got, err := credentialForTarget("not-a-url", "https://rpc.example.com", secret); err == nil || got != "" {
-		t.Fatalf("invalid configured origin = %q, %v; want error", got, err)
-	}
-}
-
 func TestSanitizeEndpointForDisplayRemovesPathSecrets(t *testing.T) {
 	raw := "https://user:password@rpc.example.com:8899/PATHSECRET?api-key=QUERYSECRET#frag"
 	got := sanitizeEndpointForDisplay(raw)
@@ -199,6 +174,9 @@ func TestSanitizeEndpointForDisplayRemovesPathSecrets(t *testing.T) {
 		Err: errors.New("connection refused"),
 	}
 	sanitized := sanitizeHTTPError(httpErr).Error()
+	if !strings.Contains(sanitized, "https://rpc.example.com:443") {
+		t.Fatalf("sanitized HTTP error omitted safe origin: %s", sanitized)
+	}
 	if strings.Contains(sanitized, "PATHSECRET") || strings.Contains(sanitized, "QUERYSECRET") {
 		t.Fatalf("sanitized HTTP error leaks endpoint secret: %s", sanitized)
 	}

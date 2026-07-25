@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/progress"
+	corestate "github.com/Overclock-Validator/mithril/pkg/state"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -52,7 +53,7 @@ func writeDiagnoseFixture(t *testing.T, path string, value any) {
 func newDiagnoseFixture(t *testing.T, state map[string]any, replayMs uint64, metricsBody string) Config {
 	t.Helper()
 	if _, ok := state["state_schema_version"]; !ok {
-		state["state_schema_version"] = uint32(2)
+		state["state_schema_version"] = corestate.CurrentStateSchemaVersion
 	}
 	if metricsBody == "" {
 		metricsBody = healthyDiagnoseMetrics
@@ -124,6 +125,119 @@ func diagnoseCheck(t *testing.T, out diagnoseOutput, name string) DiagnosticChec
 	return DiagnosticCheck{}
 }
 
+func TestDiagnoseTurbineEvidence(t *testing.T) {
+	now := time.Unix(1_700_000_100, 0)
+	u64 := func(value uint64) *uint64 { return &value }
+	summary := func(active *bool, packetAt, blockAt, dataSlot, blockSlot *uint64) *MetricsSummary {
+		return &MetricsSummary{
+			TurbineReceiverActive:             active,
+			TurbineLastPacketTimestampSeconds: packetAt,
+			TurbineLastBlockTimestampSeconds:  blockAt,
+			TurbineLastDataSlot:               dataSlot,
+			TurbineLastBlockSlot:              blockSlot,
+		}
+	}
+	active, inactive := true, false
+	freshPacket := u64(uint64(now.Add(-10 * time.Second).Unix()))
+	freshBlock := u64(uint64(now.Add(-20 * time.Second).Unix()))
+	stalePacket := u64(uint64(now.Add(-turbineFreshness - time.Second).Unix()))
+	staleBlock := u64(uint64(now.Add(-turbineFreshness - time.Second).Unix()))
+	future := u64(uint64(now.Add(time.Second).Unix()))
+	dataSlot, blockSlot := u64(123), u64(122)
+
+	tests := []struct {
+		name    string
+		summary *MetricsSummary
+		want    string
+	}{
+		{"missing metrics", nil, checkUnknown},
+		{"missing active", summary(nil, freshPacket, freshBlock, dataSlot, blockSlot), checkUnknown},
+		{"inactive", summary(&inactive, freshPacket, freshBlock, dataSlot, blockSlot), checkDegraded},
+		{"no packets", summary(&active, u64(0), freshBlock, dataSlot, blockSlot), checkUnknown},
+		{"invalid packet timestamp", summary(&active, u64(maxUnixTimestamp+1), freshBlock, dataSlot, blockSlot), checkUnknown},
+		{"future packet timestamp", summary(&active, future, freshBlock, dataSlot, blockSlot), checkUnknown},
+		{"stale packets", summary(&active, stalePacket, freshBlock, dataSlot, blockSlot), checkDegraded},
+		{"no blocks", summary(&active, freshPacket, u64(0), dataSlot, blockSlot), checkUnknown},
+		{"invalid block timestamp", summary(&active, freshPacket, u64(maxUnixTimestamp+1), dataSlot, blockSlot), checkUnknown},
+		{"future block timestamp", summary(&active, freshPacket, future, dataSlot, blockSlot), checkUnknown},
+		{"stale blocks", summary(&active, freshPacket, staleBlock, dataSlot, blockSlot), checkDegraded},
+		{"missing activity slots", summary(&active, freshPacket, freshBlock, nil, nil), checkUnknown},
+		{"fresh activity", summary(&active, freshPacket, freshBlock, dataSlot, blockSlot), checkOK},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, evidence := diagnoseTurbineEvidence(test.summary, now)
+			if got != test.want {
+				t.Fatalf("status = %q, want %q; evidence=%q", got, test.want, evidence)
+			}
+			if test.want == checkOK && (!strings.Contains(evidence, "point-in-time") || !strings.Contains(evidence, "does not prove")) {
+				t.Fatalf("healthy evidence lacks scope caveat: %q", evidence)
+			}
+			if test.want == checkOK && (!strings.Contains(evidence, "latest parsed data-shred slot") || strings.Contains(evidence, "ago at data slot")) {
+				t.Fatalf("healthy evidence conflates packet and shred observations: %q", evidence)
+			}
+		})
+	}
+}
+
+func TestRunDiagnosisEvaluatesTurbineAfterMetricsScrape(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		target := time.Now().Truncate(time.Second).Add(time.Second)
+		time.Sleep(time.Until(target.Add(10 * time.Millisecond)))
+		w.Header().Set(mithrilEndpointHeader, mithrilMetricsEndpoint)
+		_, _ = fmt.Fprintf(w, `# TYPE slot gauge
+slot 100
+# TYPE turbine_receiver_active gauge
+turbine_receiver_active 1
+# TYPE turbine_last_packet_timestamp_seconds gauge
+turbine_last_packet_timestamp_seconds %d
+# TYPE turbine_last_data_slot gauge
+turbine_last_data_slot 100
+# TYPE turbine_last_block_timestamp_seconds gauge
+turbine_last_block_timestamp_seconds %d
+# TYPE turbine_last_block_slot gauge
+turbine_last_block_slot 100
+`, target.Unix(), target.Unix())
+	}))
+	defer server.Close()
+
+	out := runDiagnosisForTest(context.Background(), Config{
+		MetricsURL:  server.URL,
+		BlockSource: "turbine",
+	}, diagnoseInput{})
+	if check := diagnoseCheck(t, out, "turbine_receiver"); check.Status != checkOK {
+		t.Fatalf("post-scrape Turbine check = %+v, want ok", check)
+	}
+}
+
+func TestRunDiagnosisAddsTurbineCheckOnlyForNativeSource(t *testing.T) {
+	now := time.Now().Unix()
+	metrics := healthyDiagnoseMetrics + fmt.Sprintf(`# TYPE turbine_receiver_active gauge
+turbine_receiver_active 1
+# TYPE turbine_last_packet_timestamp_seconds gauge
+turbine_last_packet_timestamp_seconds %d
+# TYPE turbine_last_data_slot gauge
+turbine_last_data_slot 100
+# TYPE turbine_last_block_timestamp_seconds gauge
+turbine_last_block_timestamp_seconds %d
+# TYPE turbine_last_block_slot gauge
+turbine_last_block_slot 100
+`, now, now)
+	cfg := newDiagnoseFixture(t, map[string]any{
+		"stage":                "ready",
+		"last_shutdown_reason": "graceful shutdown (Ctrl+C)",
+	}, 100, metrics)
+
+	cfg.BlockSource = "turbine"
+	if got := diagnoseCheck(t, runDiagnosisForTest(context.Background(), cfg, diagnoseInput{}), "turbine_receiver").Status; got != checkOK {
+		t.Fatalf("native Turbine status = %q, want ok", got)
+	}
+	cfg.BlockSource = "rpc"
+	if got := diagnoseCheck(t, runDiagnosisForTest(context.Background(), cfg, diagnoseInput{}), "turbine_receiver").Status; got != checkSkipped {
+		t.Fatalf("RPC-source Turbine status = %q, want skipped", got)
+	}
+}
+
 func TestRunDiagnosisStateAndShutdownMatrix(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -171,6 +285,66 @@ func TestRunDiagnosisStateAndShutdownMatrix(t *testing.T) {
 			}
 			if out.EvidenceComplete != test.wantComplete {
 				t.Errorf("evidence_complete = %v, want %v", out.EvidenceComplete, test.wantComplete)
+			}
+		})
+	}
+}
+
+func TestDiagnoseStateEvidence(t *testing.T) {
+	slot := func(value uint64) *uint64 { return &value }
+	tests := []struct {
+		name    string
+		summary *ShutdownStateSummary
+		status  string
+		text    []string
+	}{
+		{
+			name: "clear",
+			summary: &ShutdownStateSummary{
+				SchemaSupported:          true,
+				AlpenglowEvidence:        &AlpenglowFinalityEvidenceSummary{},
+				ReplayDivergenceEvidence: &ReplayDivergenceEvidenceSummary{},
+			},
+			status: checkOK,
+			text:   []string{"no unresolved"},
+		},
+		{
+			name: "Alpenglow finality",
+			summary: &ShutdownStateSummary{
+				SchemaSupported: true,
+				AlpenglowEvidence: &AlpenglowFinalityEvidenceSummary{
+					Count: 2, ConflictCount: 1, EarliestSlot: slot(110), LatestSlot: slot(120),
+				},
+				ReplayDivergenceEvidence: &ReplayDivergenceEvidenceSummary{},
+			},
+			status: checkCritical,
+			text:   []string{"count=2", "slots 110-120", "conflicts=1", "exact finality match", "operator triage"},
+		},
+		{
+			name: "replay divergence",
+			summary: &ShutdownStateSummary{
+				SchemaSupported:   true,
+				AlpenglowEvidence: &AlpenglowFinalityEvidenceSummary{},
+				ReplayDivergenceEvidence: &ReplayDivergenceEvidenceSummary{
+					Count: 2, EarliestSlot: slot(130), LatestSlot: slot(140),
+				},
+			},
+			status: checkCritical,
+			text:   []string{"count=2", "slots 130-140", "folds are blocked", "operator triage"},
+		},
+		{name: "unsupported schema", summary: &ShutdownStateSummary{}, status: checkUnknown, text: []string{"supported state schema"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status, evidence := diagnoseStateEvidence(test.summary)
+			if status != test.status {
+				t.Fatalf("status = %q, want %q; evidence=%s", status, test.status, evidence)
+			}
+			for _, want := range test.text {
+				if !strings.Contains(evidence, want) {
+					t.Errorf("state-evidence check missing %q: %s", want, evidence)
+				}
 			}
 		})
 	}
@@ -284,7 +458,7 @@ func TestRunDiagnosisConfiguredSourcesUnavailableIsUnknown(t *testing.T) {
 	if out.Status != diagnosticUnknown || out.EvidenceComplete {
 		t.Fatalf("status/evidence = %q/%v, want unknown/false", out.Status, out.EvidenceComplete)
 	}
-	for _, name := range []string{"metrics", "rpc", "state", "shutdown", "logs", "divergence_artifacts", "replay"} {
+	for _, name := range []string{"metrics", "rpc", "state", "state_evidence", "shutdown", "logs", "divergence_artifacts", "replay"} {
 		if got := diagnoseCheck(t, out, name).Status; got != checkUnknown {
 			t.Errorf("%s status = %q, want unknown", name, got)
 		}
@@ -455,7 +629,7 @@ func TestRunDiagnosisReusesFetchedMetricsAndStateForHost(t *testing.T) {
 
 	statePath := filepath.Join(t.TempDir(), "mithril_state.json")
 	writeDiagnoseFixture(t, statePath, map[string]any{
-		"state_schema_version": 2,
+		"state_schema_version": corestate.CurrentStateSchemaVersion,
 		"stage":                "ready",
 	})
 	cfg := Config{MetricsURL: metrics.URL, StatePath: statePath}
@@ -502,7 +676,7 @@ func TestDiagnoseProtocolReturnsAuditableChecks(t *testing.T) {
 	if err != nil || observedAt.Location() != time.UTC {
 		t.Fatalf("observed_at = %q, want an RFC3339 UTC timestamp: %v", out.ObservedAt, err)
 	}
-	for _, name := range []string{"metrics", "rpc", "state", "shutdown", "logs", "divergence_artifacts", "replay", "cross_check"} {
+	for _, name := range []string{"metrics", "rpc", "state", "state_evidence", "shutdown", "logs", "divergence_artifacts", "replay", "cross_check"} {
 		_ = diagnoseCheck(t, out, name)
 	}
 	if evidence := diagnoseCheck(t, out, "divergence_artifacts").Evidence; !strings.Contains(evidence, "does not prove") || !strings.Contains(evidence, "verification") {
@@ -520,7 +694,7 @@ func TestDiagnoseProtocolReturnsAuditableChecks(t *testing.T) {
 	if len(out.Findings) != 1 || out.Findings[0].Category != "overall" {
 		t.Fatalf("healthy findings = %+v", out.Findings)
 	}
-	if !strings.Contains(out.Findings[0].Message, "consensus activity") || !strings.Contains(out.Findings[0].Message, "slot progress") || !strings.Contains(out.Findings[0].Message, "rewards") || !strings.Contains(out.Findings[0].Message, "Lightbringer") {
+	if !strings.Contains(out.Findings[0].Message, "consensus activity") || !strings.Contains(out.Findings[0].Message, "slot progress") || !strings.Contains(out.Findings[0].Message, "rewards") {
 		t.Fatalf("healthy snapshot caveat is missing: %+v", out.Findings)
 	}
 }
@@ -534,72 +708,11 @@ func TestDiagnoseRejectsUnsupportedStateSchema(t *testing.T) {
 	if got := diagnoseCheck(t, out, "state").Status; got != checkCritical {
 		t.Fatalf("state check = %q, want critical", got)
 	}
+	if got := diagnoseCheck(t, out, "state_evidence").Status; got != checkUnknown {
+		t.Fatalf("state evidence check = %q, want unknown for unsupported schema", got)
+	}
 	if out.Status != diagnosticCritical || out.ShutdownState == nil || out.ShutdownState.SchemaSupported {
 		t.Fatalf("unsupported state schema was not surfaced: %+v", out)
-	}
-}
-
-func TestDiagnoseLightbringerEvidenceBoundaries(t *testing.T) {
-	slot := uint64(100)
-	rss := uint64(1024)
-	for _, tc := range []struct {
-		name string
-		age  float64
-		want string
-	}{
-		{name: "ingest fresh at 300 seconds", age: 300, want: checkOK},
-		{name: "ingest stale beyond 300 seconds", age: 300.000001, want: checkDegraded},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			state := "observed"
-			if tc.want == checkDegraded {
-				state = "stale"
-			}
-			got, _ := diagnoseLightbringerIngestEvidence(ingestHealthOutput{
-				ObservationState:     state,
-				LastCompletionAgeSec: &tc.age,
-				LatestCompletedSlot:  &slot,
-				CompletedSlots:       1,
-			})
-			if got != tc.want {
-				t.Fatalf("status = %q, want %q", got, tc.want)
-			}
-		})
-	}
-
-	for _, tc := range []struct {
-		name string
-		age  float64
-		want string
-	}{
-		{name: "memory fresh at 30 seconds", age: 30, want: checkOK},
-		{name: "memory stale beyond 30 seconds", age: 30.000001, want: checkDegraded},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			state := "observed"
-			if tc.want == checkDegraded {
-				state = "stale"
-			}
-			got, _ := diagnoseLightbringerMemoryEvidence(lightbringerMemoryOutput{
-				ObservationState:   state,
-				LatestSampleAgeSec: &tc.age,
-				CurrentRSSBytes:    &rss,
-				SampleCount:        1,
-			})
-			if got != tc.want {
-				t.Fatalf("status = %q, want %q", got, tc.want)
-			}
-		})
-	}
-
-	if status, _ := diagnoseLightbringerIngestEvidence(ingestHealthOutput{}); status != checkUnknown {
-		t.Fatalf("missing ingest evidence status = %q, want unknown", status)
-	}
-	if status, _ := diagnoseLightbringerMemoryEvidence(lightbringerMemoryOutput{}); status != checkUnknown {
-		t.Fatalf("missing memory evidence status = %q, want unknown", status)
-	}
-	if status, _ := diagnoseLightbringerStreamEvidence(streamProbeOutput{State: "active", SlotsSeen: 3, DistinctSlots: 3}); status != checkOK {
-		t.Fatalf("active stream status = %q, want ok", status)
 	}
 }
 

@@ -44,7 +44,7 @@ func TestParseStateSimulatorFormat(t *testing.T) {
 	}
 }
 
-func TestParseStateRealFormat(t *testing.T) {
+func TestParseLegacySchemaV2StateFormat(t *testing.T) {
 	var s ShutdownState
 	js := `{"state_schema_version":2,"stage":"ready","snapshot_slot":419496100,"snapshot_epoch":970,"build_mode":"auto","build_started_at":"2026-07-20T01:00:00Z","build_completed_at":"2026-07-20T01:10:00Z","cluster":"mainnet-beta","genesis_hash":"` + testHash + `","last_shutdown_reason":"graceful shutdown (Ctrl+C)"}`
 	if err := json.Unmarshal([]byte(js), &s); err != nil {
@@ -59,6 +59,9 @@ func TestParseStateRealFormat(t *testing.T) {
 	summary := summarizeShutdownState(&s)
 	if summary.SnapshotEpoch == nil || *summary.SnapshotEpoch != 970 || summary.BuildStartedAt == nil || summary.BuildCompletedAt == nil {
 		t.Fatalf("bootstrap evidence missing from summary: %+v", summary)
+	}
+	if summary.SchemaSupported || summary.AlpenglowEvidence != nil || summary.ReplayDivergenceEvidence != nil {
+		t.Fatalf("legacy schema must not report current safety-evidence coverage: %+v", summary)
 	}
 }
 
@@ -195,6 +198,69 @@ func TestParseStateOperationalEvidenceFields(t *testing.T) {
 	}
 }
 
+func TestStateSummaryBoundsSchemaV3SafetyEvidence(t *testing.T) {
+	const secret = "RAW_STATE_EVIDENCE_SECRET"
+	data, err := json.Marshal(map[string]any{
+		"state_schema_version": corestate.CurrentStateSchemaVersion,
+		"stage":                "ready",
+		"last_slot":            150,
+		"last_rooted_slot":     100,
+		"last_rooted_bankhash": testHash,
+		"last_rooted_context":  map[string]any{"operator_note": secret},
+		"alpenglow_finality_evidence": []map[string]any{
+			{"slot": 120, "executed": secret + "-executed", "finalized": secret + "-finalized"},
+			{"slot": 110, "conflict": true},
+		},
+		"replay_divergence_evidence": []map[string]any{
+			{"slot": 140, "tx_index": 4, "tx_signature": secret + "-signature", "kind": secret + "-kind", "detail": secret + "-detail", "recorded_at": secret + "-time"},
+			{"slot": 130, "tx_index": 2, "kind": "tx_count", "detail": secret + "-other-detail"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var state ShutdownState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"last_rooted_slot", "last_rooted_bankhash", "alpenglow_finality_evidence", "replay_divergence_evidence"} {
+		if _, ok := state.Extra[key]; ok {
+			t.Errorf("schema-v3 field %q must not also appear in Extra", key)
+		}
+	}
+	if _, ok := state.Extra["last_rooted_context"]; !ok {
+		t.Fatal("large rooted resume context must remain omitted metadata")
+	}
+
+	summary := summarizeShutdownState(&state)
+	if !summary.SchemaSupported || summary.LastRootedSlot == nil || *summary.LastRootedSlot != 100 {
+		t.Fatalf("rooted state summary = %+v", summary)
+	}
+	if summary.LastRootedBankhash == nil || *summary.LastRootedBankhash != testHash {
+		t.Fatalf("last rooted bankhash = %v", summary.LastRootedBankhash)
+	}
+	if got := summary.AlpenglowEvidence; got == nil || got.Count != 2 || got.ConflictCount != 1 ||
+		got.EarliestSlot == nil || *got.EarliestSlot != 110 || got.LatestSlot == nil || *got.LatestSlot != 120 {
+		t.Fatalf("Alpenglow evidence summary = %+v", got)
+	}
+	if got := summary.ReplayDivergenceEvidence; got == nil || got.Count != 2 ||
+		got.EarliestSlot == nil || *got.EarliestSlot != 130 || got.LatestSlot == nil || *got.LatestSlot != 140 {
+		t.Fatalf("replay-divergence evidence summary = %+v", got)
+	}
+
+	wire, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), secret) {
+		t.Fatalf("state summary leaked raw safety evidence: %s", wire)
+	}
+	if !strings.Contains(string(wire), `"last_rooted_context"`) {
+		t.Fatalf("omitted rooted context metadata is missing: %s", wire)
+	}
+}
+
 func TestReadStateRejectsNonRegularFile(t *testing.T) {
 	_, err := readShutdownStateContext(context.Background(), t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
@@ -234,7 +300,7 @@ func TestStateToolReturnsBoundedSummaryForLargeProductionState(t *testing.T) {
 	path := filepath.Join(dir, "mithril_state.json")
 	secret := "TOP_SECRET_STATE_BLOB"
 	data, err := json.Marshal(map[string]any{
-		"state_schema_version":  2,
+		"state_schema_version":  corestate.CurrentStateSchemaVersion,
 		"stage":                 "ready",
 		"last_slot":             100,
 		"computed_epoch_stakes": secret + strings.Repeat("x", 2*1024*1024),

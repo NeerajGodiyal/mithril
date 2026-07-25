@@ -29,7 +29,6 @@ func TestValidateToolPolicy(t *testing.T) {
 		{"diagnostic raw", ProfileDiagnostic, "mithril_scrape_metrics", `{"include_raw":true}`, false},
 		{"diagnostic pprof", ProfileDiagnostic, "mithril_pprof_profile", `{}`, false},
 		{"diagnostic override", ProfileDiagnostic, "mithril_pprof_heap", `{"endpoint":"http://example.com"}`, true},
-		{"monitor database override", ProfileMonitor, "mithril_lightbringer_ingest_health", `{"database":"other"}`, true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

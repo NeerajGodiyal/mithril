@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/Overclock-Validator/mithril/pkg/statsd"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	dto "github.com/prometheus/client_model/go"
 )
 
@@ -116,6 +118,211 @@ func TestParseCannedMetrics(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"snapshot_worker_pool_utilization":{"last_reported_max":0.71,"may_be_stale":true}`) {
 		t.Fatalf("snapshot worker projection is not honest about freshness: %s", encoded)
+	}
+}
+
+func TestParseTurbineMetrics(t *testing.T) {
+	body := `# TYPE turbine_receiver_active gauge
+turbine_receiver_active 1
+# TYPE turbine_packets_received_total counter
+turbine_packets_received_total 100
+# TYPE turbine_data_shreds_received_total counter
+turbine_data_shreds_received_total 70
+# TYPE turbine_blocks_emitted_total counter
+turbine_blocks_emitted_total 12
+# TYPE turbine_shreds_rejected_total counter
+turbine_shreds_rejected_total{reason="parse"} 2
+turbine_shreds_rejected_total{reason="signature"} 3
+turbine_shreds_rejected_total{reason="missing_leader"} 4
+turbine_shreds_rejected_total{reason="assembly"} 5
+turbine_shreds_rejected_total{reason="future_reason"} 9
+# TYPE turbine_assembler_active_slots gauge
+turbine_assembler_active_slots 6
+# TYPE turbine_last_packet_timestamp_seconds gauge
+turbine_last_packet_timestamp_seconds 1700000000
+# TYPE turbine_last_data_slot gauge
+turbine_last_data_slot 123
+# TYPE turbine_last_block_timestamp_seconds gauge
+turbine_last_block_timestamp_seconds 1700000001
+# TYPE turbine_last_block_slot gauge
+turbine_last_block_slot 122
+`
+	sum, err := parseMetrics(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.TurbineReceiverActive == nil || !*sum.TurbineReceiverActive {
+		t.Fatalf("receiver active = %v, want true", sum.TurbineReceiverActive)
+	}
+	assertUint := func(name string, got *uint64, want uint64) {
+		t.Helper()
+		if got == nil || *got != want {
+			t.Errorf("%s = %v, want %d", name, got, want)
+		}
+	}
+	assertUint("packets", sum.TurbinePacketsReceived, 100)
+	assertUint("data shreds", sum.TurbineDataShredsReceived, 70)
+	assertUint("blocks", sum.TurbineBlocksEmitted, 12)
+	assertUint("active slots", sum.TurbineAssemblerActiveSlots, 6)
+	assertUint("last packet time", sum.TurbineLastPacketTimestampSeconds, 1_700_000_000)
+	assertUint("last data slot", sum.TurbineLastDataSlot, 123)
+	assertUint("last block time", sum.TurbineLastBlockTimestampSeconds, 1_700_000_001)
+	assertUint("last block slot", sum.TurbineLastBlockSlot, 122)
+	if rejected := sum.TurbineShredsRejected; rejected == nil {
+		t.Fatal("typed rejection summary is absent")
+	} else {
+		assertUint("parse rejections", rejected.Parse, 2)
+		assertUint("signature rejections", rejected.Signature, 3)
+		assertUint("missing-leader rejections", rejected.MissingLeader, 4)
+		assertUint("assembly rejections", rejected.Assembly, 5)
+		if rejected.SamplesOmitted != 1 {
+			t.Errorf("omitted rejection samples = %d, want 1", rejected.SamplesOmitted)
+		}
+	}
+	for _, name := range []string{
+		"turbine_receiver_active",
+		"turbine_packets_received_total",
+		"turbine_data_shreds_received_total",
+		"turbine_blocks_emitted_total",
+		"turbine_shreds_rejected_total",
+		"turbine_assembler_active_slots",
+		"turbine_last_packet_timestamp_seconds",
+		"turbine_last_data_slot",
+		"turbine_last_block_timestamp_seconds",
+		"turbine_last_block_slot",
+	} {
+		if _, ok := sum.Other[name]; ok {
+			t.Errorf("typed metric %q duplicated in other", name)
+		}
+	}
+	lookup := lookupMetric(sum, "turbine_last_block_slot")
+	if lookup.Error != "" || lookup.Value != float64(122) {
+		t.Fatalf("last-block lookup = %+v", lookup)
+	}
+	lookup = lookupMetric(sum, "turbine_shreds_rejected_total")
+	rejections, ok := lookup.Value.(map[string]any)
+	if lookup.Error != "" || !ok ||
+		rejections["parse"] != float64(2) ||
+		rejections["assembly"] != float64(5) ||
+		rejections["samples_omitted"] != float64(1) {
+		t.Fatalf("rejection lookup = %+v", lookup)
+	}
+}
+
+func TestParseTurbineMetricsRejectsInvalidScalars(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		body  string
+		valid func(*MetricsSummary) bool
+	}{
+		{"invalid active", "turbine_receiver_active 2\n", func(sum *MetricsSummary) bool { return sum.TurbineReceiverActive != nil }},
+		{"negative counter", "turbine_packets_received_total -1\n", func(sum *MetricsSummary) bool { return sum.TurbinePacketsReceived != nil }},
+		{"negative rejection", "turbine_shreds_rejected_total{reason=\"parse\"} -1\n", func(sum *MetricsSummary) bool {
+			return sum.TurbineShredsRejected != nil && sum.TurbineShredsRejected.Parse != nil
+		}},
+		{"fractional slot", "turbine_last_data_slot 1.5\n", func(sum *MetricsSummary) bool { return sum.TurbineLastDataSlot != nil }},
+		{"NaN timestamp", "turbine_last_packet_timestamp_seconds NaN\n", func(sum *MetricsSummary) bool { return sum.TurbineLastPacketTimestampSeconds != nil }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sum, err := parseMetrics(test.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.valid(sum) {
+				t.Fatal("invalid Turbine scalar was accepted")
+			}
+		})
+	}
+}
+
+func TestTurbineRejectionsSurviveGenericMetricBounds(t *testing.T) {
+	var body strings.Builder
+	for i := 0; i <= maxOtherMetricSamples; i++ {
+		fmt.Fprintf(&body, "a_metric_%04d %d\n", i, i)
+	}
+	body.WriteString("turbine_shreds_rejected_total{reason=\"assembly\"} 7\n")
+
+	sum, err := parseMetrics(body.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sum.OtherTruncated {
+		t.Fatal("generic metric summary did not reach its bound")
+	}
+	if sum.TurbineShredsRejected == nil ||
+		sum.TurbineShredsRejected.Assembly == nil ||
+		*sum.TurbineShredsRejected.Assembly != 7 {
+		t.Fatalf("typed rejection summary = %+v, want assembly=7", sum.TurbineShredsRejected)
+	}
+}
+
+func scrapePrometheusSummary(t *testing.T) *MetricsSummary {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	promhttp.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("Prometheus scrape status = %d", recorder.Code)
+	}
+	sum, err := parseMetrics(recorder.Body.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sum
+}
+
+func uint64OrZero(v *uint64) uint64 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+func parseRejections(sum *MetricsSummary) uint64 {
+	if sum.TurbineShredsRejected == nil {
+		return 0
+	}
+	return uint64OrZero(sum.TurbineShredsRejected.Parse)
+}
+
+func TestTurbinePublisherReachesMCPMetricsSummary(t *testing.T) {
+	before := scrapePrometheusSummary(t)
+	current := statsd.TurbineReceiverSnapshot{
+		Packets:        21,
+		DataShreds:     13,
+		BlocksEmitted:  8,
+		ParseErrors:    1,
+		LastPacketUnix: 1_700_000_000,
+		LastDataSlot:   123,
+		LastBlockUnix:  1_700_000_001,
+		LastBlockSlot:  122,
+		ActiveSlots:    5,
+	}
+	statsd.SendTurbineReceiverMetrics(current, statsd.TurbineReceiverSnapshot{}, true)
+	after := scrapePrometheusSummary(t)
+
+	for name, values := range map[string]struct {
+		before *uint64
+		after  *uint64
+		want   uint64
+	}{
+		"packets":     {before.TurbinePacketsReceived, after.TurbinePacketsReceived, current.Packets},
+		"data shreds": {before.TurbineDataShredsReceived, after.TurbineDataShredsReceived, current.DataShreds},
+		"blocks":      {before.TurbineBlocksEmitted, after.TurbineBlocksEmitted, current.BlocksEmitted},
+	} {
+		if got := uint64OrZero(values.after) - uint64OrZero(values.before); got != values.want {
+			t.Errorf("%s publisher delta = %d, want %d", name, got, values.want)
+		}
+	}
+	if got := parseRejections(after) - parseRejections(before); got != current.ParseErrors {
+		t.Errorf("parse rejection delta = %d, want %d", got, current.ParseErrors)
+	}
+	if after.TurbineReceiverActive == nil || !*after.TurbineReceiverActive ||
+		uint64OrZero(after.TurbineAssemblerActiveSlots) != uint64(current.ActiveSlots) ||
+		uint64OrZero(after.TurbineLastPacketTimestampSeconds) != uint64(current.LastPacketUnix) ||
+		uint64OrZero(after.TurbineLastDataSlot) != current.LastDataSlot ||
+		uint64OrZero(after.TurbineLastBlockTimestampSeconds) != uint64(current.LastBlockUnix) ||
+		uint64OrZero(after.TurbineLastBlockSlot) != current.LastBlockSlot {
+		t.Fatalf("published Turbine gauges were not preserved: %+v", after)
 	}
 }
 

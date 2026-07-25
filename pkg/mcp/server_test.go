@@ -246,9 +246,6 @@ func TestProfileToolCatalogsAndMetadata(t *testing.T) {
 		"mithril_get_slot_info",
 		"mithril_grep_log",
 		"mithril_host_health",
-		"mithril_lightbringer_ingest_health",
-		"mithril_lightbringer_memory",
-		"mithril_lightbringer_stream_probe",
 		"mithril_mcp_info",
 		"mithril_metric",
 		"mithril_read_divergence",
@@ -360,7 +357,7 @@ func TestProfileToolCatalogsAndMetadata(t *testing.T) {
 						t.Errorf("simulation input schema advertises unsupported commitment semantics")
 					}
 				}
-				for _, forbidden := range []string{"endpoint", "grpc_addr", "influxdb_url", "reference_rpc_url", "log_dir", "path", "state_path", "database"} {
+				for _, forbidden := range []string{"endpoint", "reference_rpc_url", "log_dir", "path", "state_path"} {
 					if _, exposed := properties[forbidden]; exposed {
 						t.Errorf("tool %q exposes process-configuration argument %q", tool.Name, forbidden)
 					}
@@ -420,29 +417,25 @@ func assertNoUnconstrainedPropertySchemas(t *testing.T, path string, raw any) {
 
 func TestMCPInfoSanitizesOriginsAndReportsPolicyLimits(t *testing.T) {
 	cfg := Config{
-		Profile:               ProfileDiagnostic,
-		MetricsURL:            "https://user:password@metrics.example.com:8443/secret/path?api_key=METRICS_SECRET",
-		RPCURL:                "http://rpc.example.com/private/RPC_SECRET?token=QUERY_SECRET",
-		PprofURL:              "http://127.0.0.1:6060/debug/pprof?token=PPROF_SECRET",
-		LogDir:                "/var/lib/mithril/logs",
-		StatePath:             "/var/lib/mithril/state.json",
-		ReplayPath:            "/var/lib/mithril/replay_timings.jsonl",
-		ReferenceRPCURL:       "https://reference.example.com/REFERENCE_SECRET",
-		ReplayP99WarnMs:       321.5,
-		SlotsBehindWarn:       42,
-		LightbringerGRPCAddr:  "127.0.0.1:3001",
-		LightbringerInfluxURL: "https://influx.example.com/INFLUX_PATH_SECRET?token=INFLUX_QUERY_SECRET",
-		LightbringerInfluxDB:  "lightbringer_test",
-		LightbringerInfluxTok: "INFLUX_TOKEN_SECRET",
-		AccountsDir:           "/var/lib/mithril/accounts",
-		SnapshotsDir:          "/var/lib/mithril/snapshots",
-		ShredstoreDir:         "/var/lib/mithril/shredstore",
-		NodeCgroupPath:        "/sys/fs/cgroup/mithril.service",
-		BlockSource:           "lightbringer",
-		MaxConcurrent:         2,
-		RatePerSecond:         3.5,
-		RateBurst:             6,
-		OutputBudgetBytes:     16 * 1024,
+		Profile:           ProfileDiagnostic,
+		MetricsURL:        "https://user:password@metrics.example.com:8443/secret/path?api_key=METRICS_SECRET",
+		RPCURL:            "http://rpc.example.com/private/RPC_SECRET?token=QUERY_SECRET",
+		PprofURL:          "http://127.0.0.1:6060/debug/pprof?token=PPROF_SECRET",
+		LogDir:            "/var/lib/mithril/logs",
+		StatePath:         "/var/lib/mithril/state.json",
+		ReplayPath:        "/var/lib/mithril/replay_timings.jsonl",
+		ReferenceRPCURL:   "https://reference.example.com/REFERENCE_SECRET",
+		ReplayP99WarnMs:   321.5,
+		SlotsBehindWarn:   42,
+		AccountsDir:       "/var/lib/mithril/accounts",
+		SnapshotsDir:      "/var/lib/mithril/snapshots",
+		ShredstoreDir:     "/var/lib/mithril/shredstore",
+		NodeCgroupPath:    "/sys/fs/cgroup/mithril.service",
+		BlockSource:       "lightbringer",
+		MaxConcurrent:     2,
+		RatePerSecond:     3.5,
+		RateBurst:         6,
+		OutputBudgetBytes: 16 * 1024,
 	}
 	var telemetry bytes.Buffer
 	session := connectNewServerForTest(t, cfg, &telemetry)
@@ -464,7 +457,7 @@ func TestMCPInfoSanitizesOriginsAndReportsPolicyLimits(t *testing.T) {
 	if !ok || text.Text != string(encoded) {
 		t.Fatalf("compatibility fallback does not match structured info: %+v", result.Content)
 	}
-	for _, secret := range []string{"password", "METRICS_SECRET", "RPC_SECRET", "QUERY_SECRET", "PPROF_SECRET", "REFERENCE_SECRET", "INFLUX_PATH_SECRET", "INFLUX_QUERY_SECRET", "INFLUX_TOKEN_SECRET"} {
+	for _, secret := range []string{"password", "METRICS_SECRET", "RPC_SECRET", "QUERY_SECRET", "PPROF_SECRET", "REFERENCE_SECRET"} {
 		if bytes.Contains(encoded, []byte(secret)) {
 			t.Errorf("mcp_info leaked %q: %s", secret, encoded)
 		}
@@ -492,10 +485,8 @@ func TestMCPInfoSanitizesOriginsAndReportsPolicyLimits(t *testing.T) {
 	if info.LogDir != cfg.LogDir || info.StatePath != cfg.StatePath || info.ReplayPath != cfg.ReplayPath ||
 		info.AccountsDir != cfg.AccountsDir || info.SnapshotsDir != cfg.SnapshotsDir || info.ShredstoreDir != cfg.ShredstoreDir ||
 		info.Thresholds.ReplayP99WarnMS != 321.5 || info.Thresholds.SlotsBehindWarn != 42 ||
-		info.Thresholds.DiskWarnPercent != DefaultDiskWarnPercent || info.Thresholds.DiskCriticalPercent != DefaultDiskCriticalPercent || !info.NodeCgroupConfigured || info.BlockSource != "lightbringer" ||
-		info.LightbringerGRPCAddr != "127.0.0.1:3001" || !info.LightbringerInfluxConfigured || info.LightbringerInfluxOrigin != "https://influx.example.com:443" ||
-		info.LightbringerInfluxDB != "lightbringer_test" || info.LightbringerTokenConfigured == nil || !*info.LightbringerTokenConfigured {
-		t.Fatalf("configured paths/thresholds/Lightbringer metadata mismatch: %+v", info)
+		info.Thresholds.DiskWarnPercent != DefaultDiskWarnPercent || info.Thresholds.DiskCriticalPercent != DefaultDiskCriticalPercent || !info.NodeCgroupConfigured || info.BlockSource != "lightbringer" {
+		t.Fatalf("configured paths/thresholds/block-source metadata mismatch: %+v", info)
 	}
 }
 
@@ -514,19 +505,18 @@ func TestMCPInfoOmitsInactiveOptionalDetails(t *testing.T) {
 	if err := json.Unmarshal(encoded, &fields); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"metrics_origin", "rpc_origin", "pprof_origin", "lightbringer_influx_origin", "lightbringer_influx_database", "lightbringer_influx_token_configured"} {
+	for _, name := range []string{"metrics_origin", "rpc_origin", "pprof_origin"} {
 		if _, present := fields[name]; present {
 			t.Errorf("inactive optional detail %q should be omitted: %s", name, encoded)
 		}
 	}
 	for name, want := range map[string]string{
-		"diagnostic_tools_exposed":       "false",
-		"operator_tools_exposed":         "false",
-		"control_configured":             "false",
-		"node_cgroup_configured":         "false",
-		"lightbringer_influx_configured": "false",
-		"metrics_configured":             "false",
-		"rpc_configured":                 "false",
+		"diagnostic_tools_exposed": "false",
+		"operator_tools_exposed":   "false",
+		"control_configured":       "false",
+		"node_cgroup_configured":   "false",
+		"metrics_configured":       "false",
+		"rpc_configured":           "false",
 	} {
 		if got := string(fields[name]); got != want {
 			t.Errorf("%s = %s, want %s", name, got, want)
