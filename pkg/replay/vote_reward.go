@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"sync/atomic"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
-	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rewardcerts"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -41,6 +44,12 @@ func ApplyAlpenglowVoteRewards(
 		return nil
 	}
 
+	var rewardDetails *metrics.VoteRewardDetails
+	if slotCtx.Replay {
+		rewardDetails = &metrics.GlobalBlockReplay.VoteRewardDetails
+	}
+	var statePreparationDuration time.Duration
+
 	var rewardValidators map[solana.PublicKey]struct{}
 	var rewardSlot uint64
 	var rewardEpoch uint64
@@ -52,27 +61,55 @@ func ApplyAlpenglowVoteRewards(
 	var leaderVoteOK bool
 
 	if len(skipRaw) > 0 || len(notarRaw) > 0 {
+		var stateStart time.Time
+		if rewardDetails != nil {
+			stateStart = time.Now()
+		}
 		var ok bool
 		rewardSlot, ok = rewardcerts.RewardSlotForLeader(block.Slot)
 		if !ok {
 			return fmt.Errorf("slot %d vote rewards: invalid reward slot offset", block.Slot)
 		}
 		rewardEpoch = epochSchedule.GetEpoch(rewardSlot)
+		if rewardDetails != nil {
+			statePreparationDuration += time.Since(stateStart)
+		}
 
-		validatorSet, err := buildValidatorSetForEpoch(rewardEpoch)
+		verifierMaterial, err := loadVoteRewardVerifierMaterial(rewardEpoch, shredVersion, rewardDetails)
 		if err != nil {
 			return fmt.Errorf("slot %d vote rewards: %w", block.Slot, err)
 		}
 
-		validated, err := rewardcerts.ValidateRewardCertificates(block.Slot, skipRaw, notarRaw, validatorSet, shredVersion)
+		validated, validationTimings, err := rewardcerts.ValidateRewardCertificatesWithVerifier(
+			block.Slot,
+			skipRaw,
+			notarRaw,
+			rewardEpoch,
+			verifierMaterial.verifier,
+			rewardDetails != nil,
+		)
+		if rewardDetails != nil {
+			if len(skipRaw) > 0 {
+				rewardDetails.SkipCertificateValidation.AddTiming(validationTimings.Skip)
+			}
+			if len(notarRaw) > 0 {
+				rewardDetails.NotarCertificateValidation.AddTiming(validationTimings.Notar)
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("slot %d validate reward certs: %w", block.Slot, err)
 		}
 		if validated != nil {
 			rewardValidators = validated.Validators
 			rewardSlot = validated.RewardSlot
+			if rewardDetails != nil {
+				atomic.AddUint64(&rewardDetails.RewardValidators, uint64(len(rewardValidators)))
+			}
 		}
 
+		if rewardDetails != nil {
+			stateStart = time.Now()
+		}
 		inflationAcct, err := loadEpochInflationAccountStateForReplay(slotCtx)
 		if err != nil {
 			return fmt.Errorf("slot %d vote rewards: %w", block.Slot, err)
@@ -88,39 +125,76 @@ func ApplyAlpenglowVoteRewards(
 			return fmt.Errorf("slot %d vote rewards: %w", block.Slot, err)
 		}
 
-		leaderVote, leaderVoteOK = leaderVotePubkey(rewardEpoch, block.Leader)
-		if !leaderVoteOK {
-			return fmt.Errorf("slot %d vote rewards: leader vote account not found for %s", block.Slot, block.Leader)
+		rewardEpochStakes = verifierMaterial.snapshot.Stakes
+		totalStake = verifierMaterial.snapshot.TotalStake
+		// The leader reward belongs to the current block's selected vote account,
+		// while validator rewards use rewardSlot (eight slots earlier). At an epoch
+		// boundary, a compatibility fallback must therefore use the leader epoch.
+		leaderVoteAccounts := verifierMaterial.snapshot.VoteAccounts
+		leaderEpoch := epochSchedule.GetEpoch(block.Slot)
+		if leaderEpoch != rewardEpoch {
+			if leaderStakes, ok := global.EpochStakesSnapshot(leaderEpoch); ok {
+				leaderVoteAccounts = leaderStakes.VoteAccounts
+			} else {
+				leaderVoteAccounts = nil
+			}
 		}
+		leaderVote, err = leaderVotePubkey(block.Slot, leaderVoteAccounts, block.Leader)
+		if err != nil {
+			return fmt.Errorf("slot %d vote rewards: %w", block.Slot, err)
+		}
+		leaderVoteOK = true
 
-		rewardEpochStakes = global.EpochStakes(rewardEpoch)
-		totalStake = global.EpochTotalStake(rewardEpoch)
 		if totalStake == 0 {
 			for _, stake := range rewardEpochStakes {
 				totalStake += stake
 			}
+		}
+		if rewardDetails != nil {
+			statePreparationDuration += time.Since(stateStart)
 		}
 	}
 
 	var finalSigners map[solana.PublicKey]struct{}
 	var finalSlot uint64
 	if len(finalCertRaw) > 0 {
+		var decodeStart time.Time
+		if rewardDetails != nil {
+			decodeStart = time.Now()
+		}
 		fc, err := rewardcerts.DecodeFinalCertificate(finalCertRaw)
+		if rewardDetails != nil {
+			rewardDetails.FinalCertificateDecode.AddTimingSince(decodeStart)
+		}
 		if err != nil {
 			return fmt.Errorf("slot %d decode final cert: %w", block.Slot, err)
 		}
 		finalEpoch := epochSchedule.GetEpoch(fc.Slot)
-		finalValidatorSet, err := buildValidatorSetForEpoch(finalEpoch)
+		verifierMaterial, err := loadVoteRewardVerifierMaterial(finalEpoch, shredVersion, rewardDetails)
 		if err != nil {
 			return fmt.Errorf("slot %d final cert: %w", block.Slot, err)
 		}
-		validatedFinal, err := rewardcerts.ValidateBlockFinalCertificate(finalCertRaw, finalValidatorSet, shredVersion)
+		var validationStart time.Time
+		if rewardDetails != nil {
+			validationStart = time.Now()
+		}
+		validatedFinal, err := rewardcerts.ValidateDecodedBlockFinalCertificateWithVerifier(
+			fc,
+			finalEpoch,
+			verifierMaterial.verifier,
+		)
+		if rewardDetails != nil {
+			rewardDetails.FinalCertificateValidation.AddTimingSince(validationStart)
+		}
 		if err != nil {
 			return fmt.Errorf("slot %d validate final cert: %w", block.Slot, err)
 		}
 		if validatedFinal != nil {
 			finalSigners = validatedFinal.Signers
 			finalSlot = validatedFinal.FinalSlot
+			if rewardDetails != nil {
+				atomic.AddUint64(&rewardDetails.FinalSigners, uint64(len(finalSigners)))
+			}
 		}
 	}
 
@@ -128,6 +202,10 @@ func ApplyAlpenglowVoteRewards(
 		return nil
 	}
 
+	var stateStart time.Time
+	if rewardDetails != nil {
+		stateStart = time.Now()
+	}
 	producerTimeNanos, ok, err := alpenglowFooterProducerTimeNanos(block)
 	if err != nil {
 		return fmt.Errorf("slot %d vote rewards: footer producer time: %w", block.Slot, err)
@@ -143,10 +221,17 @@ func ApplyAlpenglowVoteRewards(
 	if len(finalSigners) > 0 {
 		finalSlotTimestampNs = calcSlotTimestampNanos(finalSlot, block.Slot, producerTimeNanos)
 	}
+	var accountMutationStart time.Time
+	if rewardDetails != nil {
+		statePreparationDuration += time.Since(stateStart)
+		rewardDetails.StatePreparation.AddTiming(statePreparationDuration)
+		accountMutationStart = time.Now()
+	}
 
 	currentEpoch := block.Epoch
 	var leaderRewardAccum uint64
 	var voteAccountsUpdated int
+	var leaderUpdatedInUnion bool
 
 	for votePubkey := range unionVotePubkeys(rewardValidators, finalSigners) {
 		// Read the live in-slot account (reflecting same-slot transaction writes such as a
@@ -194,6 +279,9 @@ func ApplyAlpenglowVoteRewards(
 		}
 		slotCtx.RecordModifiedAcct(votePubkey)
 		voteAccountsUpdated++
+		if votePubkey == leaderVote {
+			leaderUpdatedInUnion = true
+		}
 	}
 
 	if leaderRewardAccum > 0 {
@@ -203,7 +291,6 @@ func ApplyAlpenglowVoteRewards(
 		// Read the live account so the leader reward stacks on top of any update the union loop
 		// (or a same-slot transaction) already applied to the leader's vote account, mirroring
 		// single-map Occupied/Vacant handling.
-		_, leaderAlreadyUpdated := slotCtx.ModifiedAccts[leaderVote]
 		acct, err := loadAccountLiveOrParentForReplay(slotCtx, leaderVote)
 		if err != nil {
 			return fmt.Errorf("slot %d vote rewards: load leader vote %s: %w", block.Slot, leaderVote, err)
@@ -219,11 +306,15 @@ func ApplyAlpenglowVoteRewards(
 			return fmt.Errorf("slot %d vote rewards: set leader vote %s: %w", block.Slot, leaderVote, err)
 		}
 		slotCtx.RecordModifiedAcct(leaderVote)
-		if !leaderAlreadyUpdated {
+		if !leaderUpdatedInUnion {
 			voteAccountsUpdated++
 		}
 	}
 
+	if rewardDetails != nil {
+		rewardDetails.AccountMutation.AddTimingSince(accountMutationStart)
+		atomic.AddUint64(&rewardDetails.VoteAccountsUpdated, uint64(voteAccountsUpdated))
+	}
 	return nil
 }
 
@@ -258,14 +349,6 @@ func unionVotePubkeys(rewardValidators, finalSigners map[solana.PublicKey]struct
 	return out
 }
 
-func buildValidatorSetForEpoch(epoch uint64) (alpenglow.ValidatorSet, error) {
-	stakes := global.EpochStakes(epoch)
-	if len(stakes) == 0 {
-		return alpenglow.ValidatorSet{}, fmt.Errorf("missing epoch stakes for epoch %d", epoch)
-	}
-	return alpenglow.BuildValidatorSet(epoch, stakes, global.EpochStakesVoteAccts(epoch), global.EpochTotalStake(epoch))
-}
-
 func alpenglowMigrationEpoch(block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule) (uint64, error) {
 	if block.Features == nil {
 		return 0, fmt.Errorf("missing feature set")
@@ -277,13 +360,39 @@ func alpenglowMigrationEpoch(block *b.Block, epochSchedule *sealevel.SysvarEpoch
 	return epochSchedule.GetEpoch(slot), nil
 }
 
-func leaderVotePubkey(epoch uint64, leaderNode solana.PublicKey) (solana.PublicKey, bool) {
-	for pk, va := range global.EpochStakesVoteAccts(epoch) {
-		if va.NodePubkey == leaderNode {
-			return pk, true
+func leaderVotePubkey(
+	leaderSlot uint64,
+	voteAccounts map[solana.PublicKey]*epochstakes.VoteAccount,
+	leaderNode solana.PublicKey,
+) (solana.PublicKey, error) {
+	if scheduledNode, scheduledVote, ok := global.LeaderForSlotWithVoteAccount(leaderSlot); ok {
+		if scheduledNode != leaderNode {
+			return solana.PublicKey{}, fmt.Errorf(
+				"scheduled leader %s does not match block leader %s for slot %d",
+				scheduledNode, leaderNode, leaderSlot,
+			)
+		}
+		return scheduledVote, nil
+	}
+
+	var leaderVote solana.PublicKey
+	found := false
+	for pk, va := range voteAccounts {
+		if va != nil && va.NodePubkey == leaderNode {
+			if found {
+				return solana.PublicKey{}, fmt.Errorf(
+					"leader vote account is ambiguous for node %s without vote-keyed schedule metadata",
+					leaderNode,
+				)
+			}
+			leaderVote = pk
+			found = true
 		}
 	}
-	return solana.PublicKey{}, false
+	if !found {
+		return solana.PublicKey{}, fmt.Errorf("leader vote account not found for %s", leaderNode)
+	}
+	return leaderVote, nil
 }
 
 func applyVoteRewardToAccount(

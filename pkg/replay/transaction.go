@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"runtime/trace"
 	"strings"
 	"sync"
@@ -204,32 +203,31 @@ func isWritableForInstr(am *solana.AccountMeta, isProgramID bool, demoteProgramI
 	return true
 }
 
-func handleModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx) {
+type transactionPublicationStats struct {
+	touchedAccounts     uint64
+	touchedAccountBytes uint64
+}
+
+func handleModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx) transactionPublicationStats {
 	// update account states in slotCtx for all accounts 'touched' during the tx's execution
-	var touchedCount, touchedBytes uint64
-	for idx, newAcctState := range execCtx.TransactionContext.Accounts.Accounts {
-		if execCtx.TransactionContext.Accounts.Touched[idx] {
+	transactionAccounts := &execCtx.TransactionContext.Accounts
+	var stats transactionPublicationStats
+	for idx, newAcctState := range transactionAccounts.Accounts {
+		if transactionAccounts.Touched[idx] {
 			// Track touched account stats for profiling
-			touchedCount++
-			touchedBytes += uint64(len(newAcctState.Data))
-
-			// clean up accounts closed during the tx (garbage collection)
-			if newAcctState.Lamports == 0 {
-				newAcctState = &accounts.Account{Key: newAcctState.Key, RentEpoch: math.MaxUint64}
-			}
-
-			err := slotCtx.SetAccount(newAcctState.Key, newAcctState)
-			if err != nil {
-				panic(fmt.Sprintf("unable to set slot account for %s to update state: %s", newAcctState.Key, err))
-			}
-			slotCtx.RecordModifiedAcct(newAcctState.Key)
-			//mlog.Log.Debugf("modified account %s after tx", newAcctState.Key)
+			stats.touchedAccounts++
+			stats.touchedAccountBytes += uint64(len(newAcctState.Data))
 		}
 	}
+	if err := accounts.SetTransactionAccounts(slotCtx.Accounts, transactionAccounts.Accounts, transactionAccounts.Touched); err != nil {
+		panic(fmt.Sprintf("unable to publish transaction account states: %s", err))
+	}
+	slotCtx.RecordModifiedAccountStates(transactionAccounts.Accounts, transactionAccounts.Touched)
 
 	// Record touched stats for clone optimization profiling
-	TxAcctsTouched.Add(touchedCount)
-	TxAcctsTouchedBytes.Add(touchedBytes)
+	TxAcctsTouched.Add(stats.touchedAccounts)
+	TxAcctsTouchedBytes.Add(stats.touchedAccountBytes)
+	return stats
 }
 
 func recordStakeDelegation(slot uint64, acct *accounts.Account) {
@@ -347,6 +345,17 @@ func recordStakeAndVoteAccountsFromMetas(slotCtx *sealevel.SlotCtx, execCtx *sea
 }
 
 func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits, instrErr error, rentStateErr error) (*fees.TxFeeInfo, error) {
+	recordMetrics := slotCtx != nil && slotCtx.Replay
+	var totalStart time.Time
+	var preparationStart time.Time
+	if recordMetrics {
+		totalStart = time.Now()
+		preparationStart = totalStart
+		defer func() {
+			metrics.GlobalBlockReplay.TxFailedUpdateAccounts.AddTimingSince(totalStart)
+		}()
+	}
+
 	txFeeInfo := fees.CalculateTxFees(tx, instrs, computeBudgetLimits, slotCtx.Features)
 
 	payerAcctKey := tx.Message.AccountKeys[0]
@@ -356,21 +365,42 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, instrs []
 	}
 
 	if txFeeInfo.TotalFee > p.Lamports {
+		if recordMetrics {
+			metrics.GlobalBlockReplay.TxFailedPublicationPreparation.AddTimingSince(preparationStart)
+		}
 		return nil, sealevel.InstrErrInsufficientFunds
 	}
 
+	if recordMetrics {
+		metrics.GlobalBlockReplay.TxFailedPublicationPreparation.AddTimingSince(preparationStart)
+	}
+	var payerStart time.Time
+	if recordMetrics {
+		payerStart = time.Now()
+	}
 	p.Lamports -= txFeeInfo.TotalFee
 	err = slotCtx.SetAccount(payerAcctKey, p)
 	if err != nil {
 		panic(fmt.Sprintf("unable to set slot account to update state of payer acct after failed t: %s", err))
 	}
 	slotCtx.RecordModifiedAcct(payerAcctKey)
+	if recordMetrics {
+		metrics.GlobalBlockReplay.TxFailedPayerPublication.AddTimingSince(payerStart)
+	}
 
 	if len(instrs) >= 1 {
 		instr := instrs[0]
+		recordNonce := recordMetrics && sealevel.IsNonceInstr(instr)
+		var nonceStart time.Time
+		if recordNonce {
+			nonceStart = time.Now()
+		}
 		noncePubkey, didAdvanceNonceAcct := sealevel.MaybeAdvanceNonceAccountForFailedTx(slotCtx, tx, instr)
 		if didAdvanceNonceAcct {
 			slotCtx.RecordModifiedAcct(noncePubkey)
+			if recordNonce {
+				metrics.GlobalBlockReplay.TxFailedNoncePublication.AddTimingSince(nonceStart)
+			}
 		}
 	}
 
@@ -736,11 +766,15 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	}
 
 	// Apply state changes to slotCtx
-	start = time.Now()
+	if slotCtx.Replay {
+		start = time.Now()
+	}
 	if err := applySuccessfulTransactionState(slotCtx, execCtx, output.ExecutionResult); err != nil {
 		panic(fmt.Sprintf("unable to apply successful transaction %s in slot %d: %v", tx.Signatures[0], slotCtx.Slot, err))
 	}
-	metrics.GlobalBlockReplay.TxUpdateAccounts.AddTimingSince(start)
+	if slotCtx.Replay {
+		metrics.GlobalBlockReplay.TxUpdateAccounts.AddTimingSince(start)
+	}
 
 	return txFeeInfo, processTransactionComputeUnits(execCtx), nil
 }

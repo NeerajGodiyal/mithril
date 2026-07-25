@@ -1,67 +1,193 @@
 package accounts
 
 import (
+	"hash/maphash"
 	"maps"
 	"sync"
 
 	"github.com/gagliardetto/solana-go"
 )
 
+const (
+	overlayMaxShardCount         = 128
+	overlayTargetEntriesPerShard = 64
+)
+
+// Padding keeps adjacent shard locks off the same cache line. The exact mutex
+// size is architecture-dependent, so a full line is deliberately conservative.
+type overlayAccountShard struct {
+	mu    sync.RWMutex
+	delta map[[32]byte]*Account
+	_     [64]byte
+}
+
 // OverlayAccounts is a branch-local MVCC overlay over a parent account set: writes
 // go to an in-memory delta, reads fall back to the never-mutated parent.
 type OverlayAccounts struct {
-	mu     sync.RWMutex
-	delta  map[[32]byte]*Account
-	parent Accounts
+	shards        []overlayAccountShard
+	shardMask     uint64
+	shardCapacity int
+	hashSeed      maphash.Seed
+	parent        Accounts
 }
 
 func NewOverlayAccounts(parent Accounts) *OverlayAccounts {
-	return &OverlayAccounts{
-		delta:  make(map[[32]byte]*Account),
-		parent: parent,
+	return NewOverlayAccountsWithLen(parent, 0)
+}
+
+func NewOverlayAccountsWithLen(parent Accounts, length int) *OverlayAccounts {
+	return NewOverlayAccountsWithSizing(parent, length, length)
+}
+
+// NewOverlayAccountsWithSizing sizes lock sharding from the number of keys that
+// may be accessed, while sizing lazy delta maps from the expected write set.
+func NewOverlayAccountsWithSizing(parent Accounts, keyCount, writeCapacity int) *OverlayAccounts {
+	shardCount := overlayShardCount(keyCount)
+	shardCapacity := 0
+	if writeCapacity > 0 {
+		shardCapacity = (writeCapacity-1)/shardCount + 1
 	}
+	return &OverlayAccounts{
+		shards:        make([]overlayAccountShard, shardCount),
+		shardMask:     uint64(shardCount - 1),
+		shardCapacity: shardCapacity,
+		hashSeed:      maphash.MakeSeed(),
+		parent:        parent,
+	}
+}
+
+func overlayShardCount(length int) int {
+	requested := 0
+	if length > 0 {
+		requested = (length-1)/overlayTargetEntriesPerShard + 1
+	}
+	shardCount := 1
+	for shardCount < requested && shardCount < overlayMaxShardCount {
+		shardCount <<= 1
+	}
+	return shardCount
+}
+
+func (o *OverlayAccounts) shardForKey(pubkey [32]byte) *overlayAccountShard {
+	if len(o.shards) == 1 {
+		return &o.shards[0]
+	}
+	shardIdx := maphash.Comparable(o.hashSeed, pubkey) & o.shardMask
+	return &o.shards[shardIdx]
+}
+
+// setAccountOnShard stores an account while the caller holds the shard write
+// lock, or during quiescent construction through SetAccountWithoutLock.
+func (o *OverlayAccounts) setAccountOnShard(shard *overlayAccountShard, pubkey [32]byte, acct *Account) {
+	if shard.delta == nil {
+		shard.delta = make(map[[32]byte]*Account, o.shardCapacity)
+	}
+	shard.delta[pubkey] = acct
 }
 
 func (o *OverlayAccounts) GetAccount(pubkey *[32]byte) (*Account, error) {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	if acct, ok := o.delta[*pubkey]; ok {
+	shard := o.shardForKey(*pubkey)
+	shard.mu.RLock()
+	if acct, ok := shard.delta[*pubkey]; ok {
+		shard.mu.RUnlock()
 		return acct, nil
 	}
-	// Lock order is always overlay -> parent, so holding RLock across the
-	// parent read closes the delta/parent race without risking a deadlock.
-	return o.parent.GetAccount(pubkey)
+	// Lock order is always overlay shard -> parent, so holding RLock across
+	// the parent read closes the same-key delta/parent race without coupling
+	// unrelated shards.
+	acct, err := o.parent.GetAccount(pubkey)
+	shard.mu.RUnlock()
+	return acct, err
 }
 
 func (o *OverlayAccounts) GetAccountWithoutLock(pubkey solana.PublicKey) (*Account, error) {
-	if acct, ok := o.delta[pubkey]; ok {
+	shard := o.shardForKey(pubkey)
+	if acct, ok := shard.delta[pubkey]; ok {
 		return acct, nil
 	}
 	return o.parent.GetAccountWithoutLock(pubkey)
 }
 
 func (o *OverlayAccounts) SetAccount(pubkey *[32]byte, acct *Account) error {
-	o.mu.Lock()
-	o.delta[*pubkey] = acct
-	o.mu.Unlock()
+	shard := o.shardForKey(*pubkey)
+	shard.mu.Lock()
+	o.setAccountOnShard(shard, *pubkey, acct)
+	shard.mu.Unlock()
 	return nil
 }
 
+func (o *OverlayAccounts) SetTransactionAccounts(accountStates []*Account, touched []bool) error {
+	if err := validateTransactionAccountBatch(accountStates, touched); err != nil {
+		return err
+	}
+	o.setTransactionAccounts(accountStates, touched)
+	return nil
+}
+
+func (o *OverlayAccounts) setTransactionAccounts(accountStates []*Account, touched []bool) {
+	if len(o.shards) == 1 {
+		shard := &o.shards[0]
+		shard.mu.Lock()
+		defer shard.mu.Unlock()
+		for idx, acct := range accountStates {
+			if touched[idx] {
+				o.setAccountOnShard(shard, acct.Key, transactionAccountForStorage(acct))
+			}
+		}
+		return
+	}
+
+	// Publish one key at a time, matching the old visibility contract while
+	// allowing scheduler-independent keys to proceed through separate shards.
+	for idx, acct := range accountStates {
+		if !touched[idx] {
+			continue
+		}
+		shard := o.shardForKey(acct.Key)
+		shard.mu.Lock()
+		o.setAccountOnShard(shard, acct.Key, transactionAccountForStorage(acct))
+		shard.mu.Unlock()
+	}
+}
+
+// SetAccountWithoutLock is reserved for quiescent construction.
 func (o *OverlayAccounts) SetAccountWithoutLock(pubkey solana.PublicKey, acct *Account) error {
-	o.delta[pubkey] = acct
+	shard := o.shardForKey(pubkey)
+	o.setAccountOnShard(shard, pubkey, acct)
 	return nil
 }
 
-// AllAccounts returns the parent set with this branch's delta applied on top — a
-// point-in-time view (delta snapshotted under lock), not consistent under concurrent writes.
-func (o *OverlayAccounts) AllAccounts() []*Account {
-	o.mu.RLock()
-	deltaCopy := make(map[[32]byte]*Account, len(o.delta))
-	maps.Copy(deltaCopy, o.delta)
-	o.mu.RUnlock()
+func (o *OverlayAccounts) lockAllShardsForRead() int {
+	totalAccounts := 0
+	for idx := range o.shards {
+		o.shards[idx].mu.RLock()
+		totalAccounts += len(o.shards[idx].delta)
+	}
+	return totalAccounts
+}
 
-	// Merge outside the overlay lock: parent set first, then delta shadows it.
-	merged := make(map[[32]byte]*Account)
+func (o *OverlayAccounts) unlockAllShardsForRead() {
+	for idx := len(o.shards) - 1; idx >= 0; idx-- {
+		o.shards[idx].mu.RUnlock()
+	}
+}
+
+func (o *OverlayAccounts) snapshotDelta() map[[32]byte]*Account {
+	totalAccounts := o.lockAllShardsForRead()
+	deltaCopy := make(map[[32]byte]*Account, totalAccounts)
+	for idx := range o.shards {
+		maps.Copy(deltaCopy, o.shards[idx].delta)
+	}
+	o.unlockAllShardsForRead()
+	return deltaCopy
+}
+
+// AllAccounts returns the parent set with this branch's delta applied on top.
+func (o *OverlayAccounts) AllAccounts() []*Account {
+	deltaCopy := o.snapshotDelta()
+
+	// Merge outside the overlay locks: parent set first, then delta shadows it.
+	merged := make(map[[32]byte]*Account, len(deltaCopy))
 	for _, acct := range o.parent.AllAccounts() {
 		merged[[32]byte(acct.Key)] = acct
 	}
@@ -76,12 +202,14 @@ func (o *OverlayAccounts) AllAccounts() []*Account {
 // DeltaAccounts returns the accounts changed on this overlay (the branch diff).
 // Multi-branch (#14) promote-winner path; not used by the current linear tip.
 func (o *OverlayAccounts) DeltaAccounts() []*Account {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	out := make([]*Account, 0, len(o.delta))
-	for _, acct := range o.delta {
-		out = append(out, acct)
+	totalAccounts := o.lockAllShardsForRead()
+	out := make([]*Account, 0, totalAccounts)
+	for idx := range o.shards {
+		for _, acct := range o.shards[idx].delta {
+			out = append(out, acct)
+		}
 	}
+	o.unlockAllShardsForRead()
 	return out
 }
 

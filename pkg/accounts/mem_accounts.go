@@ -52,6 +52,24 @@ func (m MemAccounts) SetAccount(pubkey *[32]byte, acct *Account) error {
 	return nil
 }
 
+func (m MemAccounts) SetTransactionAccounts(accountStates []*Account, touched []bool) error {
+	if err := validateTransactionAccountBatch(accountStates, touched); err != nil {
+		return err
+	}
+	m.setTransactionAccounts(accountStates, touched)
+	return nil
+}
+
+func (m MemAccounts) setTransactionAccounts(accountStates []*Account, touched []bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for idx, acct := range accountStates {
+		if touched[idx] {
+			m.Map[acct.Key] = transactionAccountForStorage(acct)
+		}
+	}
+}
+
 func (m MemAccounts) SetAccountWithoutLock(pubkey solana.PublicKey, acct *Account) error {
 	m.Map[pubkey] = acct
 	return nil

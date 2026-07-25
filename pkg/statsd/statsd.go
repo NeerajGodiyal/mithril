@@ -29,15 +29,29 @@ type Metric struct {
 func (m Metric) String() string { return m.name }
 
 var (
-	PreprocessBlock     = Metric{"preprocess_block"}
-	TxLoop              = Metric{"tx_loop"}
-	LoadBlockAccounts   = Metric{"load_block_accounts"}
-	RunIncinerator      = Metric{"run_incinerator"}
-	Reward              = Metric{"reward"}
-	Rent                = Metric{"rent"}
-	BlockUpdateAccounts = Metric{"block_update_accounts"}
-	AccountsDeltaHash   = Metric{"accounts_delta_hash"}
-	BankHash            = Metric{"bank_hash"}
+	PreprocessBlock      = Metric{"preprocess_block"}
+	TxLoop               = Metric{"tx_loop"}
+	LoadBlockAccounts    = Metric{"load_block_accounts"}
+	RunIncinerator       = Metric{"run_incinerator"}
+	Reward               = Metric{"reward"}
+	Rent                 = Metric{"rent"}
+	BlockUpdateAccounts  = Metric{"block_update_accounts"}
+	AccountsDeltaHash    = Metric{"accounts_delta_hash"}
+	BankHash             = Metric{"bank_hash"}
+	AlpenglowVoteRewards = Metric{"alpenglow_vote_rewards_duration_seconds"}
+
+	VoteRewardValidatorPreparation       = Metric{"vote_reward_validator_preparation_duration_seconds"}
+	VoteRewardSkipCertificateValidation  = Metric{"vote_reward_skip_certificate_validation_duration_seconds"}
+	VoteRewardNotarCertificateValidation = Metric{"vote_reward_notar_certificate_validation_duration_seconds"}
+	VoteRewardFinalCertificateDecode     = Metric{"vote_reward_final_certificate_decode_duration_seconds"}
+	VoteRewardFinalCertificateValidation = Metric{"vote_reward_final_certificate_validation_duration_seconds"}
+	VoteRewardStatePreparation           = Metric{"vote_reward_state_preparation_duration_seconds"}
+	VoteRewardAccountMutation            = Metric{"vote_reward_account_mutation_duration_seconds"}
+	VoteRewardValidatorCacheHits         = Metric{"vote_reward_validator_cache_hits"}
+	VoteRewardValidatorCacheMisses       = Metric{"vote_reward_validator_cache_misses"}
+	VoteRewardValidators                 = Metric{"vote_reward_validators"}
+	VoteRewardFinalSigners               = Metric{"vote_reward_final_signers"}
+	VoteRewardAccountsUpdated            = Metric{"vote_reward_accounts_updated"}
 
 	InstructionsAndAccountMetasFromTx  = Metric{"instructions_and_account_metas_from_tx"}
 	ComputeBudgetExecutionInstructions = Metric{"compute_budget_execution_instructions"}
@@ -50,6 +64,16 @@ var (
 	PostTxRentStates                   = Metric{"post_tx_rent_states"}
 	PostBalanceDivergenceCheck         = Metric{"post_balance_divergence_check"}
 	TxUpdateAccounts                   = Metric{"tx_update_accounts"}
+	TxUpdateAccountsDuration           = Metric{"tx_update_accounts_duration_seconds"}
+	TxPublishRecordWritableAcct        = Metric{"tx_publish_record_writable_acct_duration_seconds"}
+	TxPublishTouchedAccountState       = Metric{"tx_publish_touched_account_state_duration_seconds"}
+	TxPublishStakeVoteBookkeeping      = Metric{"tx_publish_stake_vote_bookkeeping_duration_seconds"}
+	TxPublicationTouchedAccounts       = Metric{"tx_publication_touched_accounts"}
+	TxPublicationTouchedAccountBytes   = Metric{"tx_publication_touched_account_bytes"}
+	TxFailedUpdateAccounts             = Metric{"tx_failed_update_accounts_duration_seconds"}
+	TxFailedPublicationPreparation     = Metric{"tx_failed_publication_preparation_duration_seconds"}
+	TxFailedPayerPublication           = Metric{"tx_failed_payer_publication_duration_seconds"}
+	TxFailedNoncePublication           = Metric{"tx_failed_nonce_publication_duration_seconds"}
 
 	GetNextIxCtx                            = Metric{"get_next_ix_ctx"}
 	NextIxCtxConfigure                      = Metric{"next_ix_ctx_configure"}
@@ -117,15 +141,29 @@ var (
 // making these public so they can be used in tests and validate that if there is metrics there are corresponding types and labels
 
 var MetricToType = map[Metric]metricType{
-	PreprocessBlock:     TimingT,
-	TxLoop:              TimingT,
-	LoadBlockAccounts:   TimingT,
-	RunIncinerator:      TimingT,
-	Reward:              TimingT,
-	Rent:                TimingT,
-	BlockUpdateAccounts: TimingT,
-	AccountsDeltaHash:   TimingT,
-	BankHash:            TimingT,
+	PreprocessBlock:      TimingT,
+	TxLoop:               TimingT,
+	LoadBlockAccounts:    TimingT,
+	RunIncinerator:       TimingT,
+	Reward:               TimingT,
+	Rent:                 TimingT,
+	BlockUpdateAccounts:  TimingT,
+	AccountsDeltaHash:    TimingT,
+	BankHash:             TimingT,
+	AlpenglowVoteRewards: TimingT,
+
+	VoteRewardValidatorPreparation:       TimingT,
+	VoteRewardSkipCertificateValidation:  TimingT,
+	VoteRewardNotarCertificateValidation: TimingT,
+	VoteRewardFinalCertificateDecode:     TimingT,
+	VoteRewardFinalCertificateValidation: TimingT,
+	VoteRewardStatePreparation:           TimingT,
+	VoteRewardAccountMutation:            TimingT,
+	VoteRewardValidatorCacheHits:         CountT,
+	VoteRewardValidatorCacheMisses:       CountT,
+	VoteRewardValidators:                 CountT,
+	VoteRewardFinalSigners:               CountT,
+	VoteRewardAccountsUpdated:            CountT,
 
 	InstructionsAndAccountMetasFromTx:  TimingT,
 	ComputeBudgetExecutionInstructions: TimingT,
@@ -138,6 +176,16 @@ var MetricToType = map[Metric]metricType{
 	PostTxRentStates:                   TimingT,
 	PostBalanceDivergenceCheck:         TimingT,
 	TxUpdateAccounts:                   TimingT,
+	TxUpdateAccountsDuration:           TimingT,
+	TxPublishRecordWritableAcct:        TimingT,
+	TxPublishTouchedAccountState:       TimingT,
+	TxPublishStakeVoteBookkeeping:      TimingT,
+	TxPublicationTouchedAccounts:       CountT,
+	TxPublicationTouchedAccountBytes:   CountT,
+	TxFailedUpdateAccounts:             TimingT,
+	TxFailedPublicationPreparation:     TimingT,
+	TxFailedPayerPublication:           TimingT,
+	TxFailedNoncePublication:           TimingT,
 
 	GetNextIxCtx:                            TimingT,
 	NextIxCtxConfigure:                      TimingT,
@@ -200,15 +248,29 @@ var MetricToType = map[Metric]metricType{
 	Slot:                          GaugeT,
 }
 var MetricToLabels = map[Metric][]string{
-	PreprocessBlock:     {"phase"},
-	TxLoop:              {"phase"},
-	LoadBlockAccounts:   {"phase"},
-	RunIncinerator:      {"phase"},
-	Reward:              {"phase"},
-	Rent:                {"phase"},
-	BlockUpdateAccounts: {"phase"},
-	AccountsDeltaHash:   {"phase"},
-	BankHash:            {"phase"},
+	PreprocessBlock:      {"phase"},
+	TxLoop:               {"phase"},
+	LoadBlockAccounts:    {"phase"},
+	RunIncinerator:       {"phase"},
+	Reward:               {"phase"},
+	Rent:                 {"phase"},
+	BlockUpdateAccounts:  {"phase"},
+	AccountsDeltaHash:    {"phase"},
+	BankHash:             {"phase"},
+	AlpenglowVoteRewards: {"phase"},
+
+	VoteRewardValidatorPreparation:       {"phase"},
+	VoteRewardSkipCertificateValidation:  {"phase"},
+	VoteRewardNotarCertificateValidation: {"phase"},
+	VoteRewardFinalCertificateDecode:     {"phase"},
+	VoteRewardFinalCertificateValidation: {"phase"},
+	VoteRewardStatePreparation:           {"phase"},
+	VoteRewardAccountMutation:            {"phase"},
+	VoteRewardValidatorCacheHits:         {"phase"},
+	VoteRewardValidatorCacheMisses:       {"phase"},
+	VoteRewardValidators:                 {"phase"},
+	VoteRewardFinalSigners:               {"phase"},
+	VoteRewardAccountsUpdated:            {"phase"},
 
 	InstructionsAndAccountMetasFromTx:  {"phase"},
 	ComputeBudgetExecutionInstructions: {"phase"},
@@ -221,6 +283,16 @@ var MetricToLabels = map[Metric][]string{
 	PostTxRentStates:                   {"phase"},
 	PostBalanceDivergenceCheck:         {"phase"},
 	TxUpdateAccounts:                   {"phase"},
+	TxUpdateAccountsDuration:           {"phase"},
+	TxPublishRecordWritableAcct:        {"phase"},
+	TxPublishTouchedAccountState:       {"phase"},
+	TxPublishStakeVoteBookkeeping:      {"phase"},
+	TxPublicationTouchedAccounts:       {"phase"},
+	TxPublicationTouchedAccountBytes:   {"phase"},
+	TxFailedUpdateAccounts:             {"phase"},
+	TxFailedPublicationPreparation:     {"phase"},
+	TxFailedPayerPublication:           {"phase"},
+	TxFailedNoncePublication:           {"phase"},
 
 	GetNextIxCtx:                            {"phase"},
 	NextIxCtxConfigure:                      {"phase"},
@@ -308,6 +380,22 @@ var MetricToBuckets = map[Metric][]float64{
 	TurbineTransactionParse:                     turbinePipelineDurationBuckets,
 	TurbineTransactionSigverify:                 turbinePipelineDurationBuckets,
 	TurbineReplayAdmission:                      turbinePipelineDurationBuckets,
+	AlpenglowVoteRewards:                        turbinePipelineDurationBuckets,
+	VoteRewardValidatorPreparation:              turbinePipelineDurationBuckets,
+	VoteRewardSkipCertificateValidation:         turbinePipelineDurationBuckets,
+	VoteRewardNotarCertificateValidation:        turbinePipelineDurationBuckets,
+	VoteRewardFinalCertificateDecode:            turbinePipelineDurationBuckets,
+	VoteRewardFinalCertificateValidation:        turbinePipelineDurationBuckets,
+	VoteRewardStatePreparation:                  turbinePipelineDurationBuckets,
+	VoteRewardAccountMutation:                   turbinePipelineDurationBuckets,
+	TxUpdateAccountsDuration:                    turbinePipelineDurationBuckets,
+	TxPublishRecordWritableAcct:                 turbinePipelineDurationBuckets,
+	TxPublishTouchedAccountState:                turbinePipelineDurationBuckets,
+	TxPublishStakeVoteBookkeeping:               turbinePipelineDurationBuckets,
+	TxFailedUpdateAccounts:                      turbinePipelineDurationBuckets,
+	TxFailedPublicationPreparation:              turbinePipelineDurationBuckets,
+	TxFailedPayerPublication:                    turbinePipelineDurationBuckets,
+	TxFailedNoncePublication:                    turbinePipelineDurationBuckets,
 }
 
 type Prometheusmetrics struct {
@@ -432,6 +520,13 @@ func Duration(m Metric, duration time.Duration, labels []string) error {
 	return nil
 }
 
+func sendReplayDuration(metric Metric, timing mithrilmetrics.Timing, labels []string) {
+	if timing.Count == 0 {
+		return
+	}
+	_ = Duration(metric, time.Duration(timing.SumNanoseconds), labels)
+}
+
 func SendBlockReplayMetrics(r mithrilmetrics.BlockReplay) {
 	blockLatency := "replay_block"
 	txLatency := "replay_tx_sum"
@@ -447,6 +542,19 @@ func SendBlockReplayMetrics(r mithrilmetrics.BlockReplay) {
 	Timing(BlockUpdateAccounts, r.BlockUpdateAccounts.SumNanoseconds, []string{blockLatency})
 	Timing(AccountsDeltaHash, r.AccountsDeltaHash.SumNanoseconds, []string{blockLatency})
 	Timing(BankHash, r.BankHash.SumNanoseconds, []string{blockLatency})
+	sendReplayDuration(AlpenglowVoteRewards, r.AlpenglowVoteRewards, []string{blockLatency})
+	sendReplayDuration(VoteRewardValidatorPreparation, r.VoteRewardDetails.ValidatorPreparation, []string{blockLatency})
+	sendReplayDuration(VoteRewardSkipCertificateValidation, r.VoteRewardDetails.SkipCertificateValidation, []string{blockLatency})
+	sendReplayDuration(VoteRewardNotarCertificateValidation, r.VoteRewardDetails.NotarCertificateValidation, []string{blockLatency})
+	sendReplayDuration(VoteRewardFinalCertificateDecode, r.VoteRewardDetails.FinalCertificateDecode, []string{blockLatency})
+	sendReplayDuration(VoteRewardFinalCertificateValidation, r.VoteRewardDetails.FinalCertificateValidation, []string{blockLatency})
+	sendReplayDuration(VoteRewardStatePreparation, r.VoteRewardDetails.StatePreparation, []string{blockLatency})
+	sendReplayDuration(VoteRewardAccountMutation, r.VoteRewardDetails.AccountMutation, []string{blockLatency})
+	Count(VoteRewardValidatorCacheHits, int64(r.VoteRewardDetails.ValidatorCacheHits), []string{blockLatency})
+	Count(VoteRewardValidatorCacheMisses, int64(r.VoteRewardDetails.ValidatorCacheMisses), []string{blockLatency})
+	Count(VoteRewardValidators, int64(r.VoteRewardDetails.RewardValidators), []string{blockLatency})
+	Count(VoteRewardFinalSigners, int64(r.VoteRewardDetails.FinalSigners), []string{blockLatency})
+	Count(VoteRewardAccountsUpdated, int64(r.VoteRewardDetails.VoteAccountsUpdated), []string{blockLatency})
 	Timing(InstructionsAndAccountMetasFromTx, r.InstructionsAndAccountMetasFromTx.SumNanoseconds, []string{txLatency})
 	Timing(ComputeBudgetExecutionInstructions, r.ComputeBudgetExecutionInstructions.SumNanoseconds, []string{txLatency})
 	Timing(AccountsFromTx, r.AccountsFromTx.SumNanoseconds, []string{txLatency})
@@ -458,6 +566,16 @@ func SendBlockReplayMetrics(r mithrilmetrics.BlockReplay) {
 	Timing(PostTxRentStates, r.PostTxRentStates.SumNanoseconds, []string{txLatency})
 	Timing(PostBalanceDivergenceCheck, r.PostBalanceDivergenceCheck.SumNanoseconds, []string{txLatency})
 	Timing(TxUpdateAccounts, r.TxUpdateAccounts.SumNanoseconds, []string{txLatency})
+	sendReplayDuration(TxUpdateAccountsDuration, r.TxUpdateAccounts, []string{txLatency})
+	sendReplayDuration(TxPublishRecordWritableAcct, r.TxPublishRecordWritableAcct, []string{txLatency})
+	sendReplayDuration(TxPublishTouchedAccountState, r.TxPublishTouchedAccountState, []string{txLatency})
+	sendReplayDuration(TxPublishStakeVoteBookkeeping, r.TxPublishStakeVoteBookkeeping, []string{txLatency})
+	Count(TxPublicationTouchedAccounts, int64(r.TxPublicationTouchedAccounts), []string{txLatency})
+	Count(TxPublicationTouchedAccountBytes, int64(r.TxPublicationTouchedAccountBytes), []string{txLatency})
+	sendReplayDuration(TxFailedUpdateAccounts, r.TxFailedUpdateAccounts, []string{txLatency})
+	sendReplayDuration(TxFailedPublicationPreparation, r.TxFailedPublicationPreparation, []string{txLatency})
+	sendReplayDuration(TxFailedPayerPublication, r.TxFailedPayerPublication, []string{txLatency})
+	sendReplayDuration(TxFailedNoncePublication, r.TxFailedNoncePublication, []string{txLatency})
 	Timing(GetNextIxCtx, r.GetNextIxCtx.SumNanoseconds, []string{ixLatency})
 	Timing(NextIxCtxConfigure, r.NextIxCtxConfigure.SumNanoseconds, []string{ixLatency})
 	Timing(IxPush, r.IxPush.SumNanoseconds, []string{ixLatency})

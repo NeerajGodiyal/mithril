@@ -144,10 +144,10 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 	if err := finishLeaderSysvars(slotCtx, block); err != nil {
 		return nil, err
 	}
-	if err := ensureParentAccountsForModified(slotCtx); err != nil {
+	writable, modified := compileLeaderAccounts(slotCtx, block, rentAccts)
+	if err := ensureParentAccountsForModified(slotCtx, modified); err != nil {
 		return nil, err
 	}
-	writable, modified := compileLeaderAccounts(slotCtx, block, rentAccts)
 	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writable, modified, block.ParentBankhash, block.NumSignatures, block.Blockhash)
 	copy(block.ExpectedBankhash[:], slotCtx.FinalBankhash)
 	block.HasExpectedBankhash = true
@@ -217,11 +217,15 @@ func withData(acct *accounts.Account, data []byte) *accounts.Account {
 	return out
 }
 
-func ensureParentAccountsForModified(slotCtx *sealevel.SlotCtx) error {
+func ensureParentAccountsForModified(slotCtx *sealevel.SlotCtx, modified []*accounts.Account) error {
 	if slotCtx.Features == nil || !slotCtx.Features.IsActive(features.AccountsLtHash) {
 		return nil
 	}
-	for key := range slotCtx.ModifiedAccts {
+	for _, modifiedAcct := range modified {
+		if modifiedAcct == nil {
+			continue
+		}
+		key := modifiedAcct.Key
 		if _, err := slotCtx.GetParentAccount(key); err == nil {
 			continue
 		}

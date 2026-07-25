@@ -67,11 +67,13 @@ func TestPlanBlockTransactionExecutionRejectsDuplicateMessages(t *testing.T) {
 	require.Equal(t, firstHash, duplicateHash)
 	require.NotEqual(t, firstHash, differentHash)
 
-	plan, err := planBlockTransactionExecution(42, []*solana.Transaction{
-		first,
-		duplicateMessage,
-		differentMessage,
-	})
+	block := &b.Block{
+		Slot: 42,
+		Transactions: []*solana.Transaction{
+			first, duplicateMessage, differentMessage,
+		},
+	}
+	plan, err := planBlockTransactionExecution(block)
 	var duplicateErr *DuplicateTransactionMessagesError
 	require.Error(t, err)
 	require.True(t, errors.As(err, &duplicateErr))
@@ -85,7 +87,7 @@ func TestPlanBlockTransactionExecutionRejectsDuplicateMessages(t *testing.T) {
 }
 
 func TestPlanBlockTransactionExecutionRejectsNilTransaction(t *testing.T) {
-	_, err := planBlockTransactionExecution(42, []*solana.Transaction{nil})
+	_, err := planBlockTransactionExecution(&b.Block{Slot: 42, Transactions: []*solana.Transaction{nil}})
 	require.ErrorContains(t, err, "transaction 0 is nil")
 }
 

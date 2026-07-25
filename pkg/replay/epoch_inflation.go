@@ -209,6 +209,18 @@ func loadEpochInflationAccountStateForReplay(slotCtx *sealevel.SlotCtx) (EpochIn
 	if slotCtx == nil {
 		return EpochInflationAccountState{}, fmt.Errorf("missing slot context")
 	}
+
+	// The first executed bank after an epoch boundary stages the new inflation
+	// account in its current-bank accounts. This is especially important when
+	// the first eight slots are skipped: that same bank's reward certificate
+	// already targets the new epoch, while the parent still contains only the
+	// previous epoch's inflation state.
+	if slotCtx.Accounts != nil {
+		if acct, err := slotCtx.GetAccount(VoteRewardAccountAddr()); err == nil && acct != nil {
+			return decodeEpochInflationAccountFromAcct(acct, slotCtx.Slot)
+		}
+	}
+
 	acct, err := slotCtx.GetAccountFromAccountsDb(VoteRewardAccountAddr())
 	if err != nil {
 		return EpochInflationAccountState{}, fmt.Errorf("load vote reward account at parent slot %d: %w", slotCtx.ParentSlot, err)

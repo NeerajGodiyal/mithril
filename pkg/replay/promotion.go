@@ -68,6 +68,22 @@ type measuredSharedBlockAccountSource interface {
 	GetAccountsBatchSharedWithStats(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, accountsdb.BatchReadStats, error)
 }
 
+type measuredBlockAccountSource interface {
+	GetAccountWithStats(slot uint64, pubkey solana.PublicKey) (*accounts.Account, accountsdb.AccountReadStats, error)
+}
+
+func getAccountWithStats(source blockAccountSource, slot uint64, pubkey solana.PublicKey) (*accounts.Account, accountsdb.AccountReadStats, error) {
+	if measured, ok := source.(measuredBlockAccountSource); ok {
+		return measured.GetAccountWithStats(slot, pubkey)
+	}
+	start := time.Now()
+	acct, err := source.GetAccount(slot, pubkey)
+	return acct, accountsdb.AccountReadStats{
+		IndexAndAppendVecReadNanoseconds: uint64(time.Since(start).Nanoseconds()),
+		DurableRead:                      true,
+	}, err
+}
+
 func getAccountsBatchShared(ctx context.Context, source blockAccountSource, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
 	out, _, err := getAccountsBatchSharedWithStats(ctx, source, slot, pks)
 	return out, err
@@ -149,20 +165,43 @@ func (t *unrootedTail) SetTransactionStatusCheckpointHooks(hooks TransactionStat
 // (rooted) value read at slot.
 func (t *unrootedTail) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	if a, ok := t.overlay.Lookup([32]byte(pubkey)); ok {
-		// Callers receive a mutable account, never the WorkingSet's retained
-		// historical value. Fee and reward paths legitimately mutate values
-		// returned by this method.
 		return a.Clone(), nil
 	}
 	a, err := t.durable.GetAccount(slot, pubkey)
 	if err != nil || a == nil {
 		return a, err
 	}
+	return a.Clone(), nil
+}
+
+func (t *unrootedTail) GetAccountWithStats(slot uint64, pubkey solana.PublicKey) (*accounts.Account, accountsdb.AccountReadStats, error) {
+	var stats accountsdb.AccountReadStats
+	lookupStart := time.Now()
+	if a, ok := t.overlay.Lookup([32]byte(pubkey)); ok {
+		stats.WorkingSetLookupNanoseconds = uint64(time.Since(lookupStart).Nanoseconds())
+		stats.WorkingSetHit = true
+		// Callers receive a mutable account, never the WorkingSet's retained
+		// historical value. Fee and reward paths legitimately mutate values
+		// returned by this method.
+		cloneStart := time.Now()
+		acct := a.Clone()
+		stats.CloneNanoseconds = uint64(time.Since(cloneStart).Nanoseconds())
+		return acct, stats, nil
+	}
+	stats.WorkingSetLookupNanoseconds = uint64(time.Since(lookupStart).Nanoseconds())
+	a, durableStats, err := getAccountWithStats(t.durable, slot, pubkey)
+	durableStats.WorkingSetLookupNanoseconds += stats.WorkingSetLookupNanoseconds
+	if err != nil || a == nil {
+		return a, durableStats, err
+	}
 	// AccountsDb may satisfy this read from one of its shared read caches.
 	// Do not let a speculative caller (notably leader fee distribution) mutate
 	// that cached parent in place: ordered replay must observe the same parent
 	// value when it reconstructs the locally produced block.
-	return a.Clone(), nil
+	cloneStart := time.Now()
+	acct := a.Clone()
+	durableStats.CloneNanoseconds += uint64(time.Since(cloneStart).Nanoseconds())
+	return acct, durableStats, nil
 }
 
 // GetAccountsBatch returns one entry per requested key, in order, preferring the

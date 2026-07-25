@@ -49,7 +49,7 @@ type GlobalCtx struct {
 	mu                         sync.Mutex
 }
 
-var instance GlobalCtx
+var instance = GlobalCtx{epochStakes: epochstakes.NewEpochStakesCache()}
 
 func SetLatestBlockHash(blockHash [32]byte) {
 	instance.SetLatestBlockhash(blockHash)
@@ -221,14 +221,29 @@ func ClearEpochVoteStateSnapshots() {
 }
 
 func PutEpochStakesEntry(epoch uint64, pubkey solana.PublicKey, stake uint64, voteAcct *epochstakes.VoteAccount) {
-	if instance.epochStakes == nil {
-		instance.epochStakes = epochstakes.NewEpochStakesCache()
-	}
 	instance.epochStakes.PutEntry(epoch, pubkey, stake, voteAcct)
 }
 
+// PutEpochStakes atomically replaces all stake material for epoch.
+func PutEpochStakes(epoch uint64, stakes map[solana.PublicKey]uint64, voteAccts map[solana.PublicKey]*epochstakes.VoteAccount, totalStake uint64) uint64 {
+	return instance.epochStakes.PutEpoch(epoch, stakes, voteAccts, totalStake)
+}
+
+// EpochStakesSnapshot returns one coherent, immutable view of epoch.
+func EpochStakesSnapshot(epoch uint64) (epochstakes.Snapshot, bool) {
+	return instance.epochStakes.Snapshot(epoch)
+}
+
+// EpochStakes returns the immutable, cache-owned epoch view. Callers must not
+// mutate it. Epoch publication is copy-on-write, so the view remains valid
+// across later updates without copying hundreds of thousands of entries on
+// per-slot read paths.
 func EpochStakes(epoch uint64) map[solana.PublicKey]uint64 {
-	return instance.epochStakes.EpochStakes(epoch)
+	snapshot, ok := instance.epochStakes.Snapshot(epoch)
+	if !ok {
+		return nil
+	}
+	return snapshot.Stakes
 }
 
 func HasEpochStakes(epoch uint64) bool {
@@ -236,9 +251,6 @@ func HasEpochStakes(epoch uint64) bool {
 }
 
 func PutEpochTotalStake(epoch uint64, totalStake uint64) {
-	if instance.epochStakes == nil {
-		instance.epochStakes = epochstakes.NewEpochStakesCache()
-	}
 	instance.epochStakes.PutTotalEpochStake(epoch, totalStake)
 }
 
@@ -246,45 +258,47 @@ func EpochTotalStake(epoch uint64) uint64 {
 	return instance.epochStakes.TotalStake(epoch)
 }
 
-func StakeForVoteAcct(epoch uint64, voteAcct solana.PublicKey) uint64 {
-	epochStakes := instance.epochStakes.EpochStakes(epoch)
-	return epochStakes[voteAcct]
+func EpochStakesGeneration(epoch uint64) uint64 {
+	return instance.epochStakes.Generation(epoch)
 }
 
+func StakeForVoteAcct(epoch uint64, voteAcct solana.PublicKey) uint64 {
+	snapshot, ok := instance.epochStakes.Snapshot(epoch)
+	if !ok {
+		return 0
+	}
+	return snapshot.Stakes[voteAcct]
+}
+
+// EpochStakesVoteAccts follows the same immutable-view contract as
+// EpochStakes.
 func EpochStakesVoteAccts(epoch uint64) map[solana.PublicKey]*epochstakes.VoteAccount {
-	return instance.epochStakes.EpochStakesAccts(epoch)
+	snapshot, ok := instance.epochStakes.Snapshot(epoch)
+	if !ok {
+		return nil
+	}
+	return snapshot.VoteAccounts
 }
 
 // ClearEpochStakes removes all stakes for a specific epoch.
 // Used on resume to force rebuild from AccountsDB.
 func ClearEpochStakes(epoch uint64) {
-	if instance.epochStakes != nil {
-		instance.epochStakes.ClearEpochStakes(epoch)
-	}
+	instance.epochStakes.ClearEpochStakes(epoch)
 }
 
 // SerializeEpochStakes serializes the stakes for a single epoch to JSON.
 func SerializeEpochStakes(epoch uint64) ([]byte, error) {
-	if instance.epochStakes == nil {
-		return nil, nil
-	}
 	return instance.epochStakes.SerializeEpoch(epoch)
 }
 
 // DeserializeAndLoadEpochStakes deserializes and loads epoch stakes from JSON.
 // Returns the epoch number that was loaded.
 func DeserializeAndLoadEpochStakes(data []byte) (uint64, error) {
-	if instance.epochStakes == nil {
-		instance.epochStakes = epochstakes.NewEpochStakesCache()
-	}
 	return instance.epochStakes.DeserializeAndLoadEpoch(data)
 }
 
 // GetAllCachedEpochs returns all epochs currently in the epoch stakes cache.
 func GetAllCachedEpochs() []uint64 {
-	if instance.epochStakes == nil {
-		return nil
-	}
 	return instance.epochStakes.GetAllEpochs()
 }
 
@@ -365,6 +379,25 @@ func LeaderForSlot(slot uint64) (solana.PublicKey, bool) {
 		}
 	}
 	return solana.PublicKey{}, false
+}
+
+// LeaderForSlotWithVoteAccount returns the coherent node and vote-account pair
+// sampled for slot by a locally built vote-keyed schedule. Compatibility
+// schedules built from node-keyed RPC data return false.
+func LeaderForSlotWithVoteAccount(slot uint64) (solana.PublicKey, solana.PublicKey, bool) {
+	instance.leaderScheduleMutex.RLock()
+	defer instance.leaderScheduleMutex.RUnlock()
+
+	if instance.leaderSchedule != nil {
+		return instance.leaderSchedule.LeaderForSlotWithVoteAccount(slot)
+	}
+	for _, schedule := range instance.leaderSchedules {
+		if _, ok := schedule.LeaderForSlot(slot); !ok {
+			continue
+		}
+		return schedule.LeaderForSlotWithVoteAccount(slot)
+	}
+	return solana.PublicKey{}, solana.PublicKey{}, false
 }
 
 func (globctx *GlobalCtx) SetLatestBlockhash(blockhash [32]byte) {

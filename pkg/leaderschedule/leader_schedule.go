@@ -15,12 +15,18 @@ import (
 	"github.com/nixberg/chacha-rng-go"
 )
 
+type slotLeader struct {
+	nodePubkey     solana.PublicKey
+	voteAccount    solana.PublicKey
+	hasVoteAccount bool
+}
+
 type LeaderSchedule struct {
-	lsMap map[uint64]solana.PublicKey
+	lsMap map[uint64]slotLeader
 }
 
 func NewLeaderScheduleFromKeyedSlots(ls map[solana.PublicKey][]uint64, epochStartSlot uint64) *LeaderSchedule {
-	lsMap := make(map[uint64]solana.PublicKey)
+	lsMap := make(map[uint64]slotLeader)
 
 	for pubkey, epochIndices := range ls {
 		for _, idx := range epochIndices {
@@ -28,11 +34,11 @@ func NewLeaderScheduleFromKeyedSlots(ls map[solana.PublicKey][]uint64, epochStar
 			if err != nil {
 				panic(fmt.Sprintf("overflow for %s, idx %d, epochStartSlot = %d", pubkey, idx, epochStartSlot))
 			}
-			existingPubkey, exists := lsMap[slot]
+			existingLeader, exists := lsMap[slot]
 			if exists {
-				panic(fmt.Sprintf("error adding %s as leader for slot %d - there's already an entry for %s", pubkey, slot, existingPubkey))
+				panic(fmt.Sprintf("error adding %s as leader for slot %d - there's already an entry for %s", pubkey, slot, existingLeader.nodePubkey))
 			}
-			lsMap[slot] = pubkey
+			lsMap[slot] = slotLeader{nodePubkey: pubkey}
 		}
 	}
 
@@ -104,16 +110,24 @@ func New(
 		voteToNode[va.voteAcct] = va.nodePubkey
 	}
 
-	// Convert vote account leaders → node identity leaders
-	nodeLeaders := make([]solana.PublicKey, len(voteAccountLeaders))
+	// Preserve both sides of the vote-keyed selection. The node identity remains
+	// the public leader used for shred verification, while the selected vote
+	// account is needed by Alpenglow to credit the leader reward deterministically
+	// when multiple vote accounts share one node identity.
+	leaderScheduleMap := make(map[uint64]slotLeader, len(voteAccountLeaders))
+	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
 	for i, voteAcctPk := range voteAccountLeaders {
-		nodeLeaders[i] = voteToNode[voteAcctPk]
+		slotNum := uint64(i) + firstSlotInEpoch
+		leaderScheduleMap[slotNum] = slotLeader{
+			nodePubkey:     voteToNode[voteAcctPk],
+			voteAccount:    voteAcctPk,
+			hasVoteAccount: true,
+		}
 	}
 
-	firstSlotInEpoch := epochSchedule.FirstSlotInEpoch(epoch)
-	leaderSchedule := newFromLeadersDirect(nodeLeaders, firstSlotInEpoch)
-
-	return leaderSchedule
+	return &LeaderSchedule{
+		lsMap: leaderScheduleMap,
+	}
 }
 
 func stakeWeightedSlotLeaders(keyedStakes []pubkeyAndStakePair,
@@ -207,17 +221,6 @@ func uint64n(rng *chacha.ChaCha, n uint64) uint64 {
 		}
 		// Reject and retry
 	}
-}
-
-// newFromLeadersDirect creates a LeaderSchedule from node identity pubkeys directly.
-// Used when leaders are already node identities (after aggregating by node).
-func newFromLeadersDirect(nodeLeaders []solana.PublicKey, firstSlotInEpoch uint64) *LeaderSchedule {
-	leaderScheduleMap := make(map[uint64]solana.PublicKey, len(nodeLeaders))
-	for i, leader := range nodeLeaders {
-		slotNum := uint64(i) + firstSlotInEpoch
-		leaderScheduleMap[slotNum] = leader
-	}
-	return &LeaderSchedule{lsMap: leaderScheduleMap}
 }
 
 func sortStakes(stakes []pubkeyAndStakePair) []pubkeyAndStakePair {
@@ -328,5 +331,19 @@ func GetSortedStakesDebug(
 
 func (ls *LeaderSchedule) LeaderForSlot(slot uint64) (solana.PublicKey, bool) {
 	leader, exists := ls.lsMap[slot]
-	return leader, exists
+	if !exists {
+		return solana.PublicKey{}, false
+	}
+	return leader.nodePubkey, true
+}
+
+// LeaderForSlotWithVoteAccount returns the coherent node and vote-account pair
+// selected by the vote-keyed schedule. Schedules constructed from node-keyed
+// RPC data do not have the vote account and return false.
+func (ls *LeaderSchedule) LeaderForSlotWithVoteAccount(slot uint64) (solana.PublicKey, solana.PublicKey, bool) {
+	leader, exists := ls.lsMap[slot]
+	if !exists || !leader.hasVoteAccount {
+		return solana.PublicKey{}, solana.PublicKey{}, false
+	}
+	return leader.nodePubkey, leader.voteAccount, true
 }

@@ -21,15 +21,24 @@ func CalculateBankHash(slotCtx *sealevel.SlotCtx, writableAccts []*accounts.Acco
 
 	var acctDeltaHash []byte
 	if adhEnabled {
-		start := time.Now()
+		var start time.Time
+		if slotCtx.Replay {
+			start = time.Now()
+		}
 		acctDeltaHash = calculateAcctsDeltaHash(writableAccts)
-		metrics.GlobalBlockReplay.AccountsDeltaHash.AddTimingSince(start)
+		if slotCtx.Replay {
+			metrics.GlobalBlockReplay.AccountsDeltaHash.AddTimingSince(start)
+		}
 	}
 
 	if ltHashEnabled {
 		updateAcctsLtHash(slotCtx, modifiedAccts)
 	}
 
+	var finalizeStart time.Time
+	if slotCtx.Replay {
+		finalizeStart = time.Now()
+	}
 	hasher := sha256.New()
 
 	// lt accts hash enabled
@@ -65,6 +74,9 @@ func CalculateBankHash(slotCtx *sealevel.SlotCtx, writableAccts []*accounts.Acco
 		bankHash = finalHasher.Sum(nil)
 	} else {
 		bankHash = hasher.Sum(nil)
+	}
+	if slotCtx.Replay {
+		metrics.GlobalBlockReplay.BankHashFinalize.AddTimingSince(finalizeStart)
 	}
 
 	return bankHash

@@ -69,10 +69,11 @@ func (db *AccountsDb) readFoldMeta() (foldMeta, bool, error) {
 // foldTestHooks fire between CommitBatch stages so tests can inject crashes
 // (each hook may panic) at every point of the crash matrix.
 type foldTestHooks struct {
-	afterSegmentFsync   func()
-	afterManifestRename func()
-	beforeIndexCommit   func()
-	afterIndexCommit    func()
+	afterSegmentFsync     func()
+	afterManifestRename   func()
+	beforeIndexCommit     func()
+	afterPublicationStart func()
+	afterIndexCommit      func()
 }
 
 func fire(h func()) {
@@ -273,19 +274,42 @@ func (db *AccountsDb) CommitBatch(
 		}
 	}
 
-	// (7) The index epoch flip: entries + meta in one batch.
-	fire(db.foldHooks.beforeIndexCommit)
-	if err := db.applyManifestToIndex(manifest); err != nil {
-		return BatchCommitResult{}, err
-	}
-	fire(db.foldHooks.afterIndexCommit)
-
-	// (8) Publish.
+	// Prepare the cache refresh before entering the short publication section.
 	live := make([]*accounts.Account, 0, len(union))
 	for _, k := range keys {
 		live = append(live, union[k].acct)
 	}
-	db.refreshReadCaches(live)
+
+	// (7) Publish the immutable changed-key view and advance the cache epoch
+	// under a short lock. While pendingFold is installed, readers resolve every
+	// changed key from the new union; unchanged keys are identical on both sides
+	// of the atomic Pebble commit. This lets the expensive index fsync and cache
+	// refresh proceed without blocking account loaders.
+	fire(db.foldHooks.beforeIndexCommit)
+	db.readCacheEpochMu.Lock()
+	db.pendingFold = union
+	db.readCacheEpoch++
+	db.readCacheEpochMu.Unlock()
+	fire(db.foldHooks.afterPublicationStart)
+
+	if err := db.applyManifestToIndex(manifest); err != nil {
+		db.readCacheEpochMu.Lock()
+		db.pendingFold = nil
+		db.readCacheEpochMu.Unlock()
+		return BatchCommitResult{}, err
+	}
+
+	// Old readers captured the preceding epoch and therefore cannot publish
+	// stale values. New readers use pendingFold for changed keys until these
+	// ordinary concurrent-safe cache operations finish.
+	db.refreshReadCacheEntries(live)
+
+	db.readCacheEpochMu.Lock()
+	db.pendingFold = nil
+	db.readCacheEpochMu.Unlock()
+	fire(db.foldHooks.afterIndexCommit)
+
+	// (8) Publish.
 	db.lastBatchSeq = batchSeq
 	db.durableThrough.Store(throughSlot)
 

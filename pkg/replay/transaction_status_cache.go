@@ -505,8 +505,21 @@ func (c *TransactionStatusCache) ValidateBlock(block *b.Block) error {
 	if block == nil {
 		return errors.New("nil block")
 	}
-	if _, err := planBlockTransactionExecution(block.Slot, block.Transactions); err != nil {
+	plan, err := planBlockTransactionExecution(block)
+	if err != nil {
 		return err
+	}
+	return c.validateBlockWithPlan(block, plan)
+}
+
+// validateBlockWithPlan preserves the status-cache checks while letting
+// replay reuse the exact immutable identities used for execution planning.
+func (c *TransactionStatusCache) validateBlockWithPlan(block *b.Block, plan blockTransactionExecutionPlan) error {
+	if block == nil {
+		return errors.New("nil block")
+	}
+	if plan.messageIdentities == nil || !plan.messageIdentities.MatchesBlock(block) {
+		return errors.New("prepared transaction message identities do not match block")
 	}
 	if c == nil {
 		return &IncompleteTransactionStatusCoverageError{}
@@ -520,21 +533,18 @@ func (c *TransactionStatusCache) ValidateBlock(block *b.Block) error {
 	if err := c.validateParentLocked(block); err != nil {
 		return err
 	}
-	return c.validateAncestorTransactionsLocked(block.Slot, block.Transactions)
+	return c.validateAncestorTransactionsLocked(block.Slot, plan.messageIdentities)
 }
 
-func (c *TransactionStatusCache) validateAncestorTransactionsLocked(slot uint64, transactions []*solana.Transaction) error {
+func (c *TransactionStatusCache) validateAncestorTransactionsLocked(slot uint64, identities *b.PreparedTransactionMessageIdentities) error {
 	var already *AncestorAlreadyProcessedTransactionMessagesError
-	for index, tx := range transactions {
-		messageHash, err := TransactionMessageHash(tx)
-		if err != nil {
-			return fmt.Errorf("hash transaction %d message: %w", index, err)
-		}
-		group := c.visible[tx.Message.RecentBlockhash]
+	for index := 0; index < identities.Len(); index++ {
+		identity := identities.Identity(index)
+		group := c.visible[identity.RecentBlockhash]
 		if group == nil {
 			continue
 		}
-		key := sliceTransactionStatusKey(messageHash, group.keyIndex)
+		key := sliceTransactionStatusKey(identity.MessageHash, group.keyIndex)
 		if group.keys[key] == 0 {
 			continue
 		}
@@ -545,7 +555,7 @@ func (c *TransactionStatusCache) validateAncestorTransactionsLocked(slot uint64,
 		if len(already.Occurrences) < maxAncestorAlreadyProcessedOccurrences {
 			already.Occurrences = append(already.Occurrences, AncestorAlreadyProcessedOccurrence{
 				Index:         index,
-				ProcessedSlot: c.processedSlotLocked(tx.Message.RecentBlockhash, key),
+				ProcessedSlot: c.processedSlotLocked(identity.RecentBlockhash, key),
 			})
 		}
 	}
@@ -566,34 +576,38 @@ func (c *TransactionStatusCache) CommitBlock(block *b.Block) error {
 	if block == nil {
 		return errors.New("commit transaction statuses: nil block")
 	}
+	plan, err := planBlockTransactionExecution(block)
+	if err != nil {
+		return err
+	}
+	return c.commitBlockWithPlan(block, plan)
+}
+
+// commitBlockWithPlan atomically rechecks the mutable lineage/status state and
+// publishes the already-prepared immutable transaction identities.
+func (c *TransactionStatusCache) commitBlockWithPlan(block *b.Block, plan blockTransactionExecutionPlan) error {
+	if block == nil || plan.messageIdentities == nil || !plan.messageIdentities.MatchesBlock(block) {
+		return errors.New("prepared transaction message identities do not match block")
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.coverageComplete {
 		return &IncompleteTransactionStatusCoverageError{CachedRoot: c.rootedThrough}
 	}
-	// Recheck both same-bank duplicates and ancestor status atomically with
-	// publication. This keeps CommitBlock safe even if a caller's earlier
-	// ValidateBlock result raced a branch transition.
-	if _, err := planBlockTransactionExecution(block.Slot, block.Transactions); err != nil {
-		return err
-	}
+	// Parent lineage and ancestor status are mutable, so both remain under the
+	// publication lock even when hashing and same-bank deduplication happened
+	// earlier. This keeps commit safe across a concurrent branch transition.
 	if err := c.validateParentLocked(block); err != nil {
 		return err
 	}
-	if err := c.validateAncestorTransactionsLocked(block.Slot, block.Transactions); err != nil {
+	if err := c.validateAncestorTransactionsLocked(block.Slot, plan.messageIdentities); err != nil {
 		return err
 	}
 
 	delta := make(transactionStatusDelta)
-	for index, tx := range block.Transactions {
-		if tx == nil {
-			return fmt.Errorf("commit transaction statuses: transaction %d is nil", index)
-		}
-		messageHash, err := TransactionMessageHash(tx)
-		if err != nil {
-			return fmt.Errorf("commit transaction statuses: hash transaction %d: %w", index, err)
-		}
-		blockhash := tx.Message.RecentBlockhash
+	for index := 0; index < plan.messageIdentities.Len(); index++ {
+		identity := plan.messageIdentities.Identity(index)
+		blockhash := identity.RecentBlockhash
 		group := delta[blockhash]
 		if group == nil {
 			keyIndex := uint8(0)
@@ -606,7 +620,7 @@ func (c *TransactionStatusCache) CommitBlock(block *b.Block) error {
 			}
 			delta[blockhash] = group
 		}
-		group.keys[sliceTransactionStatusKey(messageHash, group.keyIndex)] = struct{}{}
+		group.keys[sliceTransactionStatusKey(identity.MessageHash, group.keyIndex)] = struct{}{}
 	}
 
 	if err := c.addDeltaVisibleLocked(delta); err != nil {

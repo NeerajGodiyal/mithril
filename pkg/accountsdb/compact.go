@@ -301,7 +301,10 @@ func (db *AccountsDb) compactFile(c compactCandidate, minDeadFraction float64) (
 	if len(data) == 0 || len(liveIdx) == 0 {
 		// Fully dead (or empty bankhash-only segment past the horizon): no
 		// index state references it; drop source + its manifest.
-		if err := removeSourceFiles(db.AcctsDir, srcPath, c.manifestPath); err != nil {
+		db.appendVecReadMu.Lock()
+		err := removeSourceFiles(db.AcctsDir, srcPath, c.manifestPath)
+		db.appendVecReadMu.Unlock()
+		if err != nil {
 			return false, 0, err
 		}
 		return true, 0, nil
@@ -376,7 +379,11 @@ func (db *AccountsDb) compactFile(c compactCandidate, minDeadFraction float64) (
 
 	// Move the index entries in one batch, then make the move durable BEFORE
 	// unlinking the source — with the WAL off that means an explicit Flush,
-	// because compact manifests are not replayed at recovery.
+	// because compact manifests are not replayed at recovery. Exclude snapshot
+	// readers from this short move-to-unlink window, so each sees either the old
+	// path or the new path and never needs a cross-epoch per-key fallback.
+	db.appendVecReadMu.Lock()
+	defer db.appendVecReadMu.Unlock()
 	batch := db.Index.NewBatch()
 	defer batch.Close()
 	var idxBuf [24]byte
