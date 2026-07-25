@@ -178,6 +178,26 @@ func TestGetAccountsBatchIteratorExactMatchOrderAndInputImmutability(t *testing.
 	assert.Equal(t, out[count+2].Lamports, out[count+3].Lamports)
 }
 
+func TestNextPubkey(t *testing.T) {
+	key := solana.PublicKey{1, 2, 3}
+	var next [32]byte
+	require.True(t, nextPubkey(key, &next))
+	assert.Equal(t, byte(1), next[0])
+	assert.Equal(t, byte(1), next[len(next)-1])
+
+	key = solana.PublicKey{}
+	key[len(key)-2] = 7
+	key[len(key)-1] = 0xff
+	require.True(t, nextPubkey(key, &next))
+	assert.Equal(t, byte(8), next[len(next)-2])
+	assert.Zero(t, next[len(next)-1])
+
+	for idx := range key {
+		key[idx] = 0xff
+	}
+	assert.False(t, nextPubkey(key, &next))
+}
+
 func TestGetAccountsBatchRejectsCancelledContextAndMalformedIndex(t *testing.T) {
 	db, _ := newFoldTestDb(t)
 	defer db.CloseDb()
@@ -248,6 +268,70 @@ func TestBatchCacheAdmissionCannotOverwriteNewerFold(t *testing.T) {
 	if cached, ok := db.CommonAcctsCache.Get(old.Key); ok {
 		assert.Equal(t, uint64(20), cached.Lamports, "stale batch must never win cache publication")
 	}
+}
+
+func TestFoldPublicationServesNewValuesWithoutBlockingReaders(t *testing.T) {
+	db, _ := newFoldTestDb(t)
+	defer db.CloseDb()
+
+	old := foldAcct(1, 10, []byte{1})
+	_, err := db.CommitBatch([]accounts.SlotDelta{{Slot: 100, Delta: []*accounts.Account{old}}}, 100, nil, nil)
+	require.NoError(t, err)
+	require.True(t, db.CommonAcctsCache.Set(old.Key, old))
+
+	publicationStarted := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseCommit) })
+	db.foldHooks.afterPublicationStart = func() {
+		close(publicationStarted)
+		<-releaseCommit
+	}
+
+	updated := foldAcct(1, 20, []byte{2})
+	commitDone := make(chan error, 1)
+	go func() {
+		_, err := db.CommitBatch([]accounts.SlotDelta{{Slot: 101, Delta: []*accounts.Account{updated}}}, 101, nil, nil)
+		commitDone <- err
+	}()
+	select {
+	case <-publicationStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fold did not publish its pending view")
+	}
+
+	type singleResult struct {
+		acct  *accounts.Account
+		stats AccountReadStats
+		err   error
+	}
+	singleDone := make(chan singleResult, 1)
+	go func() {
+		acct, stats, err := db.GetAccountWithStats(101, old.Key)
+		singleDone <- singleResult{acct: acct, stats: stats, err: err}
+	}()
+	select {
+	case result := <-singleDone:
+		require.NoError(t, result.err)
+		assert.Equal(t, uint64(20), result.acct.Lamports)
+		assert.True(t, result.stats.PendingFoldHit)
+	case <-time.After(time.Second):
+		t.Fatal("single account read blocked behind index commit")
+	}
+
+	batch, stats, err := db.GetAccountsBatchSharedWithStats(context.Background(), 101, []solana.PublicKey{old.Key})
+	require.NoError(t, err)
+	require.Len(t, batch, 1)
+	assert.Equal(t, uint64(20), batch[0].Lamports)
+	assert.Equal(t, uint64(1), stats.PendingFoldHits)
+	assert.Zero(t, stats.IndexHits)
+
+	releaseOnce.Do(func() { close(releaseCommit) })
+	require.NoError(t, <-commitDone)
+	db.foldHooks.afterPublicationStart = nil
+	got, err := db.GetAccount(101, old.Key)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(20), got.Lamports)
 }
 
 func TestRefreshReadCachesIsScanResistantAndCoherent(t *testing.T) {

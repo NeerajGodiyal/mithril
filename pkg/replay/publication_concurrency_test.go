@@ -33,11 +33,12 @@ func TestConcurrentDisjointTransactionPublication(t *testing.T) {
 	parent := accounts.NewMemAccounts()
 	overlay := accounts.NewOverlayAccountsWithLen(parent, totalAccounts)
 	slotCtx := &sealevel.SlotCtx{
-		Accounts:      overlay,
-		Features:      feats,
-		AcctMapsMu:    &sync.Mutex{},
-		ModifiedAccts: make(map[solana.PublicKey]bool, totalAccounts),
-		WritableAccts: make(map[solana.PublicKey]bool),
+		Accounts:                  overlay,
+		Features:                  feats,
+		AcctMapsMu:                &sync.Mutex{},
+		ModifiedAccts:             make(map[solana.PublicKey]bool),
+		WritableAccts:             make(map[solana.PublicKey]bool),
+		ModifiedAccountsFromDelta: true,
 	}
 
 	start := make(chan struct{})
@@ -78,9 +79,10 @@ func TestConcurrentDisjointTransactionPublication(t *testing.T) {
 	}
 
 	assert.Empty(t, slotCtx.WritableAccts, "ADH-removed replay must not build the unused writable set")
-	require.Len(t, slotCtx.ModifiedAccts, totalAccounts)
+	assert.Empty(t, slotCtx.ModifiedAccts, "overlay delta replaces the contended modified-account map")
 	require.Len(t, overlay.DeltaAccounts(), totalAccounts)
-	for key := range slotCtx.ModifiedAccts {
+	for _, modified := range overlay.DeltaAccounts() {
+		key := modified.Key
 		acct, err := overlay.GetAccount((*[32]byte)(&key))
 		require.NoError(t, err)
 		assert.Equal(t, binary.LittleEndian.Uint64(key[:8]), acct.Lamports)

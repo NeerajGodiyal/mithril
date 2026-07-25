@@ -68,6 +68,7 @@ type BatchReadStats struct {
 
 	WorkingSetHits    uint64
 	InProgressHits    uint64
+	PendingFoldHits   uint64
 	CacheHits         uint64
 	IndexHits         uint64
 	IndexMisses       uint64
@@ -88,15 +89,17 @@ type BatchReadStats struct {
 	DecodedAccountBytes   uint64
 	PlaceholderObjects    uint64
 
-	WorkingSetLookupNanoseconds uint64
-	InProgressNanoseconds       uint64
-	AppendVecPinWaitNanoseconds uint64
-	CacheLookupNanoseconds      uint64
-	AdmissionFilterNanoseconds  uint64
-	IndexLookupNanoseconds      uint64
-	ReadPlanningNanoseconds     uint64
-	AppendVecReadNanoseconds    uint64
-	CachePublicationNanoseconds uint64
+	WorkingSetLookupNanoseconds     uint64
+	InProgressNanoseconds           uint64
+	AppendVecPinWaitNanoseconds     uint64
+	ReadCacheEpochWaitNanoseconds   uint64
+	CacheLookupNanoseconds          uint64
+	AdmissionFilterNanoseconds      uint64
+	IndexLookupNanoseconds          uint64
+	ReadPlanningNanoseconds         uint64
+	AppendVecReadNanoseconds        uint64
+	CachePublicationWaitNanoseconds uint64
+	CachePublicationNanoseconds     uint64
 }
 
 type batchChunkReadStats struct {
@@ -149,13 +152,15 @@ func (db *AccountsDb) getAccountsBatchWithStats(ctx context.Context, slot uint64
 	phaseStart = time.Now()
 	out := db.getStoreInProgressAccounts(pks)
 	stats.InProgressNanoseconds = uint64(time.Since(phaseStart).Nanoseconds())
-	phaseStart = time.Now()
 	cold := make([]int, 0, len(pks))
 	var indexSnapshot *pebble.Snapshot
 	var cacheEpoch uint64
 	var admission *commonCacheAdmission
 	var snapshotSetupNanoseconds uint64
+	waitStart := time.Now()
 	db.readCacheEpochMu.RLock()
+	stats.ReadCacheEpochWaitNanoseconds = uint64(time.Since(waitStart).Nanoseconds())
+	phaseStart = time.Now()
 	cacheEpoch = db.readCacheEpoch
 	admission = db.commonAdmission
 	for i, pk := range pks {
@@ -163,8 +168,12 @@ func (db *AccountsDb) getAccountsBatchWithStats(ctx context.Context, slot uint64
 			stats.InProgressHits++
 			continue
 		}
-		if acct, ok := db.getCachedAccountLocked(pk); ok {
-			stats.CacheHits++
+		if acct, ok, pending := db.getCachedAccountLocked(pk); ok {
+			if pending {
+				stats.PendingFoldHits++
+			} else {
+				stats.CacheHits++
+			}
 			if acct == nil || acct.Lamports == 0 {
 				stats.PlaceholderObjects++
 			}
@@ -304,15 +313,17 @@ func (db *AccountsDb) getAccountsBatchWithStats(ctx context.Context, slot uint64
 		publicationJobs = append(publicationJobs, idx)
 	}
 	publicationResults := make([]batchCacheAdmission, len(publicationJobs))
+	publicationWaits := make([]uint64, len(publicationJobs))
 	err = runBatchWorkers(ctx, len(publicationJobs), func(job int) error {
 		idx := publicationJobs[job]
 		acct := decodedForCache[idx]
-		publicationResults[job] = db.cacheBatchReadAccount(
+		publicationResults[job], publicationWaits[job] = db.cacheBatchReadAccount(
 			pks[idx], acct, admitCommon[idx], cacheEpoch,
 		)
 		return nil
 	})
-	for _, result := range publicationResults {
+	for idx, result := range publicationResults {
+		stats.CachePublicationWaitNanoseconds += publicationWaits[idx]
 		switch result {
 		case batchCacheVote:
 			stats.VoteCacheAdmissions++
@@ -417,13 +428,19 @@ func resolveBatchAccountLocationsIterators(
 	workerCount = min(len(cold), max(1, workerCount))
 
 	g, workerCtx := errgroup.WithContext(ctx)
+	upperBounds := make([][32]byte, workerCount)
 	for worker := range workerCount {
 		start := len(cold) * worker / workerCount
 		end := len(cold) * (worker + 1) / workerCount
 		g.Go(func() (retErr error) {
-			iter, err := snapshot.NewIterWithContext(workerCtx, &pebble.IterOptions{
-				KeyTypes: pebble.IterKeyTypePointsOnly,
-			})
+			options := pebble.IterOptions{
+				KeyTypes:   pebble.IterKeyTypePointsOnly,
+				LowerBound: pks[cold[start]][:],
+			}
+			if nextPubkey(pks[cold[end-1]], &upperBounds[worker]) {
+				options.UpperBound = upperBounds[worker][:]
+			}
+			iter, err := snapshot.NewIterWithContext(workerCtx, &options)
 			if err != nil {
 				return fmt.Errorf("create account index iterator: %w", err)
 			}
@@ -467,6 +484,19 @@ func resolveBatchAccountLocationsIterators(
 		return nil, nil, err
 	}
 	return locations, found, nil
+}
+
+// nextPubkey returns the smallest 32-byte key strictly greater than key. A
+// false result means key is the maximal all-0xff value and needs no upper bound.
+func nextPubkey(key solana.PublicKey, out *[32]byte) bool {
+	*out = key
+	for idx := len(out) - 1; idx >= 0; idx-- {
+		out[idx]++
+		if out[idx] != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func readBatchAccountAt(file *os.File, path string, location batchAccountLocation) (*accounts.Account, error) {

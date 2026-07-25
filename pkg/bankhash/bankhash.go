@@ -16,6 +16,16 @@ import (
 )
 
 func CalculateBankHash(slotCtx *sealevel.SlotCtx, writableAccts []*accounts.Account, modifiedAccts []*accounts.Account, parentBankHash [32]byte, numSigs uint64, blockHash [32]byte) []byte {
+	return calculateBankHash(slotCtx, writableAccts, modifiedAccts, false, parentBankHash, numSigs, blockHash)
+}
+
+// CalculateBankHashUniqueModified skips LtHash's defensive key dedupe when the
+// caller supplies an already-unique OverlayAccounts delta.
+func CalculateBankHashUniqueModified(slotCtx *sealevel.SlotCtx, writableAccts []*accounts.Account, modifiedAccts []*accounts.Account, parentBankHash [32]byte, numSigs uint64, blockHash [32]byte) []byte {
+	return calculateBankHash(slotCtx, writableAccts, modifiedAccts, true, parentBankHash, numSigs, blockHash)
+}
+
+func calculateBankHash(slotCtx *sealevel.SlotCtx, writableAccts []*accounts.Account, modifiedAccts []*accounts.Account, modifiedAcctsUnique bool, parentBankHash [32]byte, numSigs uint64, blockHash [32]byte) []byte {
 	adhEnabled := !slotCtx.Features.IsActive(features.RemoveAccountsDeltaHash)
 	ltHashEnabled := slotCtx.Features.IsActive(features.AccountsLtHash)
 
@@ -32,7 +42,7 @@ func CalculateBankHash(slotCtx *sealevel.SlotCtx, writableAccts []*accounts.Acco
 	}
 
 	if ltHashEnabled {
-		updateAcctsLtHash(slotCtx, modifiedAccts)
+		updateAcctsLtHash(slotCtx, modifiedAccts, modifiedAcctsUnique)
 	}
 
 	var finalizeStart time.Time

@@ -364,6 +364,34 @@ func TestCompileLeaderAccountsGatesWritableListOnADH(t *testing.T) {
 	}
 }
 
+func TestOverlayModifiedFastPathAvoidsGlobalMapAndKeepsUniqueNewestValues(t *testing.T) {
+	slotCtx, cleanup := newCommitTestSlotCtx()
+	defer cleanup()
+	slotCtx.Features.EnableFeature(features.RemoveAccountsDeltaHash, 0)
+	overlay := accounts.NewOverlayAccounts(slotCtx.Accounts)
+	slotCtx.Accounts = overlay
+	slotCtx.ModifiedAccountsFromDelta = true
+
+	firstKey := solana.PublicKey{0xa1}
+	first := &accounts.Account{Key: firstKey, Lamports: 10}
+	require.NoError(t, slotCtx.SetAccount(firstKey, first))
+	slotCtx.RecordModifiedAcct(firstKey)
+	slotCtx.RecordModifiedAccountStates([]*accounts.Account{first}, []bool{true})
+	assert.Empty(t, slotCtx.ModifiedAccts, "overlay-backed replay must not contend on the legacy modified map")
+
+	replacement := &accounts.Account{Key: firstKey, Lamports: 20}
+	second := &accounts.Account{Key: solana.PublicKey{0xa2}, Lamports: 30}
+	modified, ok := uniqueOverlayModifiedAccounts(slotCtx, []*accounts.Account{replacement, second, nil})
+	require.True(t, ok)
+	require.Len(t, modified, 2)
+	byKey := make(map[solana.PublicKey]*accounts.Account, len(modified))
+	for _, acct := range modified {
+		byKey[acct.Key] = acct
+	}
+	assert.Same(t, replacement, byKey[firstKey])
+	assert.Same(t, second, byKey[second.Key])
+}
+
 func TestCompileWritableAndModifiedAcctsGatesWritableListOnADH(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

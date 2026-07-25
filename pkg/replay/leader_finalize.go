@@ -144,11 +144,15 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 	if err := finishLeaderSysvars(slotCtx, block); err != nil {
 		return nil, err
 	}
-	if err := ensureParentAccountsForModified(slotCtx); err != nil {
+	writable, modified := compileLeaderAccounts(slotCtx, block, rentAccts)
+	if err := ensureParentAccountsForModified(slotCtx, modified); err != nil {
 		return nil, err
 	}
-	writable, modified := compileLeaderAccounts(slotCtx, block, rentAccts)
-	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writable, modified, block.ParentBankhash, block.NumSignatures, block.Blockhash)
+	if slotCtx.ModifiedAccountsFromDelta {
+		slotCtx.FinalBankhash = bankhash.CalculateBankHashUniqueModified(slotCtx, writable, modified, block.ParentBankhash, block.NumSignatures, block.Blockhash)
+	} else {
+		slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writable, modified, block.ParentBankhash, block.NumSignatures, block.Blockhash)
+	}
 	copy(block.ExpectedBankhash[:], slotCtx.FinalBankhash)
 	block.HasExpectedBankhash = true
 	return slotCtx, nil
@@ -217,11 +221,15 @@ func withData(acct *accounts.Account, data []byte) *accounts.Account {
 	return out
 }
 
-func ensureParentAccountsForModified(slotCtx *sealevel.SlotCtx) error {
+func ensureParentAccountsForModified(slotCtx *sealevel.SlotCtx, modified []*accounts.Account) error {
 	if slotCtx.Features == nil || !slotCtx.Features.IsActive(features.AccountsLtHash) {
 		return nil
 	}
-	for key := range slotCtx.ModifiedAccts {
+	for _, modifiedAcct := range modified {
+		if modifiedAcct == nil {
+			continue
+		}
+		key := modifiedAcct.Key
 		if _, err := slotCtx.GetParentAccount(key); err == nil {
 			continue
 		}
@@ -236,7 +244,55 @@ func ensureParentAccountsForModified(slotCtx *sealevel.SlotCtx) error {
 	return nil
 }
 
+func uniqueOverlayModifiedAccounts(slotCtx *sealevel.SlotCtx, extras ...[]*accounts.Account) ([]*accounts.Account, bool) {
+	if !slotCtx.ModifiedAccountsFromDelta {
+		return nil, false
+	}
+	overlay, ok := slotCtx.Accounts.(*accounts.OverlayAccounts)
+	if !ok {
+		return nil, false
+	}
+	delta := overlay.DeltaAccounts()
+	modified := delta[:0]
+	for _, acct := range delta {
+		if acct != nil {
+			modified = append(modified, acct)
+		}
+	}
+	extraCount := 0
+	for _, group := range extras {
+		extraCount += len(group)
+	}
+	if extraCount == 0 {
+		return modified, true
+	}
+
+	byKey := make(map[solana.PublicKey]int, len(modified)+extraCount)
+	for idx, acct := range modified {
+		if acct != nil {
+			byKey[acct.Key] = idx
+		}
+	}
+	for _, group := range extras {
+		for _, acct := range group {
+			if acct == nil {
+				continue
+			}
+			if idx, exists := byKey[acct.Key]; exists {
+				modified[idx] = acct
+				continue
+			}
+			byKey[acct.Key] = len(modified)
+			modified = append(modified, acct)
+		}
+	}
+	return modified, true
+}
+
 func compileLeaderAccounts(slotCtx *sealevel.SlotCtx, block *b.Block, rentAccts []*accounts.Account) ([]*accounts.Account, []*accounts.Account) {
+	if modified, ok := uniqueOverlayModifiedAccounts(slotCtx, block.EpochUpdatedAccts, rentAccts); ok {
+		return nil, modified
+	}
 	adhRemoved := accountsDeltaHashRemoved(slotCtx)
 	var writable []*accounts.Account
 	var seenWritable map[solana.PublicKey]struct{}

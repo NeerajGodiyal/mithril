@@ -15,8 +15,8 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 )
 
-func updateAcctsLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.Account) {
-	deltaLtHash := calculateDeltaLtHash(slotCtx, modifiedAccts)
+func updateAcctsLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.Account, inputUnique bool) {
+	deltaLtHash := calculateDeltaLtHashInternal(slotCtx, modifiedAccts, inputUnique)
 	slotCtx.AcctsLtHash.Add(deltaLtHash)
 	if ltDebug && (ltDebugSlot == 0 || ltDebugSlot == slotCtx.Slot) {
 		dumpPerAcctDeltas(slotCtx, modifiedAccts)
@@ -45,6 +45,10 @@ func dumpPerAcctDeltas(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.Acco
 }
 
 func calculateDeltaLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.Account) *lthash.LtHash {
+	return calculateDeltaLtHashInternal(slotCtx, modifiedAccts, false)
+}
+
+func calculateDeltaLtHashInternal(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.Account, inputUnique bool) *lthash.LtHash {
 	// Dedupe by key (keep the last/newest value): an account that appears more
 	// than once (e.g. both rent-collected and modified, or a sysvar collected via
 	// multiple paths) would otherwise have its delta counted multiple times,
@@ -61,7 +65,9 @@ func calculateDeltaLtHash(slotCtx *sealevel.SlotCtx, modifiedAccts []*accounts.A
 		metrics.GlobalBlockReplay.LtHashNewDataBytes = 0
 		dedupeStart = time.Now()
 	}
-	modifiedAccts = dedupeModifiedAccts(modifiedAccts)
+	if !inputUnique {
+		modifiedAccts = dedupeModifiedAccts(modifiedAccts)
+	}
 	if recordMetrics {
 		metrics.GlobalBlockReplay.LtHashDedupe.AddTimingSince(dedupeStart)
 		metrics.GlobalBlockReplay.LtHashUniqueAccounts = uint64(len(modifiedAccts))

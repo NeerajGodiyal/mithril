@@ -141,6 +141,15 @@ func TestSegmentManifestRoundTripAndTornDetection(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, m, got)
 
+	contextOnly, err := ReadSegmentManifestContext(segmentManifestPath(dir, 130, 42))
+	require.NoError(t, err)
+	assert.Equal(t, m.Kind, contextOnly.Kind)
+	assert.Equal(t, m.BatchSeq, contextOnly.BatchSeq)
+	assert.Equal(t, m.ThroughSlot, contextOnly.ThroughSlot)
+	assert.Equal(t, m.ResumeCtx, contextOnly.ResumeCtx)
+	assert.Empty(t, contextOnly.Records, "retention scan must not allocate or decode account records")
+	assert.Empty(t, contextOnly.Bankhashes, "retention scan only needs the resume context")
+
 	// Flip one byte -> torn.
 	path := segmentManifestPath(dir, 130, 42)
 	data, err := os.ReadFile(path)
@@ -149,6 +158,44 @@ func TestSegmentManifestRoundTripAndTornDetection(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, data, 0o644))
 	_, err = ReadSegmentManifest(path)
 	assert.ErrorIs(t, err, ErrTornManifest)
+}
+
+func BenchmarkReadSegmentManifestContext(b *testing.B) {
+	dir := b.TempDir()
+	const recordCount = 100_000
+	records := make([]ManifestRecord, recordCount)
+	for idx := range records {
+		binary.LittleEndian.PutUint64(records[idx].Pubkey[:8], uint64(idx+1))
+		records[idx].Offset = uint64(idx * 128)
+	}
+	manifest := &SegmentManifest{
+		Version:     segManifestVersion,
+		Kind:        ManifestKindFold,
+		BatchSeq:    1,
+		ThroughSlot: 100,
+		FileId:      1,
+		Records:     records,
+		ResumeCtx:   []byte(`{"slot":100}`),
+	}
+	require.NoError(b, WriteSegmentManifest(dir, manifest))
+	path := segmentManifestPath(dir, manifest.ThroughSlot, manifest.FileId)
+
+	b.Run("full", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, err := ReadSegmentManifest(path); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("context-only", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, err := ReadSegmentManifestContext(path); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
 
 // Crash-point injection across the commit protocol. Each stage panics once,

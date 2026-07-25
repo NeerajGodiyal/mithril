@@ -338,6 +338,82 @@ func ReadSegmentManifest(path string) (*SegmentManifest, error) {
 	return m, nil
 }
 
+// ReadSegmentManifestContext reads only the fixed prefix and resume context,
+// then structurally validates the declared record tail against the file size.
+// It deliberately does not scan records or validate the trailing CRC. This is
+// for advisory retention bookkeeping, where a malformed context fails closed;
+// recovery, rewind, and index mutation must continue using ReadSegmentManifest.
+func ReadSegmentManifestContext(path string) (*SegmentManifest, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	const manifestPrefixSize = 4 + 4 + 1 + 5*8 + 4
+	var prefix [manifestPrefixSize]byte
+	if _, err := io.ReadFull(f, prefix[:]); err != nil {
+		return nil, ErrTornManifest
+	}
+	d := &manifestDecoder{data: prefix[:]}
+	m := &SegmentManifest{}
+	if err := decodeManifestPrefix(d, m); err != nil {
+		return nil, err
+	}
+
+	var u32 [4]byte
+	if _, err := io.ReadFull(f, u32[:]); err != nil {
+		return nil, ErrTornManifest
+	}
+	nBank := uint64(binary.LittleEndian.Uint32(u32[:]))
+	if nBank > uint64(info.Size())/40 {
+		return nil, ErrTornManifest
+	}
+	if _, err := f.Seek(int64(nBank*40), io.SeekCurrent); err != nil {
+		return nil, ErrTornManifest
+	}
+	if _, err := io.ReadFull(f, u32[:]); err != nil {
+		return nil, ErrTornManifest
+	}
+	ctxLen := uint64(binary.LittleEndian.Uint32(u32[:]))
+	current, err := f.Seek(0, io.SeekCurrent)
+	if err != nil || ctxLen > uint64(info.Size()) || uint64(current) > uint64(info.Size())-ctxLen {
+		return nil, ErrTornManifest
+	}
+	m.ResumeCtx = make([]byte, int(ctxLen))
+	if _, err := io.ReadFull(f, m.ResumeCtx); err != nil {
+		return nil, ErrTornManifest
+	}
+
+	var u64 [8]byte
+	if _, err := io.ReadFull(f, u64[:]); err != nil {
+		return nil, ErrTornManifest
+	}
+	nRecords := binary.LittleEndian.Uint64(u64[:])
+	tailStart, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return nil, ErrTornManifest
+	}
+	if nRecords > ^uint64(0)/manifestRecordSize {
+		return nil, ErrTornManifest
+	}
+	recordsBytes := nRecords * manifestRecordSize
+	if recordsBytes > ^uint64(0)-4 ||
+		tailStart < 0 ||
+		uint64(tailStart) > ^uint64(0)-recordsBytes-4 {
+		return nil, ErrTornManifest
+	}
+	expectedSize := uint64(tailStart) + recordsBytes + 4
+	if expectedSize != uint64(info.Size()) {
+		return nil, ErrTornManifest
+	}
+	return m, nil
+}
+
 // readManifestHeader parses only the fixed prefix — no CRC validation.
 func readManifestHeader(path string) (ManifestHeader, error) {
 	f, err := os.Open(path)

@@ -29,15 +29,34 @@ type AccountLoader struct {
 	ParentMapBuild      Timing
 	SysvarUpdates       Timing
 
-	WorkingSetLookup Timing
-	InProgressLookup Timing
-	AppendVecPinWait Timing
-	CacheLookup      Timing
-	AdmissionFilter  Timing
-	IndexLookup      Timing
-	ReadPlanning     Timing
-	AppendVecRead    Timing
-	CachePublication Timing
+	SysvarClockRead             Timing
+	SysvarSlotHashesRead        Timing
+	SysvarRecentBlockhashesRead Timing
+	SysvarSlotHistoryRead       Timing
+	SysvarStakeHistoryRead      Timing
+	SysvarLastRestartSlotRead   Timing
+
+	WorkingSetLookup     Timing
+	InProgressLookup     Timing
+	AppendVecPinWait     Timing
+	ReadCacheEpochWait   Timing
+	CacheLookup          Timing
+	AdmissionFilter      Timing
+	IndexLookup          Timing
+	ReadPlanning         Timing
+	AppendVecRead        Timing
+	CachePublicationWait Timing
+	CachePublication     Timing
+
+	SysvarWorkingSetLookup      Timing
+	SysvarClone                 Timing
+	SysvarAppendVecPinWait      Timing
+	SysvarInProgressLookup      Timing
+	SysvarReadCacheEpochWait    Timing
+	SysvarCacheLookup           Timing
+	SysvarIndexAndAppendVecRead Timing
+	SysvarCachePublicationWait  Timing
+	SysvarCachePublication      Timing
 
 	RequestedKeys  uint64
 	DurableKeys    uint64
@@ -45,6 +64,7 @@ type AccountLoader struct {
 
 	WorkingSetHits    uint64
 	InProgressHits    uint64
+	PendingFoldHits   uint64
 	CacheHits         uint64
 	IndexHits         uint64
 	IndexMisses       uint64
@@ -64,6 +84,14 @@ type AccountLoader struct {
 	DecodedAccountObjects uint64
 	DecodedAccountBytes   uint64
 	PlaceholderObjects    uint64
+
+	SysvarReads                        uint64
+	SysvarWorkingSetHits               uint64
+	SysvarInProgressHits               uint64
+	SysvarPendingFoldHits              uint64
+	SysvarCacheHits                    uint64
+	SysvarDurableReads                 uint64
+	SysvarCachePublicationEpochRejects uint64
 }
 
 // TurbineIngress is the exact per-slot pre-replay pipeline decomposition.

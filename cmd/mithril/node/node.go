@@ -3834,7 +3834,10 @@ func addTransactionStatusManifestRef(keep map[string]*state.TransactionStatusChe
 	if len(manifest.ResumeCtx) == 0 {
 		return fmt.Errorf("fold manifest through slot %d carries no resume context", manifest.ThroughSlot)
 	}
-	var ctx state.ResumeContext
+	var ctx struct {
+		Slot                        uint64                                `json:"slot"`
+		TransactionStatusCheckpoint *state.TransactionStatusCheckpointRef `json:"transaction_status_checkpoint,omitempty"`
+	}
 	if err := json.Unmarshal(manifest.ResumeCtx, &ctx); err != nil {
 		return fmt.Errorf("decode fold manifest context through slot %d: %w", manifest.ThroughSlot, err)
 	}
@@ -3875,7 +3878,7 @@ func retainedTransactionStatusCheckpointRefs(accountsDb *accountsdb.AccountsDb, 
 		start = len(headers) - int(retainCount)
 	}
 	for _, header := range headers[start:] {
-		manifest, err := accountsdb.ReadSegmentManifest(header.Path)
+		manifest, err := accountsdb.ReadSegmentManifestContext(header.Path)
 		if err != nil {
 			return nil, fmt.Errorf("read in-horizon fold manifest %s: %w", header.Path, err)
 		}

@@ -110,6 +110,18 @@ func TestDedupePreventsLtHashDoubleCount(t *testing.T) {
 	}
 }
 
+func TestUniqueModifiedFastPathMatchesDefensiveDedupe(t *testing.T) {
+	key := solana.PublicKey{9}
+	old := &accounts.Account{Key: key, Lamports: 100, Data: []byte{1}, Owner: [32]byte{7}}
+	changed := &accounts.Account{Key: key, Lamports: 200, Data: []byte{2}, Owner: [32]byte{7}}
+
+	defensive := calculateDeltaLtHashInternal(ctxWithParent(t, key, old), []*accounts.Account{changed}, false)
+	unique := calculateDeltaLtHashInternal(ctxWithParent(t, key, old), []*accounts.Account{changed}, true)
+	if !bytes.Equal(defensive.Hash(), unique.Hash()) {
+		t.Fatal("unique modified-account fast path changed the LtHash delta")
+	}
+}
+
 // PROOF of keep-LAST at the real LtHash level: when a key appears twice with different
 // values, the delta must reflect the LAST (newest) value, not the first (stale) one.
 func TestDedupeKeepsLastValueInDelta(t *testing.T) {

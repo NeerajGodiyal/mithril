@@ -491,6 +491,45 @@ func validatePartitionedRewardsResume(slot uint64, epochRewards *sealevel.Sysvar
 	)
 }
 
+func loadSysvarAccount(source blockAccountSource, slot uint64, pubkey solana.PublicKey, timing *metrics.Timing) (*accounts.Account, error) {
+	start := time.Now()
+	acct, stats, err := getAccountWithStats(source, slot, pubkey)
+	timing.AddTimingSince(start)
+	recordSysvarAccountReadStats(&metrics.GlobalBlockReplay.AccountLoader, stats)
+	return acct, err
+}
+
+func recordSysvarAccountReadStats(dst *metrics.AccountLoader, src accountsdb.AccountReadStats) {
+	dst.SysvarReads++
+	dst.SysvarWorkingSetLookup.AddTiming(time.Duration(src.WorkingSetLookupNanoseconds))
+	dst.SysvarClone.AddTiming(time.Duration(src.CloneNanoseconds))
+	dst.SysvarAppendVecPinWait.AddTiming(time.Duration(src.AppendVecPinWaitNanoseconds))
+	dst.SysvarInProgressLookup.AddTiming(time.Duration(src.InProgressNanoseconds))
+	dst.SysvarReadCacheEpochWait.AddTiming(time.Duration(src.ReadCacheEpochWaitNanoseconds))
+	dst.SysvarCacheLookup.AddTiming(time.Duration(src.CacheLookupNanoseconds))
+	dst.SysvarIndexAndAppendVecRead.AddTiming(time.Duration(src.IndexAndAppendVecReadNanoseconds))
+	dst.SysvarCachePublicationWait.AddTiming(time.Duration(src.CachePublicationWaitNanoseconds))
+	dst.SysvarCachePublication.AddTiming(time.Duration(src.CachePublicationNanoseconds))
+	if src.WorkingSetHit {
+		dst.SysvarWorkingSetHits++
+	}
+	if src.InProgressHit {
+		dst.SysvarInProgressHits++
+	}
+	if src.PendingFoldHit {
+		dst.SysvarPendingFoldHits++
+	}
+	if src.CacheHit {
+		dst.SysvarCacheHits++
+	}
+	if src.DurableRead {
+		dst.SysvarDurableReads++
+	}
+	if src.CachePublicationEpochRejected {
+		dst.SysvarCachePublicationEpochRejects++
+	}
+}
+
 func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.Block, epochSchedule *sealevel.SysvarEpochSchedule, alpenglowClock bool) (accounts.Accounts, accounts.Accounts, int, error) {
 	phaseStart := time.Now()
 	err := resolveAddrTableLookups(accountsDb, block)
@@ -544,7 +583,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.B
 				// resume it is the restored Clock as of the last rooted slot, which durable may not match.
 				clockAcct = sealevel.SysvarCache.Clock.Acct.Clone()
 			} else {
-				clockAcct, err = accountsDb.GetAccount(block.Slot, sealevel.SysvarClockAddr)
+				clockAcct, err = loadSysvarAccount(accountsDb, block.Slot, sealevel.SysvarClockAddr, &metrics.GlobalBlockReplay.AccountLoader.SysvarClockRead)
 				if err != nil {
 					panic("unable to retrieve clock sysvar when updating clock")
 				}
@@ -581,7 +620,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.B
 
 		// update and cache SlotHashes sysvar
 		{
-			slotHashesAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarSlotHashesAddr)
+			slotHashesAcct, err := loadSysvarAccount(accountsDb, block.Slot, sealevel.SysvarSlotHashesAddr, &metrics.GlobalBlockReplay.AccountLoader.SysvarSlotHashesRead)
 			if err != nil {
 				panic("unable to retrieve slothashes sysvar from acctsdb")
 			}
@@ -631,7 +670,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.B
 
 		// cache RecentBlockhashes sysvar
 		{
-			recentBlockhashesAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarRecentBlockHashesAddr)
+			recentBlockhashesAcct, err := loadSysvarAccount(accountsDb, block.Slot, sealevel.SysvarRecentBlockHashesAddr, &metrics.GlobalBlockReplay.AccountLoader.SysvarRecentBlockhashesRead)
 			if err != nil {
 				panic("unable to get recentblockhashes")
 			}
@@ -678,7 +717,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.B
 
 		// cache SlotHistory sysvar
 		{
-			slotHistoryAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarSlotHistoryAddr)
+			slotHistoryAcct, err := loadSysvarAccount(accountsDb, block.Slot, sealevel.SysvarSlotHistoryAddr, &metrics.GlobalBlockReplay.AccountLoader.SysvarSlotHistoryRead)
 			if err != nil {
 				panic("unable to get slothistory")
 			}
@@ -702,7 +741,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.B
 
 		// cache StakeHistory sysvar
 		{
-			stakeHistoryAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarStakeHistoryAddr)
+			stakeHistoryAcct, err := loadSysvarAccount(accountsDb, block.Slot, sealevel.SysvarStakeHistoryAddr, &metrics.GlobalBlockReplay.AccountLoader.SysvarStakeHistoryRead)
 			if err != nil {
 				panic("unable to get stakehistory")
 			}
@@ -743,7 +782,7 @@ func loadBlockAccountsAndUpdateSysvars(accountsDb blockAccountSource, block *b.B
 
 		// cache LastRestartSlot sysvar
 		{
-			lastRestartSlotAcct, err := accountsDb.GetAccount(block.Slot, sealevel.SysvarLastRestartSlotAddr)
+			lastRestartSlotAcct, err := loadSysvarAccount(accountsDb, block.Slot, sealevel.SysvarLastRestartSlotAddr, &metrics.GlobalBlockReplay.AccountLoader.SysvarLastRestartSlotRead)
 			if err != nil {
 				panic("unable to get last restart slot sysvar acct")
 			}
@@ -792,6 +831,7 @@ func recordAccountLoaderBatchStats(dst *metrics.AccountLoader, src accountsdb.Ba
 	dst.DurableKeys = src.DurableKeys
 	dst.WorkingSetHits = src.WorkingSetHits
 	dst.InProgressHits = src.InProgressHits
+	dst.PendingFoldHits = src.PendingFoldHits
 	dst.CacheHits = src.CacheHits
 	dst.IndexHits = src.IndexHits
 	dst.IndexMisses = src.IndexMisses
@@ -812,11 +852,13 @@ func recordAccountLoaderBatchStats(dst *metrics.AccountLoader, src accountsdb.Ba
 	dst.WorkingSetLookup.AddTiming(time.Duration(src.WorkingSetLookupNanoseconds))
 	dst.InProgressLookup.AddTiming(time.Duration(src.InProgressNanoseconds))
 	dst.AppendVecPinWait.AddTiming(time.Duration(src.AppendVecPinWaitNanoseconds))
+	dst.ReadCacheEpochWait.AddTiming(time.Duration(src.ReadCacheEpochWaitNanoseconds))
 	dst.CacheLookup.AddTiming(time.Duration(src.CacheLookupNanoseconds))
 	dst.AdmissionFilter.AddTiming(time.Duration(src.AdmissionFilterNanoseconds))
 	dst.IndexLookup.AddTiming(time.Duration(src.IndexLookupNanoseconds))
 	dst.ReadPlanning.AddTiming(time.Duration(src.ReadPlanningNanoseconds))
 	dst.AppendVecRead.AddTiming(time.Duration(src.AppendVecReadNanoseconds))
+	dst.CachePublicationWait.AddTiming(time.Duration(src.CachePublicationWaitNanoseconds))
 	dst.CachePublication.AddTiming(time.Duration(src.CachePublicationNanoseconds))
 }
 
@@ -3161,6 +3203,10 @@ func runIncinerator(slotCtx *sealevel.SlotCtx) {
 
 func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, rentAccts []*accounts.Account) ([]*accounts.Account, []*accounts.Account) {
 	adhRemoved := accountsDeltaHashRemoved(slotCtx)
+	sysvarAccts := collectAndUpdateSysvarAcctsForAdh(slotCtx)
+	if modifiedAccts, ok := uniqueOverlayModifiedAccounts(slotCtx, block.EpochUpdatedAccts, rentAccts, sysvarAccts); ok {
+		return nil, modifiedAccts
+	}
 	var writableAccts []*accounts.Account
 	var alreadyAdded map[solana.PublicKey]bool
 	if !adhRemoved {
@@ -3211,7 +3257,6 @@ func compileWritableAndModifiedAccts(slotCtx *sealevel.SlotCtx, block *b.Block, 
 	}
 	modifiedAccts = append(modifiedAccts, rentAccts...)
 
-	sysvarAccts := collectAndUpdateSysvarAcctsForAdh(slotCtx)
 	if !adhRemoved {
 		writableAccts = append(writableAccts, sysvarAccts...)
 	}
@@ -3257,6 +3302,14 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 	if block.Features != nil && block.Features.IsActive(features.RemoveAccountsDeltaHash) {
 		writableMapCapacity = 0
 	}
+	_, overlayBacked := accts.(*accounts.OverlayAccounts)
+	modifiedAccountsFromDelta := overlayBacked &&
+		block.Features != nil &&
+		block.Features.IsActive(features.RemoveAccountsDeltaHash)
+	modifiedMapCapacity := accountMapCapacity
+	if modifiedAccountsFromDelta {
+		modifiedMapCapacity = 0
+	}
 	slotCtx := &sealevel.SlotCtx{
 		Accounts:        accts,
 		ParentAccts:     parentAccts,
@@ -3267,9 +3320,10 @@ func newSlotCtx(block *b.Block, accts accounts.Accounts, parentAccts accounts.Ac
 		FeeRateGovernor: block.FeeRateGovernor,
 		NumSignatures:   block.NumSignatures,
 
-		AcctMapsMu:    &sync.Mutex{},
-		ModifiedAccts: make(map[solana.PublicKey]bool, accountMapCapacity),
-		WritableAccts: make(map[solana.PublicKey]bool, writableMapCapacity),
+		AcctMapsMu:                &sync.Mutex{},
+		ModifiedAccts:             make(map[solana.PublicKey]bool, modifiedMapCapacity),
+		WritableAccts:             make(map[solana.PublicKey]bool, writableMapCapacity),
+		ModifiedAccountsFromDelta: modifiedAccountsFromDelta,
 
 		Blockhash:              block.Blockhash,
 		LastBlockhash:          block.LastBlockhash,
@@ -3876,7 +3930,7 @@ func ProcessBlock(
 	writableAccts, modifiedAccts := compileWritableAndModifiedAccts(slotCtx, block, rentAccts)
 	metrics.GlobalBlockReplay.CompileWritableAndModifiedAccts.AddTimingSince(start)
 	start = time.Now()
-	ensureParentsErr := ensureParentAccountsForModified(slotCtx)
+	ensureParentsErr := ensureParentAccountsForModified(slotCtx, modifiedAccts)
 	metrics.GlobalBlockReplay.EnsureParentAccountsForModified.AddTimingSince(start)
 	if ensureParentsErr != nil {
 		return nil, ensureParentsErr
@@ -3884,7 +3938,11 @@ func ProcessBlock(
 
 	start = time.Now()
 	setReplayStage("bankhash")
-	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, slotCtx.NumSignatures, block.Blockhash)
+	if slotCtx.ModifiedAccountsFromDelta {
+		slotCtx.FinalBankhash = bankhash.CalculateBankHashUniqueModified(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, slotCtx.NumSignatures, block.Blockhash)
+	} else {
+		slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writableAccts, modifiedAccts, block.ParentBankhash, slotCtx.NumSignatures, block.Blockhash)
+	}
 	metrics.GlobalBlockReplay.BankHash.AddTimingSince(start)
 	if alpenglowClock {
 		footerVerificationStart := time.Now()

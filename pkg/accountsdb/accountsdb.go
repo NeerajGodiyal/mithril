@@ -14,6 +14,7 @@ import (
 	"runtime/trace"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
@@ -37,12 +38,14 @@ type AccountsDb struct {
 	// the write side; hot-path program cache operations take the read side.
 	programCacheMu sync.RWMutex
 
-	// readCacheEpochMu makes the authoritative index flip and its cache refresh
-	// one publication boundary. Batch readers retain the epoch captured with
-	// their Pebble snapshot and may only admit decoded values while it still
-	// matches, preventing an old appendvec read from overwriting a newer fold.
+	// readCacheEpochMu protects the cache epoch and the pending fold view.
+	// CommitBatch publishes its immutable newest-wins union here before the
+	// Pebble index commit. Readers use that view for changed keys while the
+	// index and caches catch up, so the expensive durable commit does not hold
+	// this mutex and old snapshot reads still cannot publish stale cache bytes.
 	readCacheEpochMu sync.RWMutex
 	readCacheEpoch   uint64
+	pendingFold      map[[32]byte]dedupedVersion
 	commonAdmission  *commonCacheAdmission
 	batchHooks       batchReadTestHooks
 
@@ -317,6 +320,27 @@ func (accountsDb *AccountsDb) RemoveProgramFromCache(pubkey solana.PublicKey) {
 	accountsDb.ProgramCache.Delete(pubkey)
 }
 
+// AccountReadStats is one single-key read's exact wall-time decomposition.
+// The sysvar loader records these separately from its decode/update work so a
+// fold publication wait cannot hide inside the broad SysvarUpdates timer.
+type AccountReadStats struct {
+	WorkingSetLookupNanoseconds      uint64
+	CloneNanoseconds                 uint64
+	AppendVecPinWaitNanoseconds      uint64
+	InProgressNanoseconds            uint64
+	ReadCacheEpochWaitNanoseconds    uint64
+	CacheLookupNanoseconds           uint64
+	IndexAndAppendVecReadNanoseconds uint64
+	CachePublicationWaitNanoseconds  uint64
+	CachePublicationNanoseconds      uint64
+	WorkingSetHit                    bool
+	InProgressHit                    bool
+	PendingFoldHit                   bool
+	CacheHit                         bool
+	DurableRead                      bool
+	CachePublicationEpochRejected    bool
+}
+
 func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
 	if accountsDb == nil {
 		return nil, ErrNoAccount
@@ -328,6 +352,26 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 		return accts[0], nil
 	}
 	return accountsDb.getStoredAccountPinned(slot, pubkey)
+}
+
+func (accountsDb *AccountsDb) GetAccountWithStats(slot uint64, pubkey solana.PublicKey) (*accounts.Account, AccountReadStats, error) {
+	var stats AccountReadStats
+	if accountsDb == nil {
+		return nil, stats, ErrNoAccount
+	}
+	start := time.Now()
+	accountsDb.appendVecReadMu.RLock()
+	stats.AppendVecPinWaitNanoseconds = uint64(time.Since(start).Nanoseconds())
+	defer accountsDb.appendVecReadMu.RUnlock()
+	start = time.Now()
+	accts := accountsDb.getStoreInProgressAccounts([]solana.PublicKey{pubkey})
+	stats.InProgressNanoseconds = uint64(time.Since(start).Nanoseconds())
+	if accts[0] != nil {
+		stats.InProgressHit = true
+		return accts[0], stats, nil
+	}
+	acct, err := accountsDb.getStoredAccountPinnedWithStats(slot, pubkey, &stats)
+	return acct, stats, err
 }
 
 func (accountsDb *AccountsDb) getStoredAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
@@ -350,6 +394,46 @@ func (accountsDb *AccountsDb) getStoredAccountPinned(slot uint64, pubkey solana.
 	r.End()
 
 	defer trace.StartRegion(context.Background(), "GetStoredAccountDisk").End()
+	acct, err := accountsDb.readIndexedAccount(pubkey)
+	if err == ErrNoAccount {
+		return nil, ErrNoAccount
+	}
+	if err != nil {
+		if acct, err = accountsDb.readIndexedAccount(pubkey); err != nil {
+			if err == ErrNoAccount {
+				return nil, ErrNoAccount
+			}
+			return nil, fmt.Errorf("accountsdb: read %s failed after retry: %w", pubkey, err)
+		}
+	}
+	accountsDb.cacheReadAccount(pubkey, acct, cacheEpoch)
+	return acct, nil
+}
+
+func (accountsDb *AccountsDb) getStoredAccountPinnedWithStats(slot uint64, pubkey solana.PublicKey, stats *AccountReadStats) (*accounts.Account, error) {
+	if accountsDb.Index == nil {
+		return nil, ErrNoAccount
+	}
+	r := trace.StartRegion(context.Background(), "GetStoredAccountCache")
+	waitStart := time.Now()
+	accountsDb.readCacheEpochMu.RLock()
+	stats.ReadCacheEpochWaitNanoseconds += uint64(time.Since(waitStart).Nanoseconds())
+	cacheStart := time.Now()
+	cachedAcct, hasAcct, pending := accountsDb.getCachedAccountLocked(pubkey)
+	cacheEpoch := accountsDb.readCacheEpoch
+	accountsDb.readCacheEpochMu.RUnlock()
+	stats.CacheLookupNanoseconds += uint64(time.Since(cacheStart).Nanoseconds())
+	if hasAcct {
+		stats.PendingFoldHit = pending
+		stats.CacheHit = !pending
+		r.End()
+		return cachedAcct, nil
+	}
+	r.End()
+
+	defer trace.StartRegion(context.Background(), "GetStoredAccountDisk").End()
+	stats.DurableRead = true
+	readStart := time.Now()
 
 	// One-shot retry preserves the single-account path's existing tolerance for
 	// an externally removed or stale index location. The appendvec reader pin
@@ -366,8 +450,13 @@ func (accountsDb *AccountsDb) getStoredAccountPinned(slot uint64, pubkey solana.
 			return nil, fmt.Errorf("accountsdb: read %s failed after retry: %w", pubkey, err)
 		}
 	}
+	stats.IndexAndAppendVecReadNanoseconds += uint64(time.Since(readStart).Nanoseconds())
 
-	accountsDb.cacheReadAccount(pubkey, acct, cacheEpoch)
+	publicationStart := time.Now()
+	waitNanoseconds, rejected := accountsDb.cacheReadAccountWithStats(pubkey, acct, cacheEpoch)
+	stats.CachePublicationNanoseconds += uint64(time.Since(publicationStart).Nanoseconds())
+	stats.CachePublicationWaitNanoseconds += waitNanoseconds
+	stats.CachePublicationEpochRejected = rejected
 
 	return acct, nil
 }
@@ -375,37 +464,55 @@ func (accountsDb *AccountsDb) getStoredAccountPinned(slot uint64, pubkey solana.
 func (accountsDb *AccountsDb) getCachedAccount(pubkey solana.PublicKey) (*accounts.Account, bool) {
 	accountsDb.readCacheEpochMu.RLock()
 	defer accountsDb.readCacheEpochMu.RUnlock()
-	return accountsDb.getCachedAccountLocked(pubkey)
+	acct, ok, _ := accountsDb.getCachedAccountLocked(pubkey)
+	return acct, ok
 }
 
 func (accountsDb *AccountsDb) getCachedAccountAndEpoch(pubkey solana.PublicKey) (*accounts.Account, bool, uint64) {
 	accountsDb.readCacheEpochMu.RLock()
 	defer accountsDb.readCacheEpochMu.RUnlock()
-	acct, ok := accountsDb.getCachedAccountLocked(pubkey)
+	acct, ok, _ := accountsDb.getCachedAccountLocked(pubkey)
 	return acct, ok, accountsDb.readCacheEpoch
 }
 
 // getCachedAccountLocked requires readCacheEpochMu to be held for reading or
 // writing. Keeping a whole batch's cache probes under one epoch makes its
 // cache results coherent with the Pebble snapshot created at that boundary.
-func (accountsDb *AccountsDb) getCachedAccountLocked(pubkey solana.PublicKey) (*accounts.Account, bool) {
-	if acct, ok := accountsDb.VoteAcctCache.Get(pubkey); ok {
-		return acct, true
+func (accountsDb *AccountsDb) getCachedAccountLocked(pubkey solana.PublicKey) (*accounts.Account, bool, bool) {
+	if version, ok := accountsDb.pendingFold[[32]byte(pubkey)]; ok {
+		return version.acct, true, true
 	}
-	return accountsDb.CommonAcctsCache.Get(pubkey)
+	if acct, ok := accountsDb.VoteAcctCache.Get(pubkey); ok {
+		return acct, true, false
+	}
+	acct, ok := accountsDb.CommonAcctsCache.Get(pubkey)
+	return acct, ok, false
 }
 
 func (accountsDb *AccountsDb) cacheReadAccount(pubkey solana.PublicKey, acct *accounts.Account, expectedEpoch uint64) {
 	accountsDb.readCacheEpochMu.RLock()
 	defer accountsDb.readCacheEpochMu.RUnlock()
-	if expectedEpoch != accountsDb.readCacheEpoch {
-		return
+	accountsDb.cacheReadAccountLocked(pubkey, acct, expectedEpoch)
+}
+
+func (accountsDb *AccountsDb) cacheReadAccountWithStats(pubkey solana.PublicKey, acct *accounts.Account, expectedEpoch uint64) (uint64, bool) {
+	waitStart := time.Now()
+	accountsDb.readCacheEpochMu.RLock()
+	waitNanoseconds := uint64(time.Since(waitStart).Nanoseconds())
+	defer accountsDb.readCacheEpochMu.RUnlock()
+	return waitNanoseconds, !accountsDb.cacheReadAccountLocked(pubkey, acct, expectedEpoch)
+}
+
+func (accountsDb *AccountsDb) cacheReadAccountLocked(pubkey solana.PublicKey, acct *accounts.Account, expectedEpoch uint64) bool {
+	if expectedEpoch != accountsDb.readCacheEpoch || accountsDb.pendingFoldContainsLocked(pubkey) {
+		return false
 	}
 	if solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr {
 		accountsDb.VoteAcctCache.Set(pubkey, acct)
 	} else {
 		accountsDb.CommonAcctsCache.Set(pubkey, acct)
 	}
+	return true
 }
 
 type batchCacheAdmission uint8
@@ -428,25 +535,32 @@ func (accountsDb *AccountsDb) cacheBatchReadAccount(
 	acct *accounts.Account,
 	admitCommon bool,
 	expectedEpoch uint64,
-) batchCacheAdmission {
+) (batchCacheAdmission, uint64) {
 	if hook := accountsDb.batchHooks.beforeCacheAdmission; hook != nil {
 		hook(pubkey)
 	}
+	waitStart := time.Now()
 	accountsDb.readCacheEpochMu.RLock()
+	waitNanoseconds := uint64(time.Since(waitStart).Nanoseconds())
 	defer accountsDb.readCacheEpochMu.RUnlock()
-	if expectedEpoch != accountsDb.readCacheEpoch {
-		return batchCacheEpochRejected
+	if expectedEpoch != accountsDb.readCacheEpoch || accountsDb.pendingFoldContainsLocked(pubkey) {
+		return batchCacheEpochRejected, waitNanoseconds
 	}
 	if solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr {
 		if accountsDb.VoteAcctCache.Set(pubkey, acct) {
-			return batchCacheVote
+			return batchCacheVote, waitNanoseconds
 		}
-		return batchCacheVoteSkipped
+		return batchCacheVoteSkipped, waitNanoseconds
 	}
 	if admitCommon && accountsDb.CommonAcctsCache.Set(pubkey, acct) {
-		return batchCacheCommon
+		return batchCacheCommon, waitNanoseconds
 	}
-	return batchCacheCommonSkipped
+	return batchCacheCommonSkipped, waitNanoseconds
+}
+
+func (accountsDb *AccountsDb) pendingFoldContainsLocked(pubkey solana.PublicKey) bool {
+	_, ok := accountsDb.pendingFold[[32]byte(pubkey)]
+	return ok
 }
 
 // readIndexedAccount performs one index-fetch + file-read attempt.
@@ -576,10 +690,13 @@ func (accountsDb *AccountsDb) refreshReadCaches(accts []*accounts.Account) {
 	accountsDb.readCacheEpochMu.Lock()
 	defer accountsDb.readCacheEpochMu.Unlock()
 	accountsDb.readCacheEpoch++
-	accountsDb.refreshReadCachesLocked(accts)
+	accountsDb.refreshReadCacheEntries(accts)
 }
 
-func (accountsDb *AccountsDb) refreshReadCachesLocked(accts []*accounts.Account) {
+// refreshReadCacheEntries uses only concurrent-safe ordinary Otter operations.
+// CommitBatch may call it without readCacheEpochMu while pendingFold masks every
+// changed key; Clear remains confined to resetReadCachesLocked.
+func (accountsDb *AccountsDb) refreshReadCacheEntries(accts []*accounts.Account) {
 	for _, acct := range accts {
 		if acct == nil {
 			continue
