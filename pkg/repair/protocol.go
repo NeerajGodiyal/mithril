@@ -137,6 +137,21 @@ func signRepairPacket(identity ed25519.PrivateKey, packet []byte) {
 	copy(packet[repairSignatureOffset:repairSignatureOffset+repairSignatureSize], signature)
 }
 
+// VerifySignedRequest authenticates an INBOUND repair request — a peer asking
+// us to serve it a shred. Mithril is requester-side only today, so nothing
+// outside tests calls this yet.
+//
+// When repair serving is wired up, this becomes a packet-rate consumer fed by
+// a UDP socket loop, which is the shape that wants batching: signatures are
+// verified eight per AVX-512 group, so verifying one packet at a time pays for
+// a whole group and uses one lane of it. Drain the socket's work queue and
+// verify a group per pass, exactly as pkg/tpu/pipeline does — sigverify.Drain
+// and sigverify.FairShare exist for this, and take a share rather than the
+// whole queue so batching does not eat the parallelism across workers.
+//
+// The predicate here is already the strict one, which matters more than the
+// throughput: a repair request authenticated under plain stdlib rules would
+// accept small-order sender keys that Agave rejects.
 func VerifySignedRequest(packet []byte, sender gossip.Pubkey) bool {
 	if len(packet) < repairSignatureOffset+repairSignatureSize {
 		return false
