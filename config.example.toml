@@ -519,6 +519,16 @@ name = "mithril"
     # Number of borrowed accounts to preallocate in arena (0 to disable)
     borrowed_account_arena_size = 1024
 
+    # ed25519 signature verification backend.
+    #   auto    - use the AVX-512 accelerated backend when the CPU has
+    #             AVX512-IFMA (Zen 4/5, Ice Lake and newer), else portable
+    #   r51     - force the accelerated backend; startup fails without AVX512-IFMA
+    #   generic - force the portable pure-Go backend
+    #   stdlib  - ROLLBACK ONLY. Bypasses signature verification hardening and
+    #             restores Go's stdlib predicate, which accepts small-order keys
+    #             that Solana mainnet rejects. Diagnostic use only.
+    sigverify_backend = "auto"
+
     # Enable/disable pool allocator for slices
     use_pool = true
 

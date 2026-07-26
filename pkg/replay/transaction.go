@@ -20,6 +20,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/sigverify"
+	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/Overclock-Validator/mithril/pkg/txverify"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
@@ -554,9 +555,17 @@ func verifySignatureBatch(group []sigverifyJob, batch *sigverify.Batch) {
 	// One observation per group. SumNanoseconds keeps its documented meaning —
 	// total asynchronous worker time spent verifying — while Count now counts
 	// groups rather than transactions, so a mean derived from these two is a
-	// mean per group. The sigverify batch-size metric carries the group width
+	// mean per group. The group-width metric below carries the missing factor,
 	// so the pair stays interpretable.
-	metrics.GlobalBlockReplay.Sigverify.AddTimingSince(start)
+	elapsed := time.Since(start)
+	metrics.GlobalBlockReplay.Sigverify.AddTiming(elapsed)
+
+	// Replay sigverify had no Prometheus series at all before this. Width is
+	// the one worth watching: it is the difference between paying for a vector
+	// group and using it, and no backend setting can compensate for work that
+	// arrives too thinly to fill one.
+	_ = statsd.Duration(statsd.ReplaySigverifyGroup, elapsed, nil)
+	statsd.Count(statsd.ReplaySigverifyGroupSignatures, int64(batch.Len()), nil)
 }
 
 func cloneTransaction(tx *solana.Transaction) (*solana.Transaction, error) {
