@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"net"
 
-	narya "github.com/Overclock-Validator/narya/ed25519"
+	narya "github.com/Overclock-Validator/narya-ed25519/ed25519"
 )
 
 var errUnsupportedCRDSValue = errors.New("unsupported CRDS value")

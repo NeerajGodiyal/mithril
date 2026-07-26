@@ -5,7 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	narya "github.com/Overclock-Validator/narya/ed25519"
+	narya "github.com/Overclock-Validator/narya-ed25519/ed25519"
 	"github.com/gagliardetto/solana-go"
 )
 

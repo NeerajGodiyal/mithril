@@ -19,6 +19,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/sigverify"
 	"github.com/Overclock-Validator/mithril/pkg/txverify"
 	"github.com/Overclock-Validator/mithril/pkg/util"
 	bin "github.com/gagliardetto/binary"
@@ -491,24 +492,70 @@ func (s *sigverifySnapshot) diagContext() string {
 		s.staticKeys, s.totalKeys, s.lookups, firstSigners, firstKeys)
 }
 
+// verifySignatures verifies one snapshot. It is the single-job spelling of
+// verifySignatureBatch, so the arity check, the failure diagnostics, and the
+// halt semantics have exactly one implementation.
 func verifySignatures(snapshot *sigverifySnapshot, sigverifyWg *sync.WaitGroup) {
-	defer sigverifyWg.Done()
-	start := time.Now()
+	var batch sigverify.Batch
+	verifySignatureBatch([]sigverifyJob{{snapshot: snapshot, wg: sigverifyWg}}, &batch)
+}
 
-	if len(snapshot.signers) != len(snapshot.signatures) {
-		mlog.Log.Errorf("sigverify context: %s", snapshot.diagContext())
-		panic(fmt.Sprintf("error - tx %s (version = %d) had mismatched signers/signatures: got %d signers, but %d signatures",
-			snapshot.txSigString(), snapshot.version, len(snapshot.signers), len(snapshot.signatures)))
-	}
-
-	for i, sig := range snapshot.signatures {
-		if snapshot.signers[i].Verify(snapshot.message, sig) {
-			continue
+// verifySignatureBatch verifies every signature across a drained group of jobs
+// in one call, then attributes the result back to the transaction it came from.
+//
+// Grouping is what makes the vectorized backend worth having, and it is safe
+// here because the backend reports a verdict PER SIGNATURE rather than a single
+// batch-wide answer. The failing signer is therefore identified exactly as
+// before, with no re-verification and no loss of diagnostic precision — which
+// matters, because an invalid signature is a deliberate process halt and the
+// panic message is the only forensic artifact.
+//
+// batch is caller-owned scratch so a pool worker reuses it across groups.
+func verifySignatureBatch(group []sigverifyJob, batch *sigverify.Batch) {
+	// Release every job's WaitGroup even if verification panics, matching the
+	// deferred Done() this replaced. A panic halts the process so nothing
+	// observes the difference today; the defer keeps the contract honest
+	// against future edits that might recover.
+	defer func() {
+		for _, job := range group {
+			job.wg.Done()
 		}
-		mlog.Log.Errorf("sigverify context: %s", snapshot.diagContext())
-		panic(fmt.Sprintf("error - tx %s (version = %d) had an invalid signature: invalid signature by %s",
-			snapshot.txSigString(), snapshot.version, snapshot.signers[i]))
+	}()
+
+	start := time.Now()
+	batch.Reset()
+	for _, job := range group {
+		snapshot := job.snapshot
+		if len(snapshot.signers) != len(snapshot.signatures) {
+			mlog.Log.Errorf("sigverify context: %s", snapshot.diagContext())
+			panic(fmt.Sprintf("error - tx %s (version = %d) had mismatched signers/signatures: got %d signers, but %d signatures",
+				snapshot.txSigString(), snapshot.version, len(snapshot.signers), len(snapshot.signatures)))
+		}
+		for i := range snapshot.signatures {
+			batch.Add((*[32]byte)(&snapshot.signers[i]), snapshot.message, snapshot.signatures[i][:])
+		}
 	}
+
+	if !batch.Verify() {
+		lane := 0
+		for _, job := range group {
+			snapshot := job.snapshot
+			for i := range snapshot.signatures {
+				if !batch.OK(lane) {
+					mlog.Log.Errorf("sigverify context: %s", snapshot.diagContext())
+					panic(fmt.Sprintf("error - tx %s (version = %d) had an invalid signature: invalid signature by %s",
+						snapshot.txSigString(), snapshot.version, snapshot.signers[i]))
+				}
+				lane++
+			}
+		}
+	}
+
+	// One observation per group. SumNanoseconds keeps its documented meaning —
+	// total asynchronous worker time spent verifying — while Count now counts
+	// groups rather than transactions, so a mean derived from these two is a
+	// mean per group. The sigverify batch-size metric carries the group width
+	// so the pair stays interpretable.
 	metrics.GlobalBlockReplay.Sigverify.AddTimingSince(start)
 }
 

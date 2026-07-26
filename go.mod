@@ -110,7 +110,7 @@ require (
 require (
 	filippo.io/edwards25519 v1.0.0
 	github.com/Overclock-Validator/bgls v0.0.0-20250309141600-b7db1bfbf3fa
-	github.com/Overclock-Validator/narya v0.0.0-00010101000000-000000000000
+	github.com/Overclock-Validator/narya-ed25519 v0.0.0-00010101000000-000000000000
 	github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20260223201452-d8363b514fc0
 	github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044
 	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
@@ -170,4 +170,4 @@ require (
 	google.golang.org/protobuf v1.36.10
 )
 
-replace github.com/Overclock-Validator/narya => ../narya
+replace github.com/Overclock-Validator/narya-ed25519 => ../narya
