@@ -39,8 +39,9 @@ type sigverifyJob struct {
 }
 
 var (
-	sigverifyOnce  sync.Once
-	sigverifyQueue chan sigverifyJob
+	sigverifyOnce    sync.Once
+	sigverifyQueue   chan sigverifyJob
+	sigverifyWorkers int
 )
 
 // enqueueSigverify hands a snapshot to the verification pool. The caller
@@ -51,6 +52,7 @@ func enqueueSigverify(snapshot *sigverifySnapshot, wg *sync.WaitGroup) {
 	sigverifyOnce.Do(func() {
 		sigverifyQueue = make(chan sigverifyJob, sigverifyQueueDepth)
 		workers := max(2, runtime.GOMAXPROCS(0)/2)
+		sigverifyWorkers = workers
 		for i := 0; i < workers; i++ {
 			go func() {
 				// Both are worker-local scratch reused across groups, so a
@@ -60,7 +62,8 @@ func enqueueSigverify(snapshot *sigverifySnapshot, wg *sync.WaitGroup) {
 					batch sigverify.Batch
 				)
 				for job := range sigverifyQueue {
-					group = sigverify.Drain(group, job, sigverifyQueue, sigverify.MaxDrain)
+					group = sigverify.Drain(group, job, sigverifyQueue,
+						sigverify.FairShare(len(sigverifyQueue), sigverifyWorkers, sigverify.MaxDrain))
 					verifySignatureBatch(group, &batch)
 				}
 			}()

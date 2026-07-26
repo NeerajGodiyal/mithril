@@ -16,16 +16,16 @@ import (
 const VectorVersion = 1
 
 type VectorFixture struct {
-	Version         int              `json:"version"`
-	SelfPubkey      string           `json:"self_pubkey"`
-	SelfTVU         string           `json:"self_tvu,omitempty"`
-	SelfStake       uint64           `json:"self_stake,omitempty"`
-	UseChaCha8      bool             `json:"use_cha_cha_8"`
-	DedupTVUAddrs   bool             `json:"dedup_tvu_addrs"`
-	Slot            uint64           `json:"slot"`
-	ShredType       uint8            `json:"shred_type"`
-	MaxShredIndex   uint32           `json:"max_shred_index"`
-	Peers           []VectorPeer     `json:"peers"`
+	Version         int               `json:"version"`
+	SelfPubkey      string            `json:"self_pubkey"`
+	SelfTVU         string            `json:"self_tvu,omitempty"`
+	SelfStake       uint64            `json:"self_stake,omitempty"`
+	UseChaCha8      bool              `json:"use_cha_cha_8"`
+	DedupTVUAddrs   bool              `json:"dedup_tvu_addrs"`
+	Slot            uint64            `json:"slot"`
+	ShredType       uint8             `json:"shred_type"`
+	MaxShredIndex   uint32            `json:"max_shred_index"`
+	Peers           []VectorPeer      `json:"peers"`
 	StakedNoContact []VectorStakeOnly `json:"staked_no_contact"`
 }
 
@@ -56,11 +56,11 @@ type VectorBroadcastEntry struct {
 }
 
 type VectorOutput struct {
-	Version         int                    `json:"version"`
-	Implementation  string                 `json:"implementation"`
-	Fixture         VectorFixture          `json:"fixture"`
-	Nodes           []VectorNode           `json:"nodes"`
-	BroadcastPeers  []VectorBroadcastEntry `json:"broadcast_peers"`
+	Version        int                    `json:"version"`
+	Implementation string                 `json:"implementation"`
+	Fixture        VectorFixture          `json:"fixture"`
+	Nodes          []VectorNode           `json:"nodes"`
+	BroadcastPeers []VectorBroadcastEntry `json:"broadcast_peers"`
 }
 
 func LoadVectorFixture(path string) (VectorFixture, error) {

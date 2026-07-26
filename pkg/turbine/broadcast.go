@@ -116,8 +116,8 @@ type BroadcastSessionConfig struct {
 	// It seeds the chained merkle root embedded in this slot's first FEC batch.
 	ParentChainedMerkleRoot solana.Hash
 	Broadcaster             PacketBroadcaster
-	UserAgent                 []byte
-	Version                   uint16
+	UserAgent               []byte
+	Version                 uint16
 }
 
 func NewBroadcastSession(cfg BroadcastSessionConfig) *BroadcastSession {

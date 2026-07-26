@@ -603,6 +603,7 @@ func ptrSliceTokenBalance(s []TokenBalancePayload) *[]TokenBalancePayload {
 // in caller-specified order. Lookup precedence:
 //  1. post-execution transaction context (most up-to-date for tx accounts)
 //  2. accountsdb fallback (for addresses NOT touched by the tx)
+//
 // Each entry is nil (JSON null) when the address can't be resolved.
 // Always returns a slice of length len(conf.accounts.addresses), matching
 // Agave so clients can index by request order.

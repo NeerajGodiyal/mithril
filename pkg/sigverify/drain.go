@@ -1,5 +1,15 @@
 package sigverify
 
+// BatchTarget is the group width worth aiming for: the vectorized backend
+// verifies eight signatures per AVX-512 group, so eight is the point at which
+// every lane is busy and the per-signature cost stops falling steeply.
+//
+// It is a TARGET, never a threshold. Nothing in this package waits to reach it.
+// A producer that meters work out to its workers should hand over roughly this
+// many per worker so a group is reachable at all; a consumer should take
+// whatever is actually queued.
+const BatchTarget = 8
+
 // MaxDrain is how many work items a verification worker will coalesce into one
 // batch.
 //
@@ -9,6 +19,37 @@ package sigverify
 // cannot monopolise a shared queue while its peers idle, and small enough that
 // the scratch a worker holds stays in cache.
 const MaxDrain = 64
+
+// FairShare reports how many items one worker may take in a single pass,
+// given how many are queued behind it and how many workers share the queue.
+//
+// Draining unconditionally is a trap. Eight workers facing eight queued items
+// would let the first worker take all eight and verify them as one group while
+// the other seven idle — one group of eight costs more wall-clock than eight
+// workers each verifying one, so the "optimization" would be a latency
+// regression exactly when the queue is shallow. Batching buys throughput per
+// core; it must never buy it with parallelism that was already available.
+//
+// So a worker takes its share and no more: one item plus an equal cut of what
+// remains. A shallow queue spreads across workers, and a deep queue — the
+// catch-up case, where every worker is saturated regardless — gives everyone
+// full groups.
+//
+// max caps the result. The floor is 1: the item already in hand is never
+// given back, which is what keeps this incapable of stranding work.
+func FairShare(queued, workers, max int) int {
+	if workers < 1 {
+		workers = 1
+	}
+	share := queued/workers + 1
+	if share > max {
+		share = max
+	}
+	if share < 1 {
+		share = 1
+	}
+	return share
+}
 
 // Drain coalesces work from ch into dst, starting with an item the caller has
 // already received.

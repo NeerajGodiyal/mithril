@@ -255,3 +255,36 @@ func TestDrainReusesTheDestinationSlice(t *testing.T) {
 		assert.Equal(t, MaxDrain, cap(dst), "Drain must not reallocate a sufficient buffer")
 	}
 }
+
+// FairShare must never return less than one: the item already in the worker's
+// hand is never given back, which is what makes it impossible for this package
+// to strand work.
+func TestFairShareNeverStrandsTheItemInHand(t *testing.T) {
+	for _, queued := range []int{0, 1, 7, 100, 100000} {
+		for _, workers := range []int{-1, 0, 1, 8, 1000} {
+			for _, max := range []int{1, BatchTarget, MaxDrain} {
+				got := FairShare(queued, workers, max)
+				assert.GreaterOrEqual(t, got, 1,
+					"queued=%d workers=%d max=%d", queued, workers, max)
+				assert.LessOrEqual(t, got, max,
+					"queued=%d workers=%d max=%d", queued, workers, max)
+			}
+		}
+	}
+}
+
+// A shallow queue must spread across workers rather than collapsing onto one.
+// Eight workers facing eight items should take one each: one group of eight on
+// a single core is slower in wall-clock than eight singles on eight cores.
+func TestFairShareSpreadsShallowQueues(t *testing.T) {
+	assert.Equal(t, 1, FairShare(7, 8, MaxDrain), "8 workers, 8 items total -> one each")
+	assert.Equal(t, 1, FairShare(0, 8, MaxDrain), "nothing behind us -> just the item in hand")
+	assert.Equal(t, 2, FairShare(8, 8, MaxDrain), "one spare each")
+}
+
+// A deep queue means every worker is saturated regardless, so each may take a
+// full group.
+func TestFairShareGivesFullGroupsOnDeepQueues(t *testing.T) {
+	assert.Equal(t, BatchTarget, FairShare(8192, 8, BatchTarget))
+	assert.Equal(t, MaxDrain, FairShare(8192, 8, MaxDrain))
+}

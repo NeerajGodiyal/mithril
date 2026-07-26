@@ -173,7 +173,7 @@ func startSigverifyPool(
 		go func() {
 			defer verifyWG.Done()
 			defer wg.Done()
-			runSigverifyWorker(in, out, stats)
+			runSigverifyWorker(in, out, workers, stats)
 		}()
 	}
 	wg.Add(1)
@@ -195,6 +195,7 @@ func startSigverifyPool(
 func runSigverifyWorker(
 	in <-chan packet.Packet,
 	out chan<- packet.Packet,
+	workers int,
 	stats *SigverifyStats,
 ) {
 	// Worker-local scratch, reused across groups.
@@ -205,7 +206,8 @@ func runSigverifyWorker(
 		verifier batchVerifier
 	)
 	for pkt := range in {
-		group = sigverify.Drain(group, pkt, in, sigverify.MaxDrain)
+		group = sigverify.Drain(group, pkt, in,
+			sigverify.FairShare(len(in), workers, sigverify.MaxDrain))
 
 		payloads = payloads[:0]
 		for _, p := range group {

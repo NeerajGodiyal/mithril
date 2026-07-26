@@ -165,11 +165,12 @@ func TestEpoch905TieBreakPubkeys(t *testing.T) {
 }
 
 // pubkeyFromU16 creates a deterministic pubkey matching Agave's test helper
-// fn pubkey_from_u16(n: u16) -> Pubkey {
-//     let mut bytes = [0; 32];
-//     bytes[0..2].copy_from_slice(&n.to_le_bytes());
-//     Pubkey::new_from_array(bytes)
-// }
+//
+//	fn pubkey_from_u16(n: u16) -> Pubkey {
+//	    let mut bytes = [0; 32];
+//	    bytes[0..2].copy_from_slice(&n.to_le_bytes());
+//	    Pubkey::new_from_array(bytes)
+//	}
 func pubkeyFromU16(n uint16) solana.PublicKey {
 	var bytes [32]byte
 	binary.LittleEndian.PutUint16(bytes[:], n)
@@ -439,8 +440,9 @@ func TestUint64nAgaveCompatibility(t *testing.T) {
 // Test vectors from firedancer/src/ballet/chacha20/test_chacha_rng_roll.c using MODE_MOD.
 //
 // Firedancer uses MODE_MOD for leader schedule (same as Agave's UniformU64Sampler):
-//   zone = ULONG_MAX - ((ULONG_MAX - n + 1) % n)
-//   accept if lo <= zone
+//
+//	zone = ULONG_MAX - ((ULONG_MAX - n + 1) % n)
+//	accept if lo <= zone
 func TestUint64nFiredancerCompatibility(t *testing.T) {
 	// Firedancer test seed: [0x41; 32] (all bytes set to 'A')
 	var seedBytes [32]byte

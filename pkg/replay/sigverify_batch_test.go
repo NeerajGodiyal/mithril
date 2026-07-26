@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/sigverify"
 )
@@ -112,4 +113,55 @@ func TestVerifySignatureBatchHaltsOnArityMismatch(t *testing.T) {
 
 	var batch sigverify.Batch
 	verifySignatureBatch([]sigverifyJob{{snapshot: snapshot, wg: &wg}}, &batch)
+}
+
+// The property that matters most about grouping: nothing is ever left sitting
+// in a partly-filled batch. Workers never wait to reach a target width, so a
+// count that divides badly into groups must still drain completely.
+//
+// If a leftover could strand, wg.Wait() below never returns and this test hangs
+// rather than failing quietly.
+func TestSigverifyPoolDrainsAwkwardCountsCompletely(t *testing.T) {
+	for _, count := range []int{1, 2, 3, 7, 8, 9, 63, 64, 65, 129} {
+		t.Run(fmt.Sprintf("count=%d", count), func(t *testing.T) {
+			var wg sync.WaitGroup
+			for i := 0; i < count; i++ {
+				wg.Add(1)
+				enqueueSigverify(signedTestSnapshot(t, false), &wg)
+			}
+
+			done := make(chan struct{})
+			go func() {
+				wg.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(30 * time.Second):
+				t.Fatalf("count=%d: signatures stranded in an unfinished batch", count)
+			}
+		})
+	}
+}
+
+// A trickle must not be held back waiting for company. Each snapshot is
+// enqueued only after the previous one has been verified, so every batch is a
+// batch of one; the pool has to keep making progress anyway.
+func TestSigverifyPoolMakesProgressOnATrickle(t *testing.T) {
+	for i := 0; i < 12; i++ {
+		var wg sync.WaitGroup
+		wg.Add(1)
+		enqueueSigverify(signedTestSnapshot(t, false), &wg)
+
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("item %d was held waiting for a fuller batch", i)
+		}
+	}
 }
