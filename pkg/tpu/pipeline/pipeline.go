@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/Overclock-Validator/mithril/pkg/sigverify"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/dedup"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/packet"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/sink"
@@ -183,24 +184,57 @@ func startSigverifyPool(
 	}()
 }
 
+// runSigverifyWorker verifies a DRAINED GROUP of packets per pass rather than
+// one packet at a time.
+//
+// A transaction carries one or two signatures, and the vectorized backend
+// verifies eight per group, so packet-at-a-time verification pays for a whole
+// group and uses one lane of it. Draining costs nothing when ingress is quiet —
+// the worker still takes exactly the packet it blocked for, and forwards it
+// with unchanged latency — and turns a burst into free width.
 func runSigverifyWorker(
 	in <-chan packet.Packet,
 	out chan<- packet.Packet,
 	stats *SigverifyStats,
 ) {
+	// Worker-local scratch, reused across groups.
+	var (
+		group    []packet.Packet
+		payloads [][]byte
+		verdicts []bool
+		verifier batchVerifier
+	)
 	for pkt := range in {
-		data := pkt.Data()
-		atomic.AddUint64(&stats.InPackets, 1)
-		atomic.AddUint64(&stats.InBytes, uint64(len(data)))
+		group = sigverify.Drain(group, pkt, in, sigverify.MaxDrain)
 
-		if !verifyPacket(data) {
-			atomic.AddUint64(&stats.DroppedSigverify, 1)
-			pkt.Release()
-			continue
+		payloads = payloads[:0]
+		for _, p := range group {
+			data := p.Data()
+			atomic.AddUint64(&stats.InPackets, 1)
+			atomic.AddUint64(&stats.InBytes, uint64(len(data)))
+			payloads = append(payloads, data)
 		}
 
-		atomic.AddUint64(&stats.VerifiedPackets, 1)
-		atomic.AddUint64(&stats.VerifiedBytes, uint64(len(data)))
-		out <- pkt
+		if cap(verdicts) < len(payloads) {
+			verdicts = make([]bool, len(payloads))
+		}
+		verdicts = verdicts[:len(payloads)]
+		verifier.Verify(payloads, verdicts)
+
+		for i, p := range group {
+			if !verdicts[i] {
+				atomic.AddUint64(&stats.DroppedSigverify, 1)
+				p.Release()
+				continue
+			}
+			atomic.AddUint64(&stats.VerifiedPackets, 1)
+			atomic.AddUint64(&stats.VerifiedBytes, uint64(len(payloads[i])))
+			out <- p
+		}
+
+		// Released packets must not stay reachable through the scratch slices
+		// until the next group happens to overwrite that index.
+		clear(group)
+		clear(payloads)
 	}
 }

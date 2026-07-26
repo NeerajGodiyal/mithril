@@ -10,13 +10,13 @@ import (
 const PacketDataSize = 1232
 
 var (
-	ErrEmpty              = errors.New("empty transaction")
-	ErrTooLarge           = errors.New("transaction exceeds packet size")
-	ErrInvalidEncoding    = errors.New("invalid compact-u16 encoding")
-	ErrInvalidSigCount    = errors.New("invalid signature count")
-	ErrInvalidMessage     = errors.New("invalid message encoding")
-	ErrSigCountMismatch   = errors.New("signature count mismatch")
-	ErrInsufficientData   = errors.New("insufficient transaction data")
+	ErrEmpty            = errors.New("empty transaction")
+	ErrTooLarge         = errors.New("transaction exceeds packet size")
+	ErrInvalidEncoding  = errors.New("invalid compact-u16 encoding")
+	ErrInvalidSigCount  = errors.New("invalid signature count")
+	ErrInvalidMessage   = errors.New("invalid message encoding")
+	ErrSigCountMismatch = errors.New("signature count mismatch")
+	ErrInsufficientData = errors.New("insufficient transaction data")
 )
 
 // View is a zero-copy parsed legacy transaction wire layout.
