@@ -4,12 +4,12 @@ package costmodel
 const (
 	ComputeUnitToUSRatio = 30
 
-	SignatureCost            = ComputeUnitToUSRatio * 24 // 720
+	SignatureCost            = ComputeUnitToUSRatio * 24  // 720
 	Secp256k1VerifyCost      = ComputeUnitToUSRatio * 223
 	Ed25519VerifyStrictCost  = ComputeUnitToUSRatio * 80
 	Secp256r1VerifyCost      = ComputeUnitToUSRatio * 160
-	WriteLockUnits           = ComputeUnitToUSRatio * 10  // 300
-	InstructionDataBytesCost = 140 / ComputeUnitToUSRatio // ~4 CU per byte
+	WriteLockUnits           = ComputeUnitToUSRatio * 10 // 300
+	InstructionDataBytesCost = 140 / ComputeUnitToUSRatio  // ~4 CU per byte
 
 	MaxBlockUnitsSIMD0256 = 60_000_000
 	MaxBlockUnitsSIMD0286 = 100_000_000

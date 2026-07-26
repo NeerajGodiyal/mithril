@@ -41,9 +41,9 @@ func EstimateTransactionCost(tx *solana.Transaction, feats *features.Features) (
 	if err != nil {
 		// Agave treats compute-budget parse failure as zero execution cost (tx won't execute).
 		return TransactionCost{
-			SignatureCost:    signatureCost(tx),
-			WriteLockCost:    writeLockCost(countWriteLocks(tx)),
-			DataBytesCost:    instructionDataCost(tx),
+			SignatureCost: signatureCost(tx),
+			WriteLockCost: writeLockCost(countWriteLocks(tx)),
+			DataBytesCost: instructionDataCost(tx),
 			WritableAccounts: writableAccounts(tx),
 		}, nil
 	}

@@ -17,7 +17,7 @@ var (
 	ColorTextDisabled  = lipgloss.Color("#606060") // hints, shortcuts — visible on dark bg
 
 	// Semantic
-	ColorSuccess = MithrilTeal // teal doubles as success indicator
+	ColorSuccess = MithrilTeal             // teal doubles as success indicator
 	ColorError   = lipgloss.Color("196")
 	ColorWarn    = lipgloss.Color("214")
 

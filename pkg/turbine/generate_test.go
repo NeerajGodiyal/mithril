@@ -184,10 +184,10 @@ func TestMakeShredsFromAlpenglowBlock(t *testing.T) {
 	}
 
 	var (
-		chainedRoot          = solana.Hash{5}
-		nextData      uint32 = 0
-		nextCode      uint32 = 0
-		allDataShreds []*Shred
+		chainedRoot     = solana.Hash{5}
+		nextData uint32 = 0
+		nextCode uint32 = 0
+		allDataShreds   []*Shred
 	)
 	for _, component := range buildAlpenglowSlot(t) {
 		packets, root, newData, newCode, err := gen.MakeShredsFromData(

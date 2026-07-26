@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/require"
