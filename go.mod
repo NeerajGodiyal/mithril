@@ -7,6 +7,7 @@ replace github.com/gagliardetto/solana-go => github.com/palmerlao/solana-go v0.0
 replace github.com/gagliardetto/binary => github.com/palmerlao/binary v0.0.0-20250617062159-3054b4d33aed
 
 require (
+	github.com/Overclock-Validator/narya-ed25519 v0.0.0-20260726065311-1625c1837692
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/charmbracelet/bubbles v0.21.1-0.20250623103423-23b8fd6302d7
 	github.com/charmbracelet/bubbletea v1.3.10
@@ -110,7 +111,6 @@ require (
 require (
 	filippo.io/edwards25519 v1.0.0
 	github.com/Overclock-Validator/bgls v0.0.0-20250309141600-b7db1bfbf3fa
-	github.com/Overclock-Validator/narya-ed25519 v0.0.0-00010101000000-000000000000
 	github.com/Overclock-Validator/solana-snapshot-finder-go v0.0.0-20260223201452-d8363b514fc0
 	github.com/Overclock-Validator/wide v0.0.0-20250221123529-f80959d02044
 	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
@@ -169,5 +169,3 @@ require (
 	golang.org/x/time v0.9.0
 	google.golang.org/protobuf v1.36.10
 )
-
-replace github.com/Overclock-Validator/narya-ed25519 => ../narya
