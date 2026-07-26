@@ -119,8 +119,10 @@ func TestVerifySignatureBatchHaltsOnArityMismatch(t *testing.T) {
 // in a partly-filled batch. Workers never wait to reach a target width, so a
 // count that divides badly into groups must still drain completely.
 //
-// If a leftover could strand, wg.Wait() below never returns and this test hangs
-// rather than failing quietly.
+// The assertion is on the JOIN completing, not merely on no error being
+// returned: a leftover held back in a worker's scratch would leave wg.Wait()
+// below waiting forever, so the bug surfaces as a timeout instead of slipping
+// through as a pass.
 func TestSigverifyPoolDrainsAwkwardCountsCompletely(t *testing.T) {
 	for _, count := range []int{1, 2, 3, 7, 8, 9, 63, 64, 65, 129} {
 		t.Run(fmt.Sprintf("count=%d", count), func(t *testing.T) {
