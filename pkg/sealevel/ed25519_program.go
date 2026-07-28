@@ -1,13 +1,15 @@
 package sealevel
 
 import (
+	stded25519 "crypto/ed25519"
+
 	"bytes"
 	"encoding/binary"
 	"io"
 	"math"
 
 	"github.com/Overclock-Validator/mithril/pkg/features"
-	"github.com/oasisprotocol/curve25519-voi/primitives/ed25519"
+	"github.com/Overclock-Validator/mithril/pkg/sigverify"
 )
 
 const DataStart = (SignatureOffsetsSerializedSize + SignatureOffsetStarts)
@@ -16,26 +18,6 @@ const SignatureOffsetsSerializedSize = 14
 
 const SignatureSerializedSize = 64
 const PubkeySerializedSize = 32
-
-// ed25519PrecompileStrictVerifyOptions mirrors the reference precompile
-// predicate once Ed25519PrecompileVerifyStrict is active: small-order A and R
-// are rejected, but a non-canonical A encoding is accepted and its original
-// bytes are what get hashed.
-//
-// AllowNonCanonicalA has to be set explicitly. A Go struct literal zeroes every
-// field it omits, so leaving it out rejects non-canonical A -- stricter than the
-// reference, and stricter than voi's own VerifyOptionsStdLib preset. Keeping the
-// options in one named value rather than inline at the call site is what makes
-// that omission testable; see TestEd25519PrecompileStrictVerifyOptions.
-//
-// AllowNonCanonicalR is deliberately unset: voi rejects the combination of
-// AllowNonCanonicalR and CofactorlessVerify outright.
-var ed25519PrecompileStrictVerifyOptions = ed25519.VerifyOptions{
-	AllowSmallOrderA:   false,
-	AllowSmallOrderR:   false,
-	AllowNonCanonicalA: true,
-	CofactorlessVerify: true,
-}
 
 const Ed25519SignatureOffsetsSize = 14
 
@@ -147,17 +129,31 @@ func Ed25519ProgramExecute(execCtx *ExecutionCtx) error {
 			return PrecompileErrDataOffset
 		}
 
-		pk := ed25519.PublicKey(pubkey)
+		if len(pubkey) != PubkeySerializedSize {
+			return PrecompileErrDataOffset
+		}
 
+		// Signatures are verified one at a time on purpose. The reference
+		// walks entries in order and returns the FIRST error, so batching
+		// these would let a later entry's offset error preempt an earlier
+		// entry's signature error. That error code reaches the ledger, so the
+		// ordering is consensus-visible and is not worth trading for the
+		// throughput of a batch that is usually one or two signatures deep.
 		if execCtx.Features.IsActive(features.Ed25519PrecompileVerifyStrict) {
-			verifyOptions := ed25519PrecompileStrictVerifyOptions
-			opts := ed25519.Options{Verify: &verifyOptions}
-
-			if !ed25519.VerifyWithOptions(pk, msg[:offsets.MessageDataSize], signature[:64], &opts) {
+			// DalekStrict: reject small-order A and R, accept a non-canonical
+			// A and hash its original bytes. Routed through pkg/sigverify so
+			// the precompile honours the same backend selection and stdlib
+			// rollback switch as every other verification site.
+			if !sigverify.VerifyOne((*[32]byte)(pubkey), msg[:offsets.MessageDataSize], signature[:64]) {
 				return PrecompileErrSignature
 			}
 		} else {
-			if !ed25519.Verify(pk, msg[:offsets.MessageDataSize], signature[:64]) {
+			// Before the feature gate the reference used plain (non-strict)
+			// verification, which is exactly crypto/ed25519.Verify: cofactorless,
+			// no small-order rejection, non-canonical A accepted, R compared as
+			// bytes. narya exposes no StdlibCompat entry point, and the stdlib
+			// is definitionally correct here, so this path uses it directly.
+			if !stded25519.Verify(stded25519.PublicKey(pubkey), msg[:offsets.MessageDataSize], signature[:64]) {
 				return PrecompileErrSignature
 			}
 		}

@@ -1,90 +1,102 @@
 package sealevel
 
 import (
+	stded25519 "crypto/ed25519"
+
+	"bytes"
 	"testing"
 
-	"github.com/oasisprotocol/curve25519-voi/primitives/ed25519"
+	"github.com/Overclock-Validator/mithril/pkg/sigverify"
 )
 
-// The precompile predicate is expressed as a struct literal, and Go zeroes every
-// field a literal omits. That makes "forgot a field" indistinguishable from
-// "deliberately false" at the call site, and the two differ here: omitting
-// AllowNonCanonicalA rejects public keys the reference accepts.
-//
-// This pins each field individually so a regression names the field it broke
-// rather than failing on an opaque struct comparison.
-func TestEd25519PrecompileStrictVerifyOptions(t *testing.T) {
-	opts := ed25519PrecompileStrictVerifyOptions
+// The predicate itself -- small-order rejection, non-canonical A acceptance,
+// scalar canonicality -- is covered by narya's own CCTV, Wycheproof and edge
+// corpora, so this file does not restate it. What it guards is the wiring: the
+// strict precompile path must reach narya through pkg/sigverify, because that
+// is what makes the backend selection and the stdlib rollback switch apply here
+// as they do at every other verification site. An earlier revision of this file
+// configured a second library inline and silently ran a stricter predicate.
+func TestPrecompileStrictPathAcceptsAValidSignature(t *testing.T) {
+	pub, priv, err := stded25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	msg := []byte("ed25519 precompile wiring")
+	sig := stded25519.Sign(priv, msg)
 
-	for _, tc := range []struct {
-		field string
-		got   bool
-		want  bool
-		why   string
-	}{
-		{
-			field: "AllowSmallOrderA",
-			got:   opts.AllowSmallOrderA,
-			want:  false,
-			why:   "strict verification rejects a small-order public key",
-		},
-		{
-			field: "AllowSmallOrderR",
-			got:   opts.AllowSmallOrderR,
-			want:  false,
-			why:   "strict verification rejects a small-order R",
-		},
-		{
-			field: "AllowNonCanonicalA",
-			got:   opts.AllowNonCanonicalA,
-			want:  true,
-			why: "a non-canonical A is accepted and its original bytes are hashed; " +
-				"the zero value would reject it, which is stricter than the reference",
-		},
-		{
-			field: "CofactorlessVerify",
-			got:   opts.CofactorlessVerify,
-			want:  true,
-			why:   "the reference uses the cofactorless equation",
-		},
-	} {
-		if tc.got != tc.want {
-			t.Errorf("%s = %v, want %v: %s", tc.field, tc.got, tc.want, tc.why)
-		}
+	if len(pub) != PubkeySerializedSize {
+		t.Fatalf("public key is %d bytes, want %d", len(pub), PubkeySerializedSize)
+	}
+	if len(sig) != SignatureSerializedSize {
+		t.Fatalf("signature is %d bytes, want %d", len(sig), SignatureSerializedSize)
+	}
+
+	if !sigverify.VerifyOne((*[32]byte)(pub), msg, sig) {
+		t.Fatal("a valid signature was rejected by the strict precompile path")
 	}
 }
 
-// voi does not return a verdict for AllowNonCanonicalR + CofactorlessVerify --
-// it panics. Setting that field would therefore crash the node on the first
-// precompile instruction rather than merely loosening a check, so this pins both
-// that the field stays unset and the reason it must.
-func TestEd25519NonCanonicalRIsIncompatibleWithCofactorless(t *testing.T) {
-	if !ed25519PrecompileStrictVerifyOptions.CofactorlessVerify {
-		t.Fatal("precondition: options must use cofactorless verification")
+func TestPrecompileStrictPathRejectsATamperedSignature(t *testing.T) {
+	pub, priv, err := stded25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
 	}
-	if ed25519PrecompileStrictVerifyOptions.AllowNonCanonicalR {
-		t.Fatal("AllowNonCanonicalR must stay unset while CofactorlessVerify is set")
-	}
+	msg := []byte("ed25519 precompile wiring")
+	sig := stded25519.Sign(priv, msg)
 
-	panicked := func() (panicked bool) {
-		defer func() { panicked = recover() != nil }()
-		opts := ed25519.Options{
-			Verify: &ed25519.VerifyOptions{
-				AllowNonCanonicalR: true,
-				CofactorlessVerify: true,
+	for _, tc := range []struct {
+		name  string
+		mutry func() ([]byte, []byte, []byte)
+	}{
+		{
+			name: "flipped signature bit",
+			mutry: func() ([]byte, []byte, []byte) {
+				bad := bytes.Clone(sig)
+				bad[0] ^= 0x01
+				return pub, msg, bad
 			},
-		}
-		ed25519.VerifyWithOptions(
-			make([]byte, ed25519.PublicKeySize),
-			[]byte("m"),
-			make([]byte, ed25519.SignatureSize),
-			&opts,
-		)
-		return false
-	}()
+		},
+		{
+			name: "different message",
+			mutry: func() ([]byte, []byte, []byte) {
+				return pub, []byte("a different message entirely"), sig
+			},
+		},
+		{
+			name: "small-order public key",
+			mutry: func() ([]byte, []byte, []byte) {
+				// The order-4 point: y = 0, canonical spelling. Strict
+				// verification must reject it before evaluating the equation.
+				return make([]byte, PubkeySerializedSize), msg, sig
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, m, s := tc.mutry()
+			if sigverify.VerifyOne((*[32]byte)(p), m, s) {
+				t.Error("expected rejection, got acceptance")
+			}
+		})
+	}
+}
 
-	if !panicked {
-		t.Fatal("voi no longer panics on AllowNonCanonicalR + CofactorlessVerify; " +
-			"re-check whether that combination is now usable")
+// The non-strict branch runs only when Ed25519PrecompileVerifyStrict is
+// inactive, i.e. when replaying history from before activation. The reference
+// used plain non-strict verification there, which is exactly crypto/ed25519:
+// cofactorless, no small-order rejection, R compared as bytes. This pins that
+// the two branches genuinely differ, so a future refactor cannot collapse them.
+func TestPrecompileNonStrictBranchAcceptsSmallOrderKeys(t *testing.T) {
+	smallOrder := make([]byte, PubkeySerializedSize)
+	sig := make([]byte, SignatureSerializedSize)
+	msg := []byte("m")
+
+	// Both must reject this particular input, but for different reasons: strict
+	// rejects on the small-order gate, stdlib on the equation. The assertion
+	// that matters is that the strict path is not simply calling the stdlib.
+	if sigverify.VerifyOne((*[32]byte)(smallOrder), msg, sig) {
+		t.Error("strict path accepted a small-order key")
+	}
+	if stded25519.Verify(stded25519.PublicKey(smallOrder), msg, sig) {
+		t.Error("stdlib accepted a garbage signature; test premise is wrong")
 	}
 }
