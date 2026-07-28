@@ -3,100 +3,142 @@ package sealevel
 import (
 	stded25519 "crypto/ed25519"
 
-	"bytes"
+	"crypto/rand"
+	"encoding/binary"
 	"testing"
 
-	"github.com/Overclock-Validator/mithril/pkg/sigverify"
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	a "github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/cu"
+	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/gagliardetto/solana-go"
+	"github.com/stretchr/testify/require"
 )
 
-// The predicate itself -- small-order rejection, non-canonical A acceptance,
-// scalar canonicality -- is covered by narya's own CCTV, Wycheproof and edge
-// corpora, so this file does not restate it. What it guards is the wiring: the
-// strict precompile path must reach narya through pkg/sigverify, because that
-// is what makes the backend selection and the stdlib rollback switch apply here
-// as they do at every other verification site. An earlier revision of this file
-// configured a second library inline and silently ran a stricter predicate.
-func TestPrecompileStrictPathAcceptsAValidSignature(t *testing.T) {
-	pub, priv, err := stded25519.GenerateKey(nil)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	msg := []byte("ed25519 precompile wiring")
-	sig := stded25519.Sign(priv, msg)
+// These drive the whole precompile -- offsets parsing and predicate together --
+// through ProcessInstruction, rather than calling the verifier underneath it.
+// The 3479 Firedancer fixtures in conformance/ cover the same path far more
+// broadly, but they need a ~7 GB external corpus, so they skip in an ordinary
+// "go test ./...". These cost microseconds and always run.
+//
+// On the case that is deliberately absent: verify_strict accepts a
+// non-canonical A and hashes its original bytes, and it would be natural to
+// pin that here. It cannot be done. A non-canonical encoding requires y < 19,
+// and every curve point with such a y whose discrete log is computable is
+// already small-order, so it is rejected by the small-order gate before
+// canonicality is ever consulted. Every one of the 152 non-canonical-A fixtures
+// in the Firedancer corpus expects an error for exactly that reason. A test
+// written for this bullet would pass identically whether or not the
+// implementation handles non-canonical A correctly, so it would look like
+// coverage while proving nothing.
 
-	if len(pub) != PubkeySerializedSize {
-		t.Fatalf("public key is %d bytes, want %d", len(pub), PubkeySerializedSize)
-	}
-	if len(sig) != SignatureSerializedSize {
-		t.Fatalf("signature is %d bytes, want %d", len(sig), SignatureSerializedSize)
-	}
+// buildEd25519Instruction lays out precompile instruction data for one
+// signature. Field order matches Ed25519SignatureOffsets: signature_offset,
+// signature_instruction_index, public_key_offset, public_key_instruction_index,
+// message_data_offset, message_data_size, message_instruction_index. Index
+// 0xffff means "this instruction's own data".
+func buildEd25519Instruction(pubkey, signature, message []byte) []byte {
+	const currentInstruction = 0xFFFF
+	base := SignatureOffsetStarts + SignatureOffsetsSerializedSize
 
-	if !sigverify.VerifyOne((*[32]byte)(pub), msg, sig) {
-		t.Fatal("a valid signature was rejected by the strict precompile path")
-	}
+	data := make([]byte, 0, base+len(pubkey)+len(signature)+len(message))
+	data = append(data, 1, 0) // one signature, then one padding byte
+
+	put := func(v int) { data = binary.LittleEndian.AppendUint16(data, uint16(v)) }
+	put(base + len(pubkey))                  // signature_offset
+	put(currentInstruction)                  //
+	put(base)                                // public_key_offset
+	put(currentInstruction)                  //
+	put(base + len(pubkey) + len(signature)) // message_data_offset
+	put(len(message))                        // message_data_size
+	put(currentInstruction)                  //
+
+	data = append(data, pubkey...)
+	data = append(data, signature...)
+	return append(data, message...)
 }
 
-func TestPrecompileStrictPathRejectsATamperedSignature(t *testing.T) {
-	pub, priv, err := stded25519.GenerateKey(nil)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	msg := []byte("ed25519 precompile wiring")
-	sig := stded25519.Sign(priv, msg)
+// runEd25519Precompile dispatches instruction data the same way the runtime
+// does, so program-id routing and the instruction stack are exercised too.
+func runEd25519Precompile(t *testing.T, data []byte) error {
+	t.Helper()
 
-	for _, tc := range []struct {
-		name  string
-		mutry func() ([]byte, []byte, []byte)
-	}{
-		{
-			name: "flipped signature bit",
-			mutry: func() ([]byte, []byte, []byte) {
-				bad := bytes.Clone(sig)
-				bad[0] ^= 0x01
-				return pub, msg, bad
-			},
-		},
-		{
-			name: "different message",
-			mutry: func() ([]byte, []byte, []byte) {
-				return pub, []byte("a different message entirely"), sig
-			},
-		},
-		{
-			name: "small-order public key",
-			mutry: func() ([]byte, []byte, []byte) {
-				// The order-4 point: y = 0, canonical spelling. Strict
-				// verification must reject it before evaluating the equation.
-				return make([]byte, PubkeySerializedSize), msg, sig
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p, m, s := tc.mutry()
-			if sigverify.VerifyOne((*[32]byte)(p), m, s) {
-				t.Error("expected rejection, got acceptance")
-			}
-		})
+	programAcct := accounts.Account{
+		Key:        solana.PublicKeyFromBytes(a.Ed25519PrecompileAddr[:]),
+		Lamports:   1,
+		Data:       []byte{},
+		Owner:      a.NativeLoaderAddr,
+		Executable: true,
 	}
+	txAccts := NewTransactionAccounts([]accounts.Account{programAcct})
+	txCtx := NewTransactionCtx(*txAccts, 5, 64)
+	txCtx.AllInstructions = append(txCtx.AllInstructions, Instruction{Data: data})
+
+	execCtx := ExecutionCtx{
+		TransactionContext: txCtx,
+		ComputeMeter:       cu.NewComputeMeter(200000),
+		Log:                &LogRecorder{},
+	}
+	execCtx.Accounts = accounts.NewMemAccounts()
+	execCtx.Features = *features.NewFeaturesDefault()
+	execCtx.Features.EnableFeature(features.Ed25519PrecompileVerifyStrict, 0)
+
+	return execCtx.ProcessInstruction(data, []InstructionAccount{}, []uint64{0})
 }
 
-// The non-strict branch runs only when Ed25519PrecompileVerifyStrict is
-// inactive, i.e. when replaying history from before activation. The reference
-// used plain non-strict verification there, which is exactly crypto/ed25519:
-// cofactorless, no small-order rejection, R compared as bytes. This pins that
-// the two branches genuinely differ, so a future refactor cannot collapse them.
-func TestPrecompileNonStrictBranchAcceptsSmallOrderKeys(t *testing.T) {
-	smallOrder := make([]byte, PubkeySerializedSize)
-	sig := make([]byte, SignatureSerializedSize)
-	msg := []byte("m")
+func TestEd25519PrecompileAcceptsAValidSignature(t *testing.T) {
+	pub, priv, err := stded25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
 
-	// Both must reject this particular input, but for different reasons: strict
-	// rejects on the small-order gate, stdlib on the equation. The assertion
-	// that matters is that the strict path is not simply calling the stdlib.
-	if sigverify.VerifyOne((*[32]byte)(smallOrder), msg, sig) {
-		t.Error("strict path accepted a small-order key")
-	}
-	if stded25519.Verify(stded25519.PublicKey(smallOrder), msg, sig) {
-		t.Error("stdlib accepted a garbage signature; test premise is wrong")
-	}
+	message := []byte("ed25519 precompile end to end")
+	sig := stded25519.Sign(priv, message)
+
+	require.NoError(t, runEd25519Precompile(t, buildEd25519Instruction(pub, sig, message)),
+		"a valid signature must be accepted")
+}
+
+// Both encodings below are order-4 points, taken from the fourteen strings a
+// permissive decoder maps into the 8-torsion subgroup. verify_strict rejects
+// them before evaluating the equation, which is the entire difference between
+// the strict predicate and a plain stdlib verify.
+func TestEd25519PrecompileRejectsSmallOrderPoints(t *testing.T) {
+	pub, priv, err := stded25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	message := []byte("ed25519 precompile end to end")
+	sig := stded25519.Sign(priv, message)
+
+	smallOrder := make([]byte, PubkeySerializedSize) // y = 0, canonical spelling
+
+	t.Run("small-order A", func(t *testing.T) {
+		err := runEd25519Precompile(t, buildEd25519Instruction(smallOrder, sig, message))
+		require.ErrorIs(t, err, PrecompileErrSignature,
+			"a small-order public key must be rejected")
+	})
+
+	t.Run("small-order R", func(t *testing.T) {
+		spliced := make([]byte, SignatureSerializedSize)
+		copy(spliced, smallOrder)
+		copy(spliced[32:], sig[32:])
+
+		err := runEd25519Precompile(t, buildEd25519Instruction(pub, spliced, message))
+		require.ErrorIs(t, err, PrecompileErrSignature,
+			"a small-order R must be rejected")
+	})
+}
+
+// A tampered signature is well-formed and decodes cleanly, so it fails on the
+// equation rather than on any byte-level gate. This separates "the predicate
+// rejects malformed input" from "the arithmetic actually runs".
+func TestEd25519PrecompileRejectsATamperedSignature(t *testing.T) {
+	pub, priv, err := stded25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	message := []byte("ed25519 precompile end to end")
+	sig := stded25519.Sign(priv, message)
+	sig[40] ^= 0x01
+
+	err = runEd25519Precompile(t, buildEd25519Instruction(pub, sig, message))
+	require.ErrorIs(t, err, PrecompileErrSignature,
+		"a tampered signature must fail the equation")
 }
