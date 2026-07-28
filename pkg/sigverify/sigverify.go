@@ -20,6 +20,7 @@ package sigverify
 
 import (
 	"fmt"
+	"sync"
 
 	narya "github.com/Overclock-Validator/narya-ed25519/ed25519"
 )
@@ -76,14 +77,51 @@ func Configure(cfg Config) (string, error) {
 	if cfg.Backend == "" {
 		cfg.Backend = Defaults().Backend
 	}
-	Cfg = cfg
 
+	configureMu.Lock()
+	defer configureMu.Unlock()
+
+	if configuredBackend != "" {
+		return "", fmt.Errorf(
+			"sigverify: already configured with backend %q; Configure is a startup-only operation",
+			configuredBackend)
+	}
+
+	// Validate before publishing anything. Assigning Cfg first would leave a
+	// rejected backend name visible to Backend() and to the startup log.
+	switch cfg.Backend {
+	case BackendAuto, BackendR51, BackendGeneric, BackendStdlib:
+	default:
+		return "", fmt.Errorf(
+			"sigverify.backend must be one of %q, %q, %q, %q; got %q",
+			BackendAuto, BackendR51, BackendGeneric, BackendStdlib, cfg.Backend)
+	}
+
+	resolved, err := installBackend(cfg.Backend)
+	if err != nil {
+		return "", err
+	}
+
+	Cfg = cfg
+	configuredBackend = resolved
+	return resolved, nil
+}
+
+// configureMu guards the one-shot handoff. Configure runs during startup while
+// verification runs on pool goroutines, so the published state needs a barrier
+// even though the write happens once.
+var (
+	configureMu       sync.Mutex
+	configuredBackend string
+)
+
+func installBackend(backend string) (string, error) {
 	// The strict predicate is not optional and not configurable: it is what
 	// mainnet does. Set it before selecting a backend so no window exists in
 	// which a verification could run under the compat predicate.
 	narya.SetDefaultProfile(narya.DalekStrict)
 
-	switch cfg.Backend {
+	switch backend {
 	case BackendAuto:
 		// Try the accelerated backend, accept the portable one. An error here
 		// means "this CPU lacks AVX512-IFMA", which is the expected answer on
@@ -97,16 +135,17 @@ func Configure(cfg Config) (string, error) {
 		return narya.ActiveBackend(), nil
 
 	case BackendR51, BackendGeneric, BackendStdlib:
-		if err := narya.SetBackend(cfg.Backend); err != nil {
-			return "", fmt.Errorf("sigverify: select backend %q: %w", cfg.Backend, err)
+		// Deliberately no fallback. BackendR51 on a CPU without AVX512-IFMA is
+		// an operator asking for something the hardware cannot provide, and
+		// silently degrading would hide that.
+		if err := narya.SetBackend(backend); err != nil {
+			return "", fmt.Errorf("sigverify: select backend %q: %w", backend, err)
 		}
 		return narya.ActiveBackend(), nil
-
-	default:
-		return "", fmt.Errorf(
-			"sigverify.backend must be one of %q, %q, %q, %q; got %q",
-			BackendAuto, BackendR51, BackendGeneric, BackendStdlib, cfg.Backend)
 	}
+
+	// Unreachable: Configure validates the name before calling in.
+	return "", fmt.Errorf("sigverify: unhandled backend %q", backend)
 }
 
 // Backend reports the backend in use, for metrics and diagnostics.
