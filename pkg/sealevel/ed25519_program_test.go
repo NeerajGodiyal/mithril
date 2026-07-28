@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"testing"
 
+	"filippo.io/edwards25519"
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
@@ -62,6 +63,15 @@ func buildEd25519Instruction(pubkey, signature, message []byte) []byte {
 // does, so program-id routing and the instruction stack are exercised too.
 func runEd25519Precompile(t *testing.T, data []byte) error {
 	t.Helper()
+	return runEd25519PrecompileWithStrict(t, data, true)
+}
+
+// runEd25519PrecompileWithStrict lets a caller drive the pre-activation branch.
+// Ed25519PrecompileVerifyStrict gates the predicate, and blocks from before it
+// activated were validated without it, so historical replay has to be able to
+// reach the non-strict path.
+func runEd25519PrecompileWithStrict(t *testing.T, data []byte, strict bool) error {
+	t.Helper()
 
 	programAcct := accounts.Account{
 		Key:        solana.PublicKeyFromBytes(a.Ed25519PrecompileAddr[:]),
@@ -81,7 +91,9 @@ func runEd25519Precompile(t *testing.T, data []byte) error {
 	}
 	execCtx.Accounts = accounts.NewMemAccounts()
 	execCtx.Features = *features.NewFeaturesDefault()
-	execCtx.Features.EnableFeature(features.Ed25519PrecompileVerifyStrict, 0)
+	if strict {
+		execCtx.Features.EnableFeature(features.Ed25519PrecompileVerifyStrict, 0)
+	}
 
 	return execCtx.ProcessInstruction(data, []InstructionAccount{}, []uint64{0})
 }
@@ -141,4 +153,58 @@ func TestEd25519PrecompileRejectsATamperedSignature(t *testing.T) {
 	err = runEd25519Precompile(t, buildEd25519Instruction(pub, sig, message))
 	require.ErrorIs(t, err, PrecompileErrSignature,
 		"a tampered signature must fail the equation")
+}
+
+// smallOrderForgery builds a signature the standard library accepts and the
+// strict predicate rejects: A is the identity, so [s]B - [k]A collapses to
+// [s]B, which is exactly the R the signature carries. Nothing about it is
+// forged in the usual sense -- it satisfies the equation. It is rejected only
+// because strict verification refuses a small-order public key.
+func smallOrderForgery(t *testing.T) (pub [32]byte, sig []byte) {
+	t.Helper()
+
+	pub[0] = 1 // canonical identity: y = 1, sign bit clear
+
+	uniform := make([]byte, 64)
+	_, err := rand.Read(uniform)
+	require.NoError(t, err)
+	s, err := edwards25519.NewScalar().SetUniformBytes(uniform)
+	require.NoError(t, err)
+
+	r := (&edwards25519.Point{}).ScalarBaseMult(s)
+
+	sig = make([]byte, SignatureSerializedSize)
+	copy(sig[:32], r.Bytes())
+	copy(sig[32:], s.Bytes())
+	return pub, sig
+}
+
+// The feature gate is the whole difference between the two branches, so pin it
+// with one input and both feature states. Historical replay depends on the
+// inactive branch staying non-strict: blocks from before activation were
+// validated that way, and re-verifying them strictly would reject transactions
+// the network accepted, producing a different bank hash.
+//
+// This also guards the failure mode that actually bit us. When the conformance
+// fixtures parsed with an empty feature set, the gate read inactive, the
+// non-strict branch ran, and 163 signatures were accepted that should have been
+// rejected. A feature-plumbing bug became an acceptance change. Pinning both
+// directions means that shows up as a test failure rather than a quiet fork.
+func TestEd25519PrecompileFeatureGateSelectsThePredicate(t *testing.T) {
+	message := []byte("historical replay")
+	pub, sig := smallOrderForgery(t)
+	data := buildEd25519Instruction(pub[:], sig, message)
+
+	require.True(t, stded25519.Verify(pub[:], message, sig),
+		"premise: this signature satisfies the stdlib equation")
+
+	t.Run("feature active rejects it", func(t *testing.T) {
+		require.ErrorIs(t, runEd25519PrecompileWithStrict(t, data, true), PrecompileErrSignature,
+			"strict verification must refuse a small-order public key")
+	})
+
+	t.Run("feature inactive accepts it", func(t *testing.T) {
+		require.NoError(t, runEd25519PrecompileWithStrict(t, data, false),
+			"pre-activation replay must reproduce the non-strict predicate")
+	})
 }
