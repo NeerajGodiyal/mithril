@@ -17,6 +17,26 @@ const SignatureOffsetsSerializedSize = 14
 const SignatureSerializedSize = 64
 const PubkeySerializedSize = 32
 
+// ed25519PrecompileStrictVerifyOptions mirrors the reference precompile
+// predicate once Ed25519PrecompileVerifyStrict is active: small-order A and R
+// are rejected, but a non-canonical A encoding is accepted and its original
+// bytes are what get hashed.
+//
+// AllowNonCanonicalA has to be set explicitly. A Go struct literal zeroes every
+// field it omits, so leaving it out rejects non-canonical A -- stricter than the
+// reference, and stricter than voi's own VerifyOptionsStdLib preset. Keeping the
+// options in one named value rather than inline at the call site is what makes
+// that omission testable; see TestEd25519PrecompileStrictVerifyOptions.
+//
+// AllowNonCanonicalR is deliberately unset: voi rejects the combination of
+// AllowNonCanonicalR and CofactorlessVerify outright.
+var ed25519PrecompileStrictVerifyOptions = ed25519.VerifyOptions{
+	AllowSmallOrderA:   false,
+	AllowSmallOrderR:   false,
+	AllowNonCanonicalA: true,
+	CofactorlessVerify: true,
+}
+
 const Ed25519SignatureOffsetsSize = 14
 
 type Ed25519SignatureOffsets struct {
@@ -130,7 +150,7 @@ func Ed25519ProgramExecute(execCtx *ExecutionCtx) error {
 		pk := ed25519.PublicKey(pubkey)
 
 		if execCtx.Features.IsActive(features.Ed25519PrecompileVerifyStrict) {
-			verifyOptions := ed25519.VerifyOptions{AllowSmallOrderA: false, AllowSmallOrderR: false, CofactorlessVerify: true}
+			verifyOptions := ed25519PrecompileStrictVerifyOptions
 			opts := ed25519.Options{Verify: &verifyOptions}
 
 			if !ed25519.VerifyWithOptions(pk, msg[:offsets.MessageDataSize], signature[:64], &opts) {
