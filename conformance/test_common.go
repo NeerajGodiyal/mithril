@@ -23,7 +23,6 @@ func fixtureAcctStateToAccount(acctState *AcctState) accounts.Account {
 	acct.Lamports = acctState.Lamports
 	acct.Data = acctState.Data
 	acct.Executable = acctState.Executable
-	acct.RentEpoch = acctState.RentEpoch
 	copy(acct.Owner[:], acctState.Owner)
 	return acct
 }
@@ -215,13 +214,12 @@ func parseAndConfigureFeatures(execCtx *sealevel.ExecutionCtx, fixture *InstrFix
 	// Not every fixture carries an epoch context; the precompile corpus mostly
 	// does not. Treat a missing one as "no features beyond the defaults" rather
 	// than dereferencing through it.
-	if fixture.Input == nil || fixture.Input.EpochContext == nil ||
-		fixture.Input.EpochContext.Features == nil {
+	if fixture.Input == nil || fixture.Input.Features == nil {
 		return
 	}
 
 	verbose := os.Getenv("MITHRIL_CONFORMANCE_VERBOSE") != ""
-	for _, ftr := range fixture.Input.EpochContext.Features.Features {
+	for _, ftr := range fixture.Input.Features.Features {
 		for _, featureGate := range features.AllFeatureGates {
 			featureIdInt := binary.LittleEndian.Uint64(featureGate.Address[:8])
 			if featureIdInt == ftr {
@@ -335,9 +333,8 @@ func accountStateChangesMatch(t *testing.T, execCtx *sealevel.ExecutionCtx, fixt
 				if fixtureModifiedAcct.Executable != mithrilModifiedAcct.Executable {
 					return false
 				}
-				if fixtureModifiedAcct.RentEpoch != mithrilModifiedAcct.RentEpoch {
-					return false
-				}
+				// AcctState dropped rent_epoch in protosol v5.4.0, so the
+				// corpus no longer carries an expected value to compare.
 				if solana.PublicKeyFromBytes(fixtureModifiedAcct.Owner[:]) != solana.PublicKeyFromBytes(mithrilModifiedAcct.Owner[:]) {
 					return false
 				}

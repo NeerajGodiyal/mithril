@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gagliardetto/solana-go"
+	"google.golang.org/protobuf/proto"
 )
 
 // Firedancer publishes every precompile fixture in one flat directory and
@@ -47,8 +48,8 @@ func loadPrecompileFixtures(t *testing.T, program solana.PublicKey) []string {
 		if err != nil {
 			t.Fatalf("read fixture %s: %v", path, err)
 		}
-		fixture, err := unmarshalInstrFixture(raw)
-		if err != nil {
+		fixture := &InstrFixture{}
+		if err := proto.Unmarshal(raw, fixture); err != nil {
 			t.Fatalf("decode fixture %s: %v", path, err)
 		}
 		if fixture.Input == nil || !bytes.Equal(fixture.Input.ProgramId, program[:]) {
@@ -77,8 +78,8 @@ func runPrecompileFixtures(t *testing.T, label string, paths []string) {
 		if err != nil {
 			t.Fatalf("read fixture %s: %v", path, err)
 		}
-		fixture, err := unmarshalInstrFixture(raw)
-		if err != nil {
+		fixture := &InstrFixture{}
+		if err := proto.Unmarshal(raw, fixture); err != nil {
 			t.Fatalf("decode fixture %s: %v", path, err)
 		}
 
