@@ -2649,6 +2649,8 @@ postBootstrap:
 		}()
 	}
 
+	startSigverifyReporter(ctx)
+
 	turbineAlpenglowAddr := ""
 	if alpenglowMode {
 		turbineAlpenglowAddr = alpenglowAddrForGossip(alpenglowObserverBindAddr)

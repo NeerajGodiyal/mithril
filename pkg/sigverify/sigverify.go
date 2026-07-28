@@ -215,6 +215,10 @@ func (b *Batch) Len() int { return len(b.pubs) }
 // caller that needs to identify WHICH signature failed does not have to
 // re-verify anything.
 func (b *Batch) Verify() bool {
+	// Recorded here rather than at each drain site so a new caller cannot forget
+	// to instrument itself. See stats.go for why width, not count, is the metric.
+	observeBatchWidth(len(b.pubs))
+
 	if len(b.pubs) == 0 {
 		return true
 	}
