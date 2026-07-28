@@ -30,13 +30,19 @@ tune:
 	./scripts/performance-tune.sh $(ARGS)
 
 # Firedancer's fixture corpus is ~7 GB and gitignored, so it is fetched rather
-# than vendored. Re-run to update; the conformance tests skip without it.
+# than vendored. The revision is pinned: the corpus moves, and both its schema
+# and its per-suite result counts move with it, so tracking main would make a
+# passing run unreproducible and a regression indistinguishable from an upstream
+# edit. Bump this deliberately and re-record the counts when you do.
+CONFORMANCE_VECTORS_REV ?= a87fc430
 conformance-vectors:
-	@if [ -d conformance/test-vectors/.git ]; then \
-		git -C conformance/test-vectors pull --ff-only; \
-	else \
-		git clone --depth 1 https://github.com/firedancer-io/test-vectors.git conformance/test-vectors; \
+	@if [ ! -d conformance/test-vectors/.git ]; then \
+		git clone --filter=blob:none --no-checkout \
+			https://github.com/firedancer-io/test-vectors.git conformance/test-vectors; \
 	fi
+	@git -C conformance/test-vectors fetch --depth 1 origin $(CONFORMANCE_VECTORS_REV)
+	@git -C conformance/test-vectors checkout --force --detach $(CONFORMANCE_VECTORS_REV)
+	@echo "conformance corpus pinned at $(CONFORMANCE_VECTORS_REV)"
 
 test-conformance-precompiles:
 	go test ./conformance/ -run 'TestConformance_Precompile_' -timeout 90m -v

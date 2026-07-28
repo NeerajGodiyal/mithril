@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
 	"testing"
 
@@ -19,6 +20,9 @@ import (
 
 func fixtureAcctStateToAccount(acctState *AcctState) accounts.Account {
 	var acct accounts.Account
+	// See createProgramAcct: the field is gone from the schema, and its implied
+	// value for a converted account is the maximum, not zero.
+	acct.RentEpoch = math.MaxUint64
 	acct.Key = solana.PublicKeyFromBytes(acctState.Address[:])
 	acct.Lamports = acctState.Lamports
 	acct.Data = acctState.Data
@@ -29,7 +33,10 @@ func fixtureAcctStateToAccount(acctState *AcctState) accounts.Account {
 
 func createProgramAcct(programId []byte) accounts.Account {
 	programKey := solana.PublicKeyFromBytes(programId)
-	programAcct := accounts.Account{Key: programKey, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: 100}
+	// protosol v5.4.0 dropped rent_epoch from AcctState, but converted accounts
+	// are defined as carrying the maximum value rather than zero. Leaving the Go
+	// zero here would silently model every account as rent-paying.
+	programAcct := accounts.Account{Key: programKey, Lamports: 100000000, Data: make([]byte, 0), Owner: a.NativeLoaderAddr, Executable: true, RentEpoch: math.MaxUint64}
 	return programAcct
 }
 
