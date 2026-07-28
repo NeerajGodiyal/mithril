@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -211,11 +212,22 @@ func parseAndConfigureFeatures(execCtx *sealevel.ExecutionCtx, fixture *InstrFix
 	f := features.NewFeaturesDefault()
 	execCtx.Features = *f
 
+	// Not every fixture carries an epoch context; the precompile corpus mostly
+	// does not. Treat a missing one as "no features beyond the defaults" rather
+	// than dereferencing through it.
+	if fixture.Input == nil || fixture.Input.EpochContext == nil ||
+		fixture.Input.EpochContext.Features == nil {
+		return
+	}
+
+	verbose := os.Getenv("MITHRIL_CONFORMANCE_VERBOSE") != ""
 	for _, ftr := range fixture.Input.EpochContext.Features.Features {
 		for _, featureGate := range features.AllFeatureGates {
 			featureIdInt := binary.LittleEndian.Uint64(featureGate.Address[:8])
 			if featureIdInt == ftr {
-				fmt.Printf("enabling feature %s\n", featureGate.Name)
+				if verbose {
+					fmt.Printf("enabling feature %s\n", featureGate.Name)
+				}
 				execCtx.Features.EnableFeature(featureGate, 0)
 			}
 		}

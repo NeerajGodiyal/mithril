@@ -8,7 +8,7 @@ LDFLAGS := -X github.com/Overclock-Validator/mithril/pkg/version.Version=$(VERSI
            -X github.com/Overclock-Validator/mithril/pkg/version.GitBranch=$(GIT_BRANCH) \
            -X github.com/Overclock-Validator/mithril/pkg/version.BuildDate=$(BUILD_DATE)
 
-.PHONY: build release clean server-setup disk-setup tune test-conformance-elf test-conformance-vm-programs test-conformance-sbpf
+.PHONY: build release clean server-setup disk-setup tune conformance-vectors test-conformance-elf test-conformance-vm-programs test-conformance-sbpf test-conformance-precompiles
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o mithril ./cmd/mithril
@@ -28,6 +28,18 @@ disk-setup:
 
 tune:
 	./scripts/performance-tune.sh $(ARGS)
+
+# Firedancer's fixture corpus is ~7 GB and gitignored, so it is fetched rather
+# than vendored. Re-run to update; the conformance tests skip without it.
+conformance-vectors:
+	@if [ -d conformance/test-vectors/.git ]; then \
+		git -C conformance/test-vectors pull --ff-only; \
+	else \
+		git clone --depth 1 https://github.com/firedancer-io/test-vectors.git conformance/test-vectors; \
+	fi
+
+test-conformance-precompiles:
+	go test ./conformance/ -run 'TestConformance_Precompile_' -timeout 90m -v
 
 test-conformance-elf:
 	go test ./conformance/ -run TestConformance_ElfLoader_Firedancer -v
