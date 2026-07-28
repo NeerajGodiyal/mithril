@@ -19,9 +19,7 @@
 package sigverify
 
 import (
-	stded25519 "crypto/ed25519"
 	"fmt"
-	"sync/atomic"
 
 	narya "github.com/Overclock-Validator/narya-ed25519/ed25519"
 )
@@ -36,12 +34,18 @@ const (
 	BackendR51 = "r51"
 	// BackendGeneric forces the portable pure-Go backend.
 	BackendGeneric = "generic"
-	// BackendStdlib bypasses the library entirely and calls crypto/ed25519
-	// directly. This is the rollback switch: it restores the exact behaviour
-	// Mithril had before this package existed, INCLUDING the non-strict
-	// predicate, so it reintroduces the small-order divergence described above.
-	// It exists so an operator can eliminate this package as a suspect without
-	// rebuilding, not as a supported steady state.
+	// BackendStdlib selects the library's own crypto/ed25519-backed arithmetic.
+	// It swaps out the r51 assembly, the comb tables and the batch kernels --
+	// where an implementation bug would realistically live -- while leaving the
+	// acceptance rule untouched, so an operator can rule those out without
+	// rebuilding.
+	//
+	// This deliberately does NOT bypass the library. An earlier revision routed
+	// this name straight at crypto/ed25519, which silently dropped the
+	// small-order rejection and made an operator flag change which signatures
+	// the node accepts. Two nodes on different settings would disagree on block
+	// validity, and the flag would be reached for under exactly the pressure
+	// that makes a silent fork worst. The predicate is not an operator knob.
 	BackendStdlib = "stdlib"
 )
 
@@ -58,11 +62,6 @@ func Defaults() Config { return Config{Backend: BackendAuto} }
 // Cfg is the live configuration, set once by Configure during startup and
 // read-only afterwards. It follows the same shape as replay.TrailingVerifierCfg.
 var Cfg = Defaults()
-
-// bypass is read on every verification, so it is an atomic rather than a plain
-// bool: Configure runs during startup but the verifiers run on pool goroutines,
-// and the race detector is correctly unhappy about an unsynchronised handoff.
-var bypass atomic.Bool
 
 // Configure resolves cfg and installs the backend. It returns the name of the
 // backend actually selected, which the caller should log — with BackendAuto the
@@ -85,10 +84,6 @@ func Configure(cfg Config) (string, error) {
 	narya.SetDefaultProfile(narya.DalekStrict)
 
 	switch cfg.Backend {
-	case BackendStdlib:
-		bypass.Store(true)
-		return BackendStdlib, nil
-
 	case BackendAuto:
 		// Try the accelerated backend, accept the portable one. An error here
 		// means "this CPU lacks AVX512-IFMA", which is the expected answer on
@@ -101,7 +96,7 @@ func Configure(cfg Config) (string, error) {
 		}
 		return narya.ActiveBackend(), nil
 
-	case BackendR51, BackendGeneric:
+	case BackendR51, BackendGeneric, BackendStdlib:
 		if err := narya.SetBackend(cfg.Backend); err != nil {
 			return "", fmt.Errorf("sigverify: select backend %q: %w", cfg.Backend, err)
 		}
@@ -116,9 +111,6 @@ func Configure(cfg Config) (string, error) {
 
 // Backend reports the backend in use, for metrics and diagnostics.
 func Backend() string {
-	if bypass.Load() {
-		return BackendStdlib
-	}
 	return narya.ActiveBackend()
 }
 
@@ -127,9 +119,6 @@ func Backend() string {
 // zero forever; a nonzero value is a bug in the accelerated backend, not an
 // input-dependent condition, and is worth alerting on.
 func InternalFaultFallbacks() uint64 {
-	if bypass.Load() {
-		return 0
-	}
 	return narya.ActiveBackendStats().InternalFaultFallbacks
 }
 
@@ -141,9 +130,6 @@ func InternalFaultFallbacks() uint64 {
 func VerifyOne(pub *[32]byte, msg, sig []byte) bool {
 	if pub == nil {
 		return false
-	}
-	if bypass.Load() {
-		return stded25519.Verify(pub[:], msg, sig)
 	}
 	return narya.VerifyStrict(pub[:], msg, sig)
 }
@@ -192,15 +178,6 @@ func (b *Batch) Len() int { return len(b.pubs) }
 func (b *Batch) Verify() bool {
 	if len(b.pubs) == 0 {
 		return true
-	}
-	if bypass.Load() {
-		all := true
-		for i, pub := range b.pubs {
-			verdict := pub != nil && stded25519.Verify(pub[:], b.msgs[i], b.sigs[i])
-			b.ok[i] = verdict
-			all = all && verdict
-		}
-		return all
 	}
 	return narya.VerifyBatchStrict(b.pubs, b.msgs, b.sigs, b.ok)
 }

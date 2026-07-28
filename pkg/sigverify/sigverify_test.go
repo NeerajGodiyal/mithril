@@ -4,6 +4,8 @@ import (
 	stded25519 "crypto/ed25519"
 	"crypto/rand"
 	"fmt"
+	"os"
+	"os/exec"
 	"testing"
 
 	"filippo.io/edwards25519"
@@ -59,19 +61,48 @@ func TestSmallOrderForgeryIsAcceptedByStdlibAndRejectedHere(t *testing.T) {
 	assert.False(t, batch.OK(0))
 }
 
-// The bypass switch is a rollback to the pre-existing behaviour, divergence
-// included. Pinning that here keeps it an informed choice rather than a
-// surprise, and fails loudly if someone later "fixes" the bypass into
-// something that is no longer a faithful rollback.
-func TestStdlibBypassReintroducesTheDivergence(t *testing.T) {
-	bypass.Store(true)
-	t.Cleanup(func() { bypass.Store(false) })
+// backend=stdlib swaps the arithmetic, never the acceptance rule. An earlier
+// revision routed this name straight at crypto/ed25519, so selecting it
+// silently dropped the small-order rejection and let an operator flag decide
+// which signatures the node accepts.
+//
+// The library allows one backend selection per process, deliberately, so the
+// key cache can never hold tables in two formats. Any other test that calls
+// Configure first would therefore make this one skip, and a test that skips in
+// the ordinary "go test ./..." run guards nothing. It re-executes itself in a
+// child process instead, so the assertion always actually runs.
+const stdlibChildEnv = "MITHRIL_SIGVERIFY_STDLIB_BACKEND_CHILD"
 
+func TestStdlibBackendStillRejectsTheSmallOrderForgery(t *testing.T) {
 	message := []byte("transfer everything")
 	pub, sig := smallOrderForgery(t, message)
 
-	assert.True(t, VerifyOne(&pub, message, sig),
-		"backend=stdlib is a rollback: it accepts what stdlib accepts, small-order included")
+	// The forgery is only interesting because the standard library accepts it.
+	// If that stops holding, this test proves nothing.
+	require.True(t, stded25519.Verify(pub[:], message, sig),
+		"premise: crypto/ed25519 accepts this forgery")
+
+	if os.Getenv(stdlibChildEnv) != "1" {
+		cmd := exec.Command(os.Args[0],
+			"-test.run", "^"+t.Name()+"$", "-test.v")
+		cmd.Env = append(os.Environ(), stdlibChildEnv+"=1")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "child process output:\n%s", out)
+		require.Contains(t, string(out), "PASS")
+		return
+	}
+
+	resolved, err := Configure(Config{Backend: BackendStdlib})
+	require.NoError(t, err)
+	require.Equal(t, BackendStdlib, resolved)
+
+	assert.False(t, VerifyOne(&pub, message, sig),
+		"backend=stdlib accepted a small-order forgery; it must swap arithmetic, not the predicate")
+
+	var batch Batch
+	batch.Add(&pub, message, sig)
+	assert.False(t, batch.Verify(), "batch path accepted it under backend=stdlib")
+	assert.False(t, batch.OK(0))
 }
 
 type signedMessage struct {
