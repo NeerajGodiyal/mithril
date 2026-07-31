@@ -423,7 +423,7 @@ func init() {
 	Run.Flags().IntVar(&snapshot.SnapshotIndexShards, "snapshot-index-shards", snapshot.DefaultSnapshotIndexShards, "Snapshot bootstrap account-index shard count")
 	Run.Flags().StringVar(&snapshot.SnapshotIndexTempDir, "snapshot-index-temp-dir", "", "Optional directory for snapshot index shard logs/SST staging")
 	Run.Flags().StringVar(&sigverify.Cfg.Backend, "sigverify-backend", sigverify.Defaults().Backend,
-		"ed25519 verification backend: auto|r51|generic|stdlib (stdlib is a rollback that restores the pre-strict predicate)")
+		"ed25519 verification backend: auto|r51|generic|stdlib")
 	Run.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 	Run.Flags().IntVar(&accountsdb.StoreAccountsWorkers, "store-accounts-workers", 128, "Number of workers to write account updates")
 	Run.Flags().IntVar(&accountsdb.ProgramCacheMaxMB, "program-cache-max-mb", accountsdb.DefaultProgramCacheMaxMB, "Maximum approximate SBPF program cache size in MiB")
@@ -2956,7 +2956,7 @@ func printStartupInfo(commandName string) {
 		case sigverify.BackendGeneric:
 			sigverifyDesc = "portable; no AVX512-IFMA on this CPU"
 		case sigverify.BackendStdlib:
-			sigverifyDesc = "ROLLBACK: non-strict, accepts signatures mainnet rejects"
+			sigverifyDesc = "Go's crypto/ed25519, but also uses Narya's strictness checks"
 		}
 		fmt.Printf("  Sigverify:    %s%s%s %s(%s)%s\n",
 			green, resolvedSigverifyBackend, reset, dim, sigverifyDesc, reset)

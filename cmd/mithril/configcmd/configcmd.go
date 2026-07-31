@@ -260,7 +260,7 @@ max_rps = 8               # Verifier's own RPC budget (never shares the block-fe
 # ── Replay tuning ────────────────────────────────────────────────────────
 [tuning]
 txpar = 24                # Validator auto-defaults to 2x CPU cores only when unset; explicit 0 = sequential
-sigverify_backend = "auto" # auto|r51|generic|stdlib; stdlib is a rollback that weakens the predicate
+sigverify_backend = "auto" # auto|r51|generic|stdlib; stdlib uses Go's crypto/ed25519 impl after strict checks.
 
 # ── Mithril's RPC server ─────────────────────────────────────────────────
 [rpc]
