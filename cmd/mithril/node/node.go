@@ -44,6 +44,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/rpcserver"
 	"github.com/Overclock-Validator/mithril/pkg/sbpf"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/sigverify"
 	"github.com/Overclock-Validator/mithril/pkg/snapshot"
 	"github.com/Overclock-Validator/mithril/pkg/snapshotdl"
 	"github.com/Overclock-Validator/mithril/pkg/state"
@@ -124,6 +125,10 @@ var (
 	debugDumpEpochVotingRewardDiff bool
 	cpuprofPath                    string
 
+	// resolvedSigverifyBackend is what the backend selector actually chose. It
+	// differs from the configured value under "auto", which is exactly when an
+	// operator needs to be told, so it is reported at startup.
+	resolvedSigverifyBackend string
 	paramArenaSizeMB         uint64
 	borrowedAccountArenaSize uint64
 
@@ -417,6 +422,8 @@ func init() {
 	Run.Flags().IntVar(&snapshot.SnapshotIndexEntryCommitterWorkers, "snapshot-index-committer-workers", snapshot.DefaultSnapshotIndexEntryCommitterWorkers, "Snapshot bootstrap account-index shard enqueue workers")
 	Run.Flags().IntVar(&snapshot.SnapshotIndexShards, "snapshot-index-shards", snapshot.DefaultSnapshotIndexShards, "Snapshot bootstrap account-index shard count")
 	Run.Flags().StringVar(&snapshot.SnapshotIndexTempDir, "snapshot-index-temp-dir", "", "Optional directory for snapshot index shard logs/SST staging")
+	Run.Flags().StringVar(&sigverify.Cfg.Backend, "sigverify-backend", sigverify.Defaults().Backend,
+		"ed25519 verification backend: auto|r51|generic|stdlib")
 	Run.Flags().BoolVar(&sbpf.UsePool, "use-pool", true, "Disable to allocate fresh slices")
 	Run.Flags().IntVar(&accountsdb.StoreAccountsWorkers, "store-accounts-workers", 128, "Number of workers to write account updates")
 	Run.Flags().IntVar(&accountsdb.ProgramCacheMaxMB, "program-cache-max-mb", accountsdb.DefaultProgramCacheMaxMB, "Maximum approximate SBPF program cache size in MiB")
@@ -974,6 +981,16 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	if snapshot.SnapshotIndexShards <= 0 || snapshot.SnapshotIndexShards > 1000 {
 		return fmt.Errorf("tuning.snapshot_index_shards must be between 1 and 1000")
 	}
+	// Resolve and install the signature-verification backend here rather than
+	// later: narya pins its backend on first use, and selecting it explicitly
+	// doubles as a startup health check, so a machine that cannot run the
+	// requested backend fails now instead of at the first block.
+	sigverify.Cfg.Backend = getString("sigverify-backend", "tuning.sigverify_backend")
+	resolved, err := sigverify.Configure(sigverify.Cfg)
+	if err != nil {
+		return fmt.Errorf("tuning.sigverify_backend: %w", err)
+	}
+	resolvedSigverifyBackend = resolved
 	sbpf.UsePool = getBool("use-pool", "tuning.use_pool")
 	accountsdb.StoreAccountsWorkers = getInt("store-accounts-workers", "tuning.store_accounts_workers")
 	accountsdb.ProgramCacheMaxMB = getInt("program-cache-max-mb", "tuning.program_cache_max_mb")
@@ -2632,6 +2649,8 @@ postBootstrap:
 		}()
 	}
 
+	startSigverifyReporter(ctx)
+
 	turbineAlpenglowAddr := ""
 	if alpenglowMode {
 		turbineAlpenglowAddr = alpenglowAddrForGossip(alpenglowObserverBindAddr)
@@ -2929,6 +2948,18 @@ func printStartupInfo(commandName string) {
 		fmt.Printf("  Bootstrap:    %s%s%s %s(%s)%s\n", green, bootstrapMode, reset, dim, bootstrapDesc, reset)
 	} else {
 		fmt.Printf("  Bootstrap:    %s%s%s\n", green, bootstrapMode, reset)
+	}
+
+	if resolvedSigverifyBackend != "" {
+		sigverifyDesc := "AVX-512 accelerated"
+		switch resolvedSigverifyBackend {
+		case sigverify.BackendGeneric:
+			sigverifyDesc = "portable; no AVX512-IFMA on this CPU"
+		case sigverify.BackendStdlib:
+			sigverifyDesc = "Go's crypto/ed25519, but also uses Narya's strictness checks"
+		}
+		fmt.Printf("  Sigverify:    %s%s%s %s(%s)%s\n",
+			green, resolvedSigverifyBackend, reset, dim, sigverifyDesc, reset)
 	}
 
 	// Load state file for detailed info (only show for modes that use existing AccountsDB)

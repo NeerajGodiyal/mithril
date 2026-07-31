@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	narya "github.com/Overclock-Validator/narya-ed25519/ed25519"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -395,7 +396,7 @@ func (s *Shred) VerifySignature(leader solana.PublicKey) error {
 	if err != nil {
 		return err
 	}
-	if !leader.Verify(root[:], s.Signature) {
+	if !narya.VerifyStrict(leader[:], root[:], s.Signature[:]) {
 		return fmt.Errorf("%w: slot %d shred %d", ErrInvalidSignature, s.Slot, s.Index)
 	}
 	return nil

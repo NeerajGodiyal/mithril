@@ -1,7 +1,12 @@
 package pipeline
 
-import "github.com/Overclock-Validator/mithril/pkg/tpu/sigverify"
+import tpusigverify "github.com/Overclock-Validator/mithril/pkg/tpu/sigverify"
+
+// batchVerifier keeps the pipeline's dependency on the TPU sigverify package
+// confined to this file, so pipeline.go can use the unqualified name for
+// Mithril's shared verification package.
+type batchVerifier = tpusigverify.BatchVerifier
 
 func verifyPacket(data []byte) bool {
-	return sigverify.VerifyPacket(data)
+	return tpusigverify.VerifyPacket(data)
 }
