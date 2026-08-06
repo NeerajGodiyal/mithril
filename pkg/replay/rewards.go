@@ -515,8 +515,8 @@ func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, sl
 		capitalizingEpochRewards(voteRewardsDistributed, streamResult.TotalStakerRewards)
 }
 
-func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, parentCtx *sealevel.SlotCtx, epochCtx *ReplayCtx, partitionedEpochRewardsInfo *rewards.PartitionedRewardDistributionInfo, currentSlot uint64, currentBlockHeight uint64) ([]*accounts.Account, []*accounts.Account) {
-	rewardLoader := epochRewardAccountLoader(acctsDb, currentSlot, parentCtx, nil)
+func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, parentCtx *sealevel.SlotCtx, stagedEpochAccts []*accounts.Account, epochCtx *ReplayCtx, partitionedEpochRewardsInfo *rewards.PartitionedRewardDistributionInfo, currentSlot uint64, currentBlockHeight uint64) ([]*accounts.Account, []*accounts.Account) {
+	rewardLoader := epochRewardAccountLoader(acctsDb, currentSlot, parentCtx, stagedEpochAccts)
 	epochRewardsAcct, err := rewardLoader(sealevel.SysvarEpochRewardsAddr)
 	if err != nil {
 		panic(fmt.Sprintf("unable to get EpochRewards from acctsdb: %s", err))
@@ -525,6 +525,14 @@ func distributePartitionedEpochRewardsForSlot(acctsDb *accountsdb.AccountsDb, pa
 	var epochRewards sealevel.SysvarEpochRewards
 	decoder := bin.NewBinDecoder(epochRewardsAcct.Data)
 	epochRewards.MustUnmarshalWithDecoder(decoder)
+
+	// Reward distribution is scheduled by block height, not slot. If the first
+	// slots of an epoch are skipped, the epoch-boundary bank can already be past
+	// FirstStakingRewardSlot while its block height is still one before the
+	// distribution start recorded in the freshly staged EpochRewards sysvar.
+	if currentBlockHeight < epochRewards.DistributionStartingBlockHeight {
+		return nil, nil
+	}
 
 	partitionIdx := currentBlockHeight - epochRewards.DistributionStartingBlockHeight
 
