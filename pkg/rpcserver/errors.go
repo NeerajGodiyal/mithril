@@ -15,7 +15,64 @@ const (
 	rpcCodeSendTransactionPreflightFailure jsonrpc.ErrorCode = -32002
 	// -32016 is Agave's reserved code for MinContextSlotNotReached.
 	rpcCodeMinContextSlotNotReached jsonrpc.ErrorCode = -32016
+	// -32005 matches Agave's NodeUnhealthy. Reusing Agave's code keeps existing
+	// clients working; the reason in Data is what makes the refusal specific.
+	rpcCodeNodeUnhealthy jsonrpc.ErrorCode = -32005
 )
+
+// NodeUnhealthyError reports that the node refused to answer because it knows
+// its own state is not trustworthy — not that the request was malformed and not
+// that the data is missing. A client must be able to tell those apart, because
+// only this one means "stop trusting this node", so the reason is machine
+// readable rather than prose.
+type NodeUnhealthyError struct {
+	// Reason is one of the evidenceGateReason values: diverged, stalled,
+	// unavailable, or unknown_verification_state.
+	Reason string
+	// VerifiedSlot and EligibleSlot describe how far verification had reached,
+	// so an operator can see whether the node was near the tip when it stopped.
+	VerifiedSlot uint64
+	EligibleSlot uint64
+}
+
+func (e *NodeUnhealthyError) Error() string {
+	return "Node is unhealthy and refuses to answer: " + e.Reason
+}
+
+func (e *NodeUnhealthyError) ToJSONRPCError() (jsonrpc.JSONRPCError, error) {
+	return jsonrpc.JSONRPCError{
+		Code:    rpcCodeNodeUnhealthy,
+		Message: e.Error(),
+		Data: map[string]any{
+			"reason":       e.Reason,
+			"verifiedSlot": e.VerifiedSlot,
+			"eligibleSlot": e.EligibleSlot,
+		},
+	}, nil
+}
+
+func (e *NodeUnhealthyError) FromJSONRPCError(rpcErr jsonrpc.JSONRPCError) error {
+	if rpcErr.Code != rpcCodeNodeUnhealthy {
+		return fmt.Errorf("unexpected code %d for NodeUnhealthyError", rpcErr.Code)
+	}
+	if rpcErr.Data == nil {
+		return nil
+	}
+	raw, err := json.Marshal(rpcErr.Data)
+	if err != nil {
+		return fmt.Errorf("re-encoding NodeUnhealthyError data: %w", err)
+	}
+	var payload struct {
+		Reason       string `json:"reason"`
+		VerifiedSlot uint64 `json:"verifiedSlot"`
+		EligibleSlot uint64 `json:"eligibleSlot"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return fmt.Errorf("decoding NodeUnhealthyError data: %w", err)
+	}
+	e.Reason, e.VerifiedSlot, e.EligibleSlot = payload.Reason, payload.VerifiedSlot, payload.EligibleSlot
+	return nil
+}
 
 type MinContextSlotNotReachedError struct {
 	ContextSlot uint64
@@ -115,5 +172,6 @@ func rpcErrorRegistry() jsonrpc.Errors {
 	errs.Register(rpcCodeInvalidParams, new(*InvalidParamsError))
 	errs.Register(rpcCodeSendTransactionPreflightFailure, new(*SendTransactionPreflightFailureError))
 	errs.Register(rpcCodeMinContextSlotNotReached, new(*MinContextSlotNotReachedError))
+	errs.Register(rpcCodeNodeUnhealthy, new(*NodeUnhealthyError))
 	return errs
 }

@@ -75,6 +75,7 @@ type SlotCtx struct {
 	FeeRateGovernor *FeeRateGovernor
 	Slot            uint64
 	ParentSlot      uint64
+	BlockHeight     uint64
 	Epoch           uint64
 	AcctMapsMu      *sync.Mutex // AcctMapsMu protects the next 2 maps
 	ModifiedAccts   map[solana.PublicKey]bool

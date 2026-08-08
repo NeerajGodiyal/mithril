@@ -3,13 +3,14 @@ package rpcserver
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
-	"reflect"
 
 	"github.com/DataDog/zstd"
-	"github.com/Overclock-Validator/mithril/pkg/global"
-	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
+	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/gagliardetto/solana-go"
 	"github.com/mr-tron/base58"
@@ -73,18 +74,45 @@ func (rpcServer *RpcServer) GetAccountInfo(ctx context.Context, p jsonrpc.RawPar
 		return GetAccountInfoResp{}, fmt.Errorf("invalid base58 encoding")
 	}
 
-	acct, err := rpcServer.acctsDb.GetAccount(0, pk)
-	if err != nil {
-		return GetAccountInfoResp{}, nil
-	}
-
 	conf, err := parseGetAccountInfoConfMap(params)
 	if err != nil {
 		return GetAccountInfoResp{}, err
 	}
+	if err := checkSupportedCommitment(conf.Commitment); err != nil {
+		return GetAccountInfoResp{}, err
+	}
 
-	var acctData interface{}
-	acctData, err = encodeAcctDataWithConfig(acct.Data, conf)
+	// One published bank describes the whole answer. Using a separate global
+	// slot could label account bytes with a different point in replay.
+	slotCtx := rpcServer.getSlotCtx()
+	if slotCtx == nil {
+		return GetAccountInfoResp{}, fmt.Errorf("node is not ready to provide account information")
+	}
+	contextSlot := slotCtx.Slot
+	if conf.MinContextSlot > contextSlot {
+		// The typed error, not fmt.Errorf: this carries Agave's reserved -32016
+		// so a client sees the same code getBlockHeight and getLatestBlockhash
+		// already return. minContextSlot means "retry, I am behind" — a generic
+		// error makes it indistinguishable from a permanent failure, and the
+		// callers that read it are retry loops.
+		return GetAccountInfoResp{}, &MinContextSlotNotReachedError{ContextSlot: conf.MinContextSlot}
+	}
+	respContext := GetAccountInfoRespContext{ApiVersion: apiVersion, Slot: contextSlot}
+
+	acct, err := rpcServer.getAccountAt(slotCtx, pk)
+	switch {
+	case errors.Is(err, accountsdb.ErrNoAccount):
+		// A missing account is context plus a null value, per Solana's shape.
+		return GetAccountInfoResp{Context: respContext}, nil
+	case err != nil:
+		// A read failure is NOT a missing account. Returning a clean negative
+		// here would let a caller act on "no balance" during a disk fault.
+		return GetAccountInfoResp{}, fmt.Errorf("reading account: %w", err)
+	case acct == nil:
+		return GetAccountInfoResp{Context: respContext}, nil
+	}
+
+	acctData, err := encodeAcctDataWithConfig(acct.Data, conf)
 	if err != nil {
 		return GetAccountInfoResp{}, err
 	}
@@ -97,10 +125,53 @@ func (rpcServer *RpcServer) GetAccountInfo(ctx context.Context, p jsonrpc.RawPar
 		RentEpoch:  acct.RentEpoch,
 		Space:      uint64(len(acct.Data))}
 
-	return GetAccountInfoResp{Context: GetAccountInfoRespContext{ApiVersion: "mithril 0.1", Slot: global.Slot()}, Value: val}, nil
+	return GetAccountInfoResp{Context: respContext, Value: val}, nil
+}
+
+// apiVersion labels every response context.
+const apiVersion = "mithril 0.1"
+
+// getAccountAt reads the account the published bank actually describes.
+//
+// The response is labelled with the published bank's slot, so the bytes have
+// to come from what that bank sees. Reading the accounts store directly is not
+// the same thing: in rooted-durable mode the store holds only rooted state
+// (StoreAccounts is a deliberate no-op there), and slots that are replayed but
+// not yet rooted live in the bank's own overlay. Going straight to the store
+// would return older bytes under a newer slot number — a label that overstates
+// what was read, which is precisely the kind of claim this server exists to
+// avoid making.
+//
+// The test seam still wins when installed, so the missing-versus-failed
+// distinction stays exercisable.
+func (rpcServer *RpcServer) getAccountAt(
+	slotCtx *sealevel.SlotCtx, pubkey solana.PublicKey,
+) (*accounts.Account, error) {
+	if rpcServer.readAccount != nil {
+		return rpcServer.readAccount(slotCtx.Slot, pubkey)
+	}
+	return slotCtx.GetAccountFromAccountsDb(pubkey)
+}
+
+// checkSupportedCommitment rejects commitments this node cannot prove. It
+// replays and can describe its own processed state; it observes no cluster
+// confirmation or finality, so answering those with processed data would be a
+// silent lie to a caller who asked precisely because they cared.
+func checkSupportedCommitment(commitment string) error {
+	switch commitment {
+	case "", "processed":
+		return nil
+	default:
+		return fmt.Errorf(
+			"commitment %q is not supported by this node; only \"processed\" is available",
+			commitment)
+	}
 }
 
 func parseGetAccountInfoConfMap(params []interface{}) (*GetAccountInfoConfig, error) {
+	if len(params) > 2 {
+		return nil, &InvalidParamsError{Message: "getAccountInfo accepts at most two parameters"}
+	}
 	if len(params) < 2 {
 		return &GetAccountInfoConfig{}, nil
 	}
@@ -139,10 +210,18 @@ func parseGetAccountInfoConfMap(params []interface{}) (*GetAccountInfoConfig, er
 		}
 	}
 
+	// minContextSlot is an optional freshness gate.
+	if minSlotObj, ok := confMap["minContextSlot"]; ok {
+		minSlot, err := parseExactJSONUint(minSlotObj, "getAccountInfo", "minContextSlot")
+		if err != nil {
+			return nil, err
+		}
+		conf.MinContextSlot = minSlot
+	}
+
 	// dataSlice is optional. if present, it must contain both 'length' and 'offset' fields.
 	dataSliceObj, ok := confMap["dataSlice"]
 	if ok {
-		mlog.Log.Infof("dataSliceObj: %+v, type: %s", dataSliceObj, reflect.TypeOf(dataSliceObj))
 		dsMap, ok := dataSliceObj.(map[string]interface{})
 		if ok {
 			conf.DataSlice, err = parseDataSlice(dsMap)
@@ -161,28 +240,24 @@ func parseDataSlice(dataSlice map[string]interface{}) (*GetAccountInfoDataSlice,
 	lengthObj, hasLen := dataSlice["length"]
 	offsetObj, hasOffset := dataSlice["offset"]
 
-	if hasLen && !hasOffset {
-		return nil, fmt.Errorf("missing dataSlice field offset")
-	} else if !hasLen && hasOffset {
+	if !hasLen {
 		return nil, fmt.Errorf("missing dataSlice field length")
+	}
+	if !hasOffset {
+		return nil, fmt.Errorf("missing dataSlice field offset")
 	}
 
 	ds := &GetAccountInfoDataSlice{}
-	if hasLen == hasOffset && hasLen {
-		length, ok := lengthObj.(float64)
-		if !ok {
-			return nil, fmt.Errorf("invalid dataSlice length, expected usize, got %s", reflect.TypeOf(lengthObj))
-		}
-		offset, ok := offsetObj.(float64)
-		if !ok {
-			return nil, fmt.Errorf("invalid dataSlice offset, expected usize, got %s", reflect.TypeOf(offsetObj))
-		}
-
-		lengthUint := uint64(length)
-		offsetUint := uint64(offset)
-		ds.Len = &lengthUint
-		ds.Offset = &offsetUint
+	length, err := parseExactJSONUint(lengthObj, "getAccountInfo", "dataSlice.length")
+	if err != nil {
+		return nil, err
 	}
+	offset, err := parseExactJSONUint(offsetObj, "getAccountInfo", "dataSlice.offset")
+	if err != nil {
+		return nil, err
+	}
+	ds.Len = &length
+	ds.Offset = &offset
 
 	return ds, nil
 }
