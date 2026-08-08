@@ -6,6 +6,10 @@
 /blockdl
 /cmd/mithril/mithril
 /cmd/testzst/testzst
+/mithril-monitor
+/cmd/mithril-monitor/mithril-monitor
+/mithril-notifier
+/cmd/mithril-notifier/mithril-notifier
 
 # Data
 *.car

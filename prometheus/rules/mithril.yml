@@ -1,0 +1,1181 @@
+# Deterministic Mithril operational alerts.
+#
+# Rules use only metrics emitted by the node, monitor, notifier, Prometheus,
+# blackbox exporter, and node_exporter. Optional agent metrics are not installed
+# until the corresponding process exists.
+groups:
+  - name: mithril-targets
+    interval: 15s
+    rules:
+      - alert: MithrilRequiredTargetMissing
+        expr: >-
+          (
+            max by(deployment_id, job) (
+              label_replace(
+                mithril_expected_target{required="true"} == 1,
+                "job", "$1", "target_job", "(.+)"
+              )
+            )
+            unless on(deployment_id, job)
+            max by(deployment_id, job) (up)
+          )
+          or
+          (
+            label_replace(max by(deployment_id) (up{job="prometheus"}) * 0 + 1,
+              "job", "mithril-monitor", "deployment_id", ".+")
+            unless on(deployment_id) up{job="mithril-monitor"}
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A required scrape job has no target for this deployment"
+
+      - alert: MithrilScrapeTargetDown
+        expr: >-
+          max by(deployment_id, job) (
+            label_replace(
+              mithril_expected_target{required="true"} == 1,
+              "job", "$1", "target_job", "(.+)"
+            )
+          )
+          and on(deployment_id, job)
+          max by(deployment_id, job) (up != 1)
+          or
+          max by(deployment_id, job) (up{job="mithril-monitor"} != 1)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A required scrape target is down"
+
+      - alert: MithrilMonitoringPeerDown
+        expr: >-
+          (up{job="prometheus-peer"} != 1)
+          or
+          (
+            label_replace(
+              max by(deployment_id) (
+                up{job="prometheus",monitoring_peer_required="true"}
+              ) * 0 + 1,
+              "job", "prometheus-peer", "deployment_id", ".+"
+            )
+            unless on(deployment_id)
+            up{job="prometheus-peer"}
+          )
+          or
+          (
+            label_replace(
+              max by(deployment_id) (up{job="prometheus"}) * 0 + 1,
+              "job", "prometheus-peer", "deployment_id", ".+"
+            )
+            unless on(deployment_id)
+            max by(deployment_id) (
+              up{job="prometheus",monitoring_peer_required=~"true|false"}
+            )
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The required monitoring peer is absent, unreachable, or has invalid policy"
+
+      - alert: MithrilBlackboxProbeDown
+        expr: >-
+          (probe_success{job="mithril-rpc-offhost"} != 1)
+          or
+          (
+            max by(deployment_id) (up{job="blackbox-exporter"} == 1)
+            unless on(deployment_id)
+            probe_success{job="mithril-rpc-offhost"}
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The off-host RPC blackbox probe is failing"
+
+      - alert: MithrilDeadmanHeartbeat
+        expr: max by(deployment_id) (up{job="prometheus"}) * 0 + 1
+        labels:
+          severity: none
+        annotations:
+          summary: "Deadman heartbeat; its absence means the alerting path failed"
+
+  - name: mithril-monitor
+    interval: 15s
+    rules:
+      - alert: MithrilMonitorIdentityInvalid
+        expr: >-
+          (count by(deployment_id) (mithril_monitor_identity_info) != 1)
+          or (count by(deployment_id) (mithril_monitor_identity_info != 1) > 0)
+          or (count by(deployment_id) (mithril_monitor_identity_info{signed_deployment_id!~"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"}) > 0)
+          or (count by(deployment_id) (mithril_monitor_identity_info{systemd_unit!~"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,126}[.]service"}) > 0)
+          or (count by(deployment_id) (mithril_monitor_identity_info{systemd_scope!="system"}) > 0)
+          or (
+            max by(deployment_id) (up{job="mithril-monitor"} == 1)
+            unless on(deployment_id)
+            mithril_monitor_identity_info
+          )
+          or (
+            max by(deployment_id) (mithril_monitor_identity_info)
+            unless on(deployment_id)
+            max by(deployment_id) (
+              label_replace(
+                mithril_monitor_identity_info,
+                "deployment_id", "$1", "signed_deployment_id", "(.+)"
+              )
+            )
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The off-host monitor deployment identity is missing or invalid"
+
+      - alert: MithrilMonitorMetricsInvalid
+        expr: >-
+          (count by(deployment_id) (mithril_rpc_probe_success) != 3)
+          or (count by(deployment_id, role) (mithril_rpc_probe_success) != 1)
+          or (count by(deployment_id) (mithril_rpc_probe_success{role!~"node|reference_primary|reference_fallback"}) > 0)
+          or (count by(deployment_id) ((mithril_rpc_probe_success != 0) and (mithril_rpc_probe_success != 1)) > 0)
+          or (count by(deployment_id) (mithril_rpc_probe_last_success_timestamp_seconds) != 3)
+          or (count by(deployment_id, role) (mithril_rpc_probe_last_success_timestamp_seconds) != 1)
+          or (count by(deployment_id) (mithril_rpc_probe_last_success_timestamp_seconds{role!~"node|reference_primary|reference_fallback"}) > 0)
+          or (count by(deployment_id) (mithril_rpc_probe_last_success_timestamp_seconds < 0) > 0)
+          or (count by(deployment_id) (
+            (mithril_rpc_probe_last_success_timestamp_seconds != mithril_rpc_probe_last_success_timestamp_seconds)
+            or (mithril_rpc_probe_last_success_timestamp_seconds > 9007199254740991)
+            or (mithril_rpc_probe_last_success_timestamp_seconds != floor(mithril_rpc_probe_last_success_timestamp_seconds))
+            or (mithril_rpc_probe_last_success_timestamp_seconds > time() + 5)
+          ) > 0)
+          or (count by(deployment_id) (mithril_node_replay_slot) != 1)
+          or (count by(deployment_id) (mithril_node_replay_slot{node_view!="local_replay"}) > 0)
+          or (count by(deployment_id) (mithril_node_replay_slot < 0) > 0)
+          or (count by(deployment_id) (mithril_reference_slot) != 2)
+          or (count by(deployment_id, role) (mithril_reference_slot) != 1)
+          or (count by(deployment_id) (mithril_reference_slot{role!~"primary|fallback"}) > 0)
+          or (count by(deployment_id) (mithril_reference_slot{commitment!="confirmed"}) > 0)
+          or (count by(deployment_id) (mithril_reference_slot < 0) > 0)
+          or (count by(deployment_id) (mithril_node_slot_delta) != 2)
+          or (count by(deployment_id, role) (mithril_node_slot_delta) != 1)
+          or (count by(deployment_id) (mithril_node_slot_delta{role!~"primary|fallback"}) > 0)
+          or (count by(deployment_id) (mithril_node_slot_delta{node_view!="local_replay"}) > 0)
+          or (count by(deployment_id) (mithril_node_slot_delta{commitment!="confirmed"}) > 0)
+          or (count by(deployment_id) (mithril_reference_slot_disagreement_slots) != 1)
+          or (count by(deployment_id) (mithril_reference_slot_disagreement_slots{commitment!="confirmed"}) > 0)
+          or (count by(deployment_id) (mithril_reference_slot_disagreement_slots < 0) > 0)
+          or (count by(deployment_id) (mithril_monitor_collect_success) != 3)
+          or (count by(deployment_id, collector) (mithril_monitor_collect_success) != 1)
+          or (count by(deployment_id) (mithril_monitor_collect_success{collector!~"node_rpc|reference_rpc|state"}) > 0)
+          or (count by(deployment_id) ((mithril_monitor_collect_success != 0) and (mithril_monitor_collect_success != 1)) > 0)
+          or (count by(deployment_id) (mithril_monitor_last_collection_timestamp_seconds) != 1)
+          or (count by(deployment_id) (mithril_monitor_last_collection_timestamp_seconds < 0) > 0)
+          or (count by(deployment_id) (
+            (mithril_monitor_last_collection_timestamp_seconds != mithril_monitor_last_collection_timestamp_seconds)
+            or (mithril_monitor_last_collection_timestamp_seconds > 9007199254740991)
+            or (mithril_monitor_last_collection_timestamp_seconds != floor(mithril_monitor_last_collection_timestamp_seconds))
+            or (mithril_monitor_last_collection_timestamp_seconds > time() + 5)
+          ) > 0)
+          or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_rpc_probe_success{role="node"})
+          or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_rpc_probe_success{role="reference_primary"})
+          or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_rpc_probe_success{role="reference_fallback"})
+          or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_rpc_probe_last_success_timestamp_seconds)
+          or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_node_replay_slot)
+          or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_reference_slot)
+          or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_node_slot_delta)
+          or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_reference_slot_disagreement_slots)
+          or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_monitor_collect_success{collector="node_rpc"})
+          or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_monitor_collect_success{collector="reference_rpc"})
+          or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_monitor_collect_success{collector="state"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The off-host monitor metric inventory is invalid"
+
+      - alert: MithrilMonitorCollectorFailing
+        expr: mithril_monitor_collect_success != 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "An off-host monitor collector is failing"
+
+      - alert: MithrilSignedTargetInventoryInvalid
+        expr: >-
+          max by(deployment_id) (
+            (count by(deployment_id) (mithril_expected_target) != 8)
+            or (count by(deployment_id, target_job) (mithril_expected_target) != 1)
+            or (count by(deployment_id) (mithril_expected_target{target_job!~"mithril-node|mithril-monitor|mithril-notifier|mithril-agent|node-exporter|blackbox-exporter|prometheus|alertmanager"}) > 0)
+            or (count by(deployment_id) (mithril_expected_target{required!~"true|false"}) > 0)
+            or (count by(deployment_id) (mithril_expected_target{target_job!="mithril-agent",required!="true"}) > 0)
+            or (count by(deployment_id) (mithril_expected_target != 1) > 0)
+            or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_expected_target)
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The signed target inventory is missing or invalid"
+
+      - alert: MithrilSignedFilesystemInventoryInvalid
+        expr: >-
+          max by(deployment_id) (
+            (count by(deployment_id) (mithril_expected_filesystem_role) != 3)
+            or (count by(deployment_id, role) (mithril_expected_filesystem_role) != 1)
+            or (count by(deployment_id) (mithril_expected_filesystem_role{role!~"root|accounts|ledger"}) > 0)
+            or (count by(deployment_id) (mithril_expected_filesystem_role{required!="true"}) > 0)
+            or (count by(deployment_id) (mithril_expected_filesystem_role != 1) > 0)
+            or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_expected_filesystem_role)
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The signed filesystem inventory is missing or invalid"
+
+      - alert: MithrilFilesystemMetricsInvalid
+        expr: >-
+          max by(deployment_id) (
+            (count by(deployment_id) (mithril_filesystem_avail_bytes) != 3)
+            or (count by(deployment_id, role) (mithril_filesystem_avail_bytes) != 1)
+            or (count by(deployment_id) (mithril_filesystem_avail_bytes{role!~"root|accounts|ledger"}) > 0)
+            or (count by(deployment_id) (mithril_filesystem_size_bytes) != 3)
+            or (count by(deployment_id, role) (mithril_filesystem_size_bytes) != 1)
+            or (count by(deployment_id) (mithril_filesystem_size_bytes{role!~"root|accounts|ledger"}) > 0)
+            or (
+              max by(deployment_id, role) (
+                mithril_expected_filesystem_role{required="true"} == 1
+              )
+              unless on(deployment_id, role)
+              mithril_filesystem_avail_bytes
+            )
+            or (
+              max by(deployment_id, role) (
+                mithril_expected_filesystem_role{required="true"} == 1
+              )
+              unless on(deployment_id, role)
+              mithril_filesystem_size_bytes
+            )
+            or (
+              (mithril_filesystem_avail_bytes != mithril_filesystem_avail_bytes)
+              or (mithril_filesystem_avail_bytes < 0)
+              or (mithril_filesystem_avail_bytes > 9007199254740991)
+              or (mithril_filesystem_avail_bytes != floor(mithril_filesystem_avail_bytes))
+              or (mithril_filesystem_size_bytes != mithril_filesystem_size_bytes)
+              or (mithril_filesystem_size_bytes <= 0)
+              or (mithril_filesystem_size_bytes > 9007199254740991)
+              or (mithril_filesystem_size_bytes != floor(mithril_filesystem_size_bytes))
+            )
+            or (
+              max by(deployment_id, role) (mithril_filesystem_avail_bytes)
+              > on(deployment_id, role)
+              max by(deployment_id, role) (mithril_filesystem_size_bytes)
+            )
+            or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_filesystem_avail_bytes)
+            or (max by(deployment_id) (up{job="mithril-monitor"} == 1) unless on(deployment_id) mithril_filesystem_size_bytes)
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A required filesystem role has missing or invalid measurements"
+
+      - alert: MithrilMonitorStale
+        expr: >-
+          (time() - mithril_monitor_last_collection_timestamp_seconds > 60)
+          or
+          (
+            max by(deployment_id) (up{job="mithril-monitor"} == 1)
+            unless on(deployment_id)
+            mithril_monitor_last_collection_timestamp_seconds
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The off-host monitor has stopped completing collection cycles"
+
+      - alert: MithrilNodeProbeDown
+        expr: mithril_rpc_probe_success{role="node"} != 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node RPC is unreachable from the operations host"
+
+      - alert: MithrilReferenceProbeDown
+        expr: mithril_rpc_probe_success{role=~"reference_primary|reference_fallback"} != 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "One reference RPC provider is unreachable"
+
+      - alert: MithrilBothReferencesDown
+        expr: >-
+          (mithril_rpc_probe_success{role="reference_primary"} != 1)
+          and on(deployment_id)
+          (mithril_rpc_probe_success{role="reference_fallback"} != 1)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Both reference RPC providers are unreachable"
+
+  - name: mithril-replay
+    interval: 15s
+    rules:
+      - alert: MithrilNodeBehindReference
+        expr: >-
+          (
+            (mithril_node_slot_delta{role="primary"} > 150)
+            and on(deployment_id) (mithril_rpc_probe_success{role="node"} == 1)
+            and on(deployment_id) (mithril_rpc_probe_success{role="reference_primary"} == 1)
+            and on(deployment_id) (time() - mithril_rpc_probe_last_success_timestamp_seconds{role="node"} < 60)
+            and on(deployment_id) (time() - mithril_rpc_probe_last_success_timestamp_seconds{role="reference_primary"} < 60)
+          )
+          or
+          (
+            (
+              (mithril_node_slot_delta{role="fallback"} > 150)
+              and on(deployment_id) (mithril_rpc_probe_success{role="node"} == 1)
+              and on(deployment_id) (mithril_rpc_probe_success{role="reference_fallback"} == 1)
+              and on(deployment_id) (time() - mithril_rpc_probe_last_success_timestamp_seconds{role="node"} < 60)
+              and on(deployment_id) (time() - mithril_rpc_probe_last_success_timestamp_seconds{role="reference_fallback"} < 60)
+            )
+            unless on(deployment_id)
+            (
+              mithril_node_slot_delta{role="primary"}
+              and on(deployment_id) (mithril_rpc_probe_success{role="reference_primary"} == 1)
+              and on(deployment_id) (time() - mithril_rpc_probe_last_success_timestamp_seconds{role="reference_primary"} < 60)
+            )
+          )
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node replay is more than 150 slots behind the preferred healthy reference"
+
+      - alert: MithrilNodeAheadOfReference
+        expr: >-
+          (
+            (mithril_node_slot_delta{role="primary"} < -32)
+            and on(deployment_id) (mithril_rpc_probe_success{role="node"} == 1)
+            and on(deployment_id) (mithril_rpc_probe_success{role="reference_primary"} == 1)
+            and on(deployment_id) (time() - mithril_rpc_probe_last_success_timestamp_seconds{role="node"} < 60)
+            and on(deployment_id) (time() - mithril_rpc_probe_last_success_timestamp_seconds{role="reference_primary"} < 60)
+          )
+          or
+          (
+            (
+              (mithril_node_slot_delta{role="fallback"} < -32)
+              and on(deployment_id) (mithril_rpc_probe_success{role="node"} == 1)
+              and on(deployment_id) (mithril_rpc_probe_success{role="reference_fallback"} == 1)
+              and on(deployment_id) (time() - mithril_rpc_probe_last_success_timestamp_seconds{role="node"} < 60)
+              and on(deployment_id) (time() - mithril_rpc_probe_last_success_timestamp_seconds{role="reference_fallback"} < 60)
+            )
+            unless on(deployment_id)
+            (
+              mithril_node_slot_delta{role="primary"}
+              and on(deployment_id) (mithril_rpc_probe_success{role="reference_primary"} == 1)
+              and on(deployment_id) (time() - mithril_rpc_probe_last_success_timestamp_seconds{role="reference_primary"} < 60)
+            )
+          )
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node replay is ahead of the preferred healthy reference"
+
+      - alert: MithrilReferencesDisagree
+        expr: >-
+          (mithril_reference_slot_disagreement_slots > 32)
+          and on(deployment_id) (mithril_rpc_probe_success{role="reference_primary"} == 1)
+          and on(deployment_id) (mithril_rpc_probe_success{role="reference_fallback"} == 1)
+          and on(deployment_id) (time() - mithril_rpc_probe_last_success_timestamp_seconds{role="reference_primary"} < 60)
+          and on(deployment_id) (time() - mithril_rpc_probe_last_success_timestamp_seconds{role="reference_fallback"} < 60)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reference providers disagree by more than 32 slots"
+
+      - alert: MithrilReplayStalled
+        expr: >-
+          (
+            changes(mithril_replay_slot[5m]) == 0
+            and on(deployment_id) max by(deployment_id) (up{job="mithril-node"} == 1)
+            and on(deployment_id) (snapshot_bootstrap_active == 0)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+            and on(deployment_id) (mithril_replay_last_success_timestamp_seconds > 0)
+          )
+          or
+          (
+            time() - mithril_replay_last_success_timestamp_seconds > 300
+            and on(deployment_id) (mithril_replay_last_success_timestamp_seconds > 0)
+            and on(deployment_id) (snapshot_bootstrap_active == 0)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or
+          (
+            mithril_replay_last_success_timestamp_seconds == 0
+            and on(deployment_id)
+            (time() - mithril_replay_observation_started_timestamp_seconds > 300)
+            and on(deployment_id) (snapshot_bootstrap_active == 0)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Replay is not advancing"
+
+      - alert: MithrilReplayMetricsMissing
+        expr: >-
+          (count by(deployment_id) (mithril_replay_slot) != 1)
+          or (count by(deployment_id) (mithril_replay_last_success_timestamp_seconds) != 1)
+          or (count by(deployment_id) (mithril_replay_observation_started_timestamp_seconds) != 1)
+          or (count by(deployment_id) (snapshot_bootstrap_active) != 1)
+          or (count by(deployment_id) (snapshot_bootstrap_started_timestamp_seconds) > 1)
+          or (
+            (max by(deployment_id) (up{job="mithril-node"} == 1) unless on(deployment_id) mithril_replay_slot)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (
+            (max by(deployment_id) (up{job="mithril-node"} == 1) unless on(deployment_id) mithril_replay_last_success_timestamp_seconds)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (
+            (max by(deployment_id) (up{job="mithril-node"} == 1) unless on(deployment_id) mithril_replay_observation_started_timestamp_seconds)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (
+            (max by(deployment_id) (up{job="mithril-node"} == 1) unless on(deployment_id) snapshot_bootstrap_active)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (
+            (max by(deployment_id) (up{job="mithril-node"} == 1) unless on(deployment_id) snapshot_bootstrap_started_timestamp_seconds)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (count by(deployment_id) ((snapshot_bootstrap_active != 0) and (snapshot_bootstrap_active != 1)) > 0)
+          or (
+            (
+              (mithril_replay_slot != mithril_replay_slot)
+              or (mithril_replay_slot < 0)
+              or (mithril_replay_slot > 9007199254740991)
+              or (mithril_replay_slot != floor(mithril_replay_slot))
+              or (mithril_replay_last_success_timestamp_seconds != mithril_replay_last_success_timestamp_seconds)
+              or (mithril_replay_last_success_timestamp_seconds < 0)
+              or (mithril_replay_last_success_timestamp_seconds > 9007199254740991)
+              or (mithril_replay_last_success_timestamp_seconds != floor(mithril_replay_last_success_timestamp_seconds))
+              or (mithril_replay_last_success_timestamp_seconds > time() + 5)
+              or (mithril_replay_observation_started_timestamp_seconds <= 0)
+              or (mithril_replay_observation_started_timestamp_seconds != mithril_replay_observation_started_timestamp_seconds)
+              or (mithril_replay_observation_started_timestamp_seconds > 9007199254740991)
+              or (mithril_replay_observation_started_timestamp_seconds != floor(mithril_replay_observation_started_timestamp_seconds))
+              or (mithril_replay_observation_started_timestamp_seconds > time() + 5)
+              or (snapshot_bootstrap_started_timestamp_seconds != snapshot_bootstrap_started_timestamp_seconds)
+              or (snapshot_bootstrap_started_timestamp_seconds < 0)
+              or (snapshot_bootstrap_started_timestamp_seconds > 9007199254740991)
+              or (snapshot_bootstrap_started_timestamp_seconds != floor(snapshot_bootstrap_started_timestamp_seconds))
+              or (snapshot_bootstrap_started_timestamp_seconds > time() + 5)
+            )
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Required replay or bootstrap evidence is missing or invalid"
+
+      - alert: MithrilSnapshotBootstrapTooLong
+        expr: >-
+          (
+            snapshot_bootstrap_active == 1
+            and on(deployment_id)
+            (time() - snapshot_bootstrap_started_timestamp_seconds > 21600)
+          )
+          or
+          (
+            snapshot_bootstrap_active == 1
+            unless on(deployment_id)
+            snapshot_bootstrap_started_timestamp_seconds
+          )
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Snapshot bootstrap has exceeded six hours"
+
+      - alert: MithrilReplayLatencyHigh
+        expr: >-
+          histogram_quantile(
+            0.99,
+            sum by(deployment_id, le) (rate(mithril_replay_slot_duration_seconds_bucket[10m]))
+          ) > 0.4
+          and on(deployment_id)
+          sum by(deployment_id) (increase(mithril_replay_slot_duration_seconds_count[10m])) >= 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Replay p99 exceeds 400 milliseconds"
+
+      - alert: MithrilNodeRestartLoop
+        expr: changes(process_start_time_seconds{job="mithril-node"}[15m]) > 2
+        labels:
+          severity: critical
+        annotations:
+          summary: "The Mithril node restarted more than twice in 15 minutes"
+
+  - name: mithril-provenance
+    interval: 15s
+    rules:
+      - alert: MithrilRuntimeInfoInvalid
+        expr: >-
+          (count by(deployment_id) (mithril_runtime_info) > 1)
+          or (count by(deployment_id) (mithril_runtime_info != 1) > 0)
+          or (count by(deployment_id) (mithril_runtime_info{protocol_mode!~"classic|alpenglow"}) > 0)
+          or (count by(deployment_id) (mithril_runtime_info{consensus_mode!~"verifying|validator"}) > 0)
+          or (count by(deployment_id) (mithril_runtime_info{configured_block_source!~"rpc|turbine|lightbringer|file"}) > 0)
+          or (count by(deployment_id) (mithril_monitoring_schema_ready) != 1)
+          or (count by(deployment_id) ((mithril_monitoring_schema_ready != 0) and (mithril_monitoring_schema_ready != 1)) > 0)
+          or (max by(deployment_id) (up{job="mithril-node"} == 1) unless on(deployment_id) mithril_monitoring_schema_ready)
+          or (
+            (mithril_monitoring_schema_ready == 0)
+            and on(deployment_id)
+            (
+              time() - max by(deployment_id) (
+                process_start_time_seconds{job="mithril-node"}
+              ) > 21600
+            )
+          )
+          or (
+            (max by(deployment_id) (up{job="mithril-node"} == 1) unless on(deployment_id) mithril_runtime_info)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node runtime provenance or monitoring readiness is invalid"
+
+      - alert: MithrilBlockSourceInvalid
+        expr: >-
+          (
+            (count by(deployment_id) (mithril_block_source_active) != 4)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (count by(deployment_id, source) (mithril_block_source_active) != 1)
+          or (count by(deployment_id) (mithril_block_source_active{source!~"rpc|turbine|lightbringer|file"}) > 0)
+          or (count by(deployment_id) ((mithril_block_source_active != 0) and (mithril_block_source_active != 1)) > 0)
+          or (sum by(deployment_id) (mithril_block_source_active) > 1)
+          or (
+            (sum by(deployment_id) (mithril_block_source_active) < 1)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (
+            (max by(deployment_id) (up{job="mithril-node"} == 1) unless on(deployment_id) mithril_block_source_active)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The active block-source inventory is invalid"
+
+      - alert: MithrilConfiguredSourceNotActive
+        expr: >-
+          (
+            label_replace(
+              mithril_runtime_info{configured_block_source=~"rpc|file"} == 1,
+              "source", "$1", "configured_block_source", "(.*)"
+            )
+            unless on(deployment_id, source)
+            (mithril_block_source_active == 1)
+          )
+          and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "An exact block source is configured but not active"
+
+  - name: mithril-verification
+    interval: 15s
+    rules:
+      - alert: MithrilVerificationStateInvalid
+        expr: >-
+          (
+            (count by(deployment_id) (mithril_verification_state) != 6)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (count by(deployment_id, state) (mithril_verification_state) != 1)
+          or (count by(deployment_id) (mithril_verification_state{state!~"complete|incomplete|stalled|diverged|unavailable|not_applicable"}) > 0)
+          or (count by(deployment_id) ((mithril_verification_state != 0) and (mithril_verification_state != 1)) > 0)
+          or (sum by(deployment_id) (mithril_verification_state) > 1)
+          or (
+            (sum by(deployment_id) (mithril_verification_state) < 1)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (count by(deployment_id) (mithril_verification_required) != 1)
+          or (count by(deployment_id) ((mithril_verification_required != 0) and (mithril_verification_required != 1)) > 0)
+          or (
+            (
+              count by(deployment_id) (
+                {__name__=~"mithril_rooted_slot|mithril_verified_slot|mithril_verification_lag_slots|mithril_verifier_configured_lag_slots|mithril_fold_batch_slots|mithril_unrooted_tail_slots|mithril_unrooted_tail_limit_slots"}
+              ) != 7
+            )
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (
+            count by(deployment_id, __name__) (
+              {__name__=~"mithril_rooted_slot|mithril_verified_slot|mithril_verification_lag_slots|mithril_verifier_configured_lag_slots|mithril_fold_batch_slots|mithril_unrooted_tail_slots|mithril_unrooted_tail_limit_slots"}
+            ) != 1
+          )
+          or (
+            count by(deployment_id) (
+              {__name__=~"mithril_rooted_slot|mithril_verified_slot|mithril_verification_lag_slots|mithril_verifier_configured_lag_slots|mithril_fold_batch_slots|mithril_unrooted_tail_slots|mithril_unrooted_tail_limit_slots"} < 0
+            ) > 0
+          )
+          or (
+            count by(deployment_id) (
+              (mithril_rooted_slot != mithril_rooted_slot)
+              or (mithril_rooted_slot > 9007199254740991)
+              or (mithril_rooted_slot != floor(mithril_rooted_slot))
+              or (mithril_verified_slot != mithril_verified_slot)
+              or (mithril_verified_slot > 9007199254740991)
+              or (mithril_verified_slot != floor(mithril_verified_slot))
+              or (mithril_verification_lag_slots != mithril_verification_lag_slots)
+              or (mithril_verification_lag_slots > 9007199254740991)
+              or (mithril_verification_lag_slots != floor(mithril_verification_lag_slots))
+              or (mithril_verifier_configured_lag_slots != mithril_verifier_configured_lag_slots)
+              or (mithril_verifier_configured_lag_slots > 9007199254740991)
+              or (mithril_verifier_configured_lag_slots != floor(mithril_verifier_configured_lag_slots))
+              or (mithril_fold_batch_slots != mithril_fold_batch_slots)
+              or (mithril_fold_batch_slots > 9007199254740991)
+              or (mithril_fold_batch_slots != floor(mithril_fold_batch_slots))
+              or (mithril_unrooted_tail_slots != mithril_unrooted_tail_slots)
+              or (mithril_unrooted_tail_slots > 9007199254740991)
+              or (mithril_unrooted_tail_slots != floor(mithril_unrooted_tail_slots))
+              or (mithril_unrooted_tail_limit_slots != mithril_unrooted_tail_limit_slots)
+              or (mithril_unrooted_tail_limit_slots > 9007199254740991)
+              or (mithril_unrooted_tail_limit_slots != floor(mithril_unrooted_tail_limit_slots))
+            ) > 0
+          )
+          or (
+            (max by(deployment_id) (up{job="mithril-node"} == 1) unless on(deployment_id) mithril_verification_state)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (
+            (max by(deployment_id) (up{job="mithril-node"} == 1) unless on(deployment_id) mithril_verification_required)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (
+            (
+              max by(deployment_id) (up{job="mithril-node"} == 1)
+              unless on(deployment_id)
+              {__name__=~"mithril_rooted_slot|mithril_verified_slot|mithril_verification_lag_slots|mithril_verifier_configured_lag_slots|mithril_fold_batch_slots|mithril_unrooted_tail_slots|mithril_unrooted_tail_limit_slots"}
+            )
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The verification metric inventory is invalid"
+
+      - alert: MithrilVerificationDiverged
+        expr: mithril_verification_state{state="diverged"} == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "Verification reports divergence"
+
+      - alert: MithrilVerificationStalled
+        expr: >-
+          (mithril_verification_state{state="stalled"} == 1)
+          and on(deployment_id)
+          (mithril_verification_required == 1)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Required trailing verification has stalled"
+
+      - alert: MithrilVerificationUnavailable
+        expr: >-
+          (mithril_verification_state{state="unavailable"} == 1)
+          and on(deployment_id)
+          (mithril_verification_required == 1)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Required verification evidence is unavailable"
+
+      - alert: MithrilVerificationLagHigh
+        expr: >-
+          (
+            mithril_verification_lag_slots
+              > on(deployment_id)
+                (mithril_verifier_configured_lag_slots + mithril_fold_batch_slots)
+            and on(deployment_id)
+            (mithril_verification_required == 1)
+          )
+          or (
+            (mithril_verification_required == 1 unless on(deployment_id) mithril_verification_lag_slots)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (
+            (mithril_verification_required == 1 unless on(deployment_id) mithril_verifier_configured_lag_slots)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (
+            (mithril_verification_required == 1 unless on(deployment_id) mithril_fold_batch_slots)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Verification lag exceeds configured lag plus one fold batch"
+
+      - alert: MithrilVerificationRequiredButMissing
+        expr: >-
+          (
+            mithril_verification_required == 1
+            unless on(deployment_id)
+            mithril_verified_slot
+          )
+          and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Verification is required but its watermark is missing"
+
+      - alert: MithrilUnrootedTailNearLimit
+        expr: >-
+          (
+            max by(deployment_id) (mithril_runtime_info{protocol_mode="alpenglow"} == 1)
+            and on(deployment_id) (mithril_unrooted_tail_limit_slots > 0)
+            and on(deployment_id)
+              (mithril_unrooted_tail_slots / mithril_unrooted_tail_limit_slots > 0.8)
+          )
+          or
+          (
+            (
+              max by(deployment_id) (mithril_runtime_info{protocol_mode="alpenglow"} == 1)
+              unless on(deployment_id)
+              mithril_unrooted_tail_slots
+            )
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or
+          (
+            (
+              max by(deployment_id) (mithril_runtime_info{protocol_mode="alpenglow"} == 1)
+              unless on(deployment_id)
+              mithril_unrooted_tail_limit_slots
+            )
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The Alpenglow unrooted tail is near its halt limit"
+
+      - alert: MithrilAlpenglowRootStalled
+        expr: >-
+          (
+            changes(mithril_rooted_slot[10m]) == 0
+            and on(deployment_id) (changes(mithril_replay_slot[10m]) > 0)
+            and on(deployment_id)
+              max by(deployment_id) (mithril_runtime_info{protocol_mode="alpenglow"} == 1)
+          )
+          or
+          (
+            (
+              max by(deployment_id) (mithril_runtime_info{protocol_mode="alpenglow"} == 1)
+              unless on(deployment_id)
+              mithril_rooted_slot
+            )
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Alpenglow replay advances but the durable root does not"
+
+      - alert: MithrilFinalityMetricsInvalid
+        expr: >-
+          (
+            (count by(deployment_id) (mithril_finality_slot) != 4)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (count by(deployment_id, source) (mithril_finality_slot) != 1)
+          or (count by(deployment_id) (mithril_finality_slot{source!~"certificate|delegated|mixed|classic"}) > 0)
+          or (
+            count by(deployment_id) (
+              (mithril_finality_slot != mithril_finality_slot)
+              or (mithril_finality_slot < 0)
+              or (mithril_finality_slot > 9007199254740991)
+              or (mithril_finality_slot != floor(mithril_finality_slot))
+            ) > 0
+          )
+          or (count by(deployment_id) (mithril_finality_slot > 0) > 1)
+          or (
+            (max by(deployment_id) (up{job="mithril-node"} == 1) unless on(deployment_id) mithril_finality_slot)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The finality metric inventory is missing or invalid"
+
+      - alert: MithrilDurableWatermarkRegressed
+        expr: >-
+          (delta(mithril_rooted_slot[1m]) < 0)
+          or
+          (
+            delta(
+              (max by(deployment_id) (mithril_finality_slot))[1m:15s]
+            ) < 0
+          )
+        labels:
+          severity: critical
+        annotations:
+          summary: "A durable root or finality watermark regressed"
+
+  - name: mithril-host
+    interval: 15s
+    rules:
+      - alert: MithrilNodeExporterCollectorFailing
+        expr: >-
+          (count by(deployment_id, instance) (node_scrape_collector_success{collector=~"systemd|filesystem|meminfo|cpu|pressure"}) != 5)
+          or (count by(deployment_id, instance) (node_scrape_collector_success{collector=~"systemd|filesystem|meminfo|cpu|pressure"} != 1) > 0)
+          or (max by(deployment_id, instance) (up{job="node-exporter"} == 1) unless on(deployment_id, instance) node_scrape_collector_success{collector="systemd"})
+          or (max by(deployment_id, instance) (up{job="node-exporter"} == 1) unless on(deployment_id, instance) node_scrape_collector_success{collector="filesystem"})
+          or (max by(deployment_id, instance) (up{job="node-exporter"} == 1) unless on(deployment_id, instance) node_scrape_collector_success{collector="meminfo"})
+          or (max by(deployment_id, instance) (up{job="node-exporter"} == 1) unless on(deployment_id, instance) node_scrape_collector_success{collector="cpu"})
+          or (max by(deployment_id, instance) (up{job="node-exporter"} == 1) unless on(deployment_id, instance) node_scrape_collector_success{collector="pressure"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A required node_exporter collector is missing or failing"
+
+      - alert: MithrilServiceDown
+        expr: >-
+          max by(deployment_id, name) (
+            label_replace(
+              mithril_monitor_identity_info{systemd_scope="system"} == 1,
+              "name", "$1", "systemd_unit", "(.+)"
+            )
+          )
+          unless on(deployment_id, name)
+          max by(deployment_id, name) (
+            node_systemd_unit_state{state="active"} == 1
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The Mithril systemd service is not active"
+
+      - alert: MithrilServiceRestartLoop
+        expr: >-
+          (
+            max by(deployment_id, name) (
+              increase(node_systemd_service_restart_total[15m])
+            ) > 2
+            and on(deployment_id, name)
+            max by(deployment_id, name) (
+              label_replace(
+                mithril_monitor_identity_info{systemd_scope="system"} == 1,
+                "name", "$1", "systemd_unit", "(.+)"
+              )
+            )
+          )
+          or
+          (
+            max by(deployment_id, name) (
+              label_replace(
+                mithril_monitor_identity_info{systemd_scope="system"} == 1,
+                "name", "$1", "systemd_unit", "(.+)"
+              )
+            )
+            unless on(deployment_id, name)
+            max by(deployment_id, name) (node_systemd_service_restart_total)
+          )
+        labels:
+          severity: critical
+        annotations:
+          summary: "The Mithril service restarted more than twice in 15 minutes"
+
+      - alert: MithrilHostFilesystemLow
+        expr: >-
+          max by(deployment_id, role) (mithril_filesystem_avail_bytes)
+            / on(deployment_id, role)
+          max by(deployment_id, role) (mithril_filesystem_size_bytes)
+            < 0.10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A required Mithril filesystem role has less than 10% free space"
+
+      - alert: MithrilHostMemoryLow
+        expr: >-
+          (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10)
+          or (max by(deployment_id, instance) (up{job="node-exporter"} == 1) unless on(deployment_id, instance) node_memory_MemAvailable_bytes)
+          or (max by(deployment_id, instance) (up{job="node-exporter"} == 1) unless on(deployment_id, instance) node_memory_MemTotal_bytes)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The monitored host has less than 10% available memory"
+
+      - alert: MithrilProcessMemoryHigh
+        expr: >-
+          max by(deployment_id) (process_resident_memory_bytes{job="mithril-node"})
+            /
+          on(deployment_id) max by(deployment_id) (node_memory_MemTotal_bytes)
+            > 0.80
+          or
+          (
+            max by(deployment_id) (up{job="mithril-node"} == 1)
+            unless on(deployment_id)
+            process_resident_memory_bytes{job="mithril-node"}
+          )
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The Mithril process uses more than 80% of host memory"
+
+      - alert: MithrilHostCPUHigh
+        expr: >-
+          (1 - avg by(deployment_id, instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.90)
+          or
+          (
+            max by(deployment_id, instance) (up{job="node-exporter"} == 1)
+            unless on(deployment_id, instance)
+            node_cpu_seconds_total{mode="idle"}
+          )
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The monitored host CPU has remained above 90%"
+
+      - alert: MithrilHostMemoryPressure
+        expr: >-
+          (rate(node_pressure_memory_stalled_seconds_total[5m]) > 0.10)
+          or
+          (
+            max by(deployment_id, instance) (up{job="node-exporter"} == 1)
+            unless on(deployment_id, instance)
+            node_pressure_memory_stalled_seconds_total
+          )
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The monitored host is under sustained memory pressure"
+
+  - name: mithril-notifier
+    interval: 15s
+    rules:
+      - alert: MithrilNotifierMetricsInvalid
+        expr: >-
+          (count by(deployment_id) (mithril_notifier_last_attempt_timestamp_seconds) != 1)
+          or (count by(deployment_id, channel) (mithril_notifier_last_attempt_timestamp_seconds) != 1)
+          or (count by(deployment_id) (mithril_notifier_last_success_timestamp_seconds) != 1)
+          or (count by(deployment_id, channel) (mithril_notifier_last_success_timestamp_seconds) != 1)
+          or (count by(deployment_id) (mithril_notifier_delivered_total) != 1)
+          or (count by(deployment_id, channel) (mithril_notifier_delivered_total) != 1)
+          or (count by(deployment_id) (mithril_notifier_failed_total) != 1)
+          or (count by(deployment_id, channel) (mithril_notifier_failed_total) != 1)
+          or (count by(deployment_id) (mithril_notifier_last_attempt_timestamp_seconds{channel!="telegram"}) > 0)
+          or (count by(deployment_id) (mithril_notifier_last_success_timestamp_seconds{channel!="telegram"}) > 0)
+          or (count by(deployment_id) (mithril_notifier_delivered_total{channel!="telegram"}) > 0)
+          or (count by(deployment_id) (mithril_notifier_failed_total{channel!="telegram"}) > 0)
+          or (count by(deployment_id) (mithril_notifier_dedup_evictions_total) != 1)
+          or (count by(deployment_id) (
+            (mithril_notifier_last_attempt_timestamp_seconds != mithril_notifier_last_attempt_timestamp_seconds)
+            or (mithril_notifier_last_attempt_timestamp_seconds < 0)
+            or (mithril_notifier_last_attempt_timestamp_seconds > 9007199254740991)
+            or (mithril_notifier_last_attempt_timestamp_seconds != floor(mithril_notifier_last_attempt_timestamp_seconds))
+            or (mithril_notifier_last_attempt_timestamp_seconds > time() + 5)
+          ) > 0)
+          or (count by(deployment_id) (
+            (mithril_notifier_last_success_timestamp_seconds != mithril_notifier_last_success_timestamp_seconds)
+            or (mithril_notifier_last_success_timestamp_seconds < 0)
+            or (mithril_notifier_last_success_timestamp_seconds > 9007199254740991)
+            or (mithril_notifier_last_success_timestamp_seconds != floor(mithril_notifier_last_success_timestamp_seconds))
+            or (mithril_notifier_last_success_timestamp_seconds > time() + 5)
+          ) > 0)
+          or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notifier_last_attempt_timestamp_seconds)
+          or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notifier_last_success_timestamp_seconds)
+          or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notifier_delivered_total)
+          or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notifier_failed_total)
+          or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notifier_dedup_evictions_total)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The notifier metric inventory is missing or invalid"
+
+      - alert: MithrilNotifierDeliveryFailing
+        expr: >-
+          (increase(mithril_notifier_failed_total[10m]) > 3)
+          or (increase(mithril_notifier_dedup_evictions_total[10m]) > 0)
+        labels:
+          severity: critical
+        annotations:
+          summary: "Telegram alert delivery or deduplication is failing"
+
+      - alert: MithrilNotifierRecentDeliveryFailed
+        expr: >-
+          (time() - mithril_notifier_last_success_timestamp_seconds > 300)
+          and on(deployment_id, channel)
+          (time() - mithril_notifier_last_attempt_timestamp_seconds < 300)
+          and on(deployment_id, channel)
+          (mithril_notifier_last_attempt_timestamp_seconds > 0)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A recent notification attempt has no recent success"
+
+      - alert: MithrilNotificationFallbackNotConfigured
+        expr: >-
+          (
+            label_replace(
+              max by(deployment_id) (
+                up{job="prometheus",notification_fallback_required="true"}
+              ) * 0 + 1,
+              "route", "secondary_ses", "deployment_id", ".+"
+            )
+            unless on(deployment_id, route)
+            (mithril_notification_route_configured{route="secondary_ses"} == 1)
+          )
+          or
+          (
+            label_replace(
+              max by(deployment_id) (up{job="prometheus"}) * 0 + 1,
+              "route", "secondary_ses", "deployment_id", ".+"
+            )
+            unless on(deployment_id)
+            max by(deployment_id) (
+              up{job="prometheus",notification_fallback_required=~"true|false"}
+            )
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The required SES fallback is not configured or its policy is invalid"
+
+      - alert: MithrilNotificationProbeUnhealthy
+        expr: >-
+          (count by(deployment_id) (mithril_notification_route_configured) != 2)
+          or (count by(deployment_id, route) (mithril_notification_route_configured) != 1)
+          or (count by(deployment_id) (mithril_notification_route_configured{route!~"primary_telegram|secondary_ses"}) > 0)
+          or (count by(deployment_id) ((mithril_notification_route_configured != 0) and (mithril_notification_route_configured != 1)) > 0)
+          or (count by(deployment_id) (mithril_notification_probe_attempts_total) != 2)
+          or (count by(deployment_id, route) (mithril_notification_probe_attempts_total) != 1)
+          or (count by(deployment_id) (mithril_notification_probe_attempts_total{route!~"primary_telegram|secondary_ses"}) > 0)
+          or (count by(deployment_id) (mithril_notification_probe_failures_total) != 2)
+          or (count by(deployment_id, route) (mithril_notification_probe_failures_total) != 1)
+          or (count by(deployment_id) (mithril_notification_probe_failures_total{route!~"primary_telegram|secondary_ses"}) > 0)
+          or (
+            mithril_notification_probe_failures_total
+              > on(deployment_id, route)
+                mithril_notification_probe_attempts_total
+          )
+          or (
+            increase(mithril_notification_probe_failures_total[10m]) > 0
+            and on(deployment_id, route)
+            (mithril_notification_route_configured == 1)
+          )
+          or (count by(deployment_id) (mithril_notification_probe_success) != 2)
+          or (count by(deployment_id, route) (mithril_notification_probe_success) != 1)
+          or (count by(deployment_id) (mithril_notification_probe_success{route!~"primary_telegram|secondary_ses"}) > 0)
+          or (count by(deployment_id) ((mithril_notification_probe_success != 0) and (mithril_notification_probe_success != 1)) > 0)
+          or (count by(deployment_id) (
+            (mithril_notification_probe_last_success_timestamp_seconds != mithril_notification_probe_last_success_timestamp_seconds)
+            or (mithril_notification_probe_last_success_timestamp_seconds < 0)
+            or (mithril_notification_probe_last_success_timestamp_seconds > 9007199254740991)
+            or (mithril_notification_probe_last_success_timestamp_seconds != floor(mithril_notification_probe_last_success_timestamp_seconds))
+            or (mithril_notification_probe_last_success_timestamp_seconds > time() + 5)
+          ) > 0)
+          or (
+            (mithril_notification_probe_success != 1)
+            and on(deployment_id, route)
+            (mithril_notification_route_configured == 1)
+          )
+          or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_route_configured)
+          or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_probe_attempts_total)
+          or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_probe_failures_total)
+          or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_probe_success{route="primary_telegram"})
+          or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_probe_success{route="secondary_ses"})
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A notification-route canary is unhealthy"
+
+      - alert: MithrilNotificationProbeStale
+        expr: >-
+          (count by(deployment_id) (mithril_notification_probe_last_success_timestamp_seconds) != 2)
+          or (count by(deployment_id, route) (mithril_notification_probe_last_success_timestamp_seconds) != 1)
+          or (count by(deployment_id) (mithril_notification_probe_last_success_timestamp_seconds{route!~"primary_telegram|secondary_ses"}) > 0)
+          or (
+            time() - mithril_notification_probe_last_success_timestamp_seconds > 7200
+            and on(deployment_id, route)
+            (mithril_notification_route_configured == 1)
+          )
+          or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_probe_last_success_timestamp_seconds{route="primary_telegram"})
+          or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_probe_last_success_timestamp_seconds{route="secondary_ses"})
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A notification-route canary has not succeeded in two hours"
+
+      - alert: MithrilAlertDeliveryPipelineFailing
+        expr: >-
+          (increase(prometheus_notifications_errors_total[5m]) > 0)
+          or (increase(prometheus_notifications_dropped_total[5m]) > 0)
+          or (increase(alertmanager_notifications_failed_total[5m]) > 0)
+          or
+          (
+            max by(deployment_id) (up{job="prometheus"} == 1)
+            unless on(deployment_id)
+            prometheus_notifications_errors_total
+          )
+          or
+          (
+            max by(deployment_id) (up{job="prometheus"} == 1)
+            unless on(deployment_id)
+            prometheus_notifications_dropped_total
+          )
+          or
+          (
+            max by(deployment_id) (up{job="alertmanager"} == 1)
+            unless on(deployment_id)
+            alertmanager_notifications_failed_total
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus or Alertmanager is failing to deliver alerts"

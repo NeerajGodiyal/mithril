@@ -1,0 +1,23 @@
+# Targets are supplied by Prometheus file_sd and never stored here.
+modules:
+  mithril_rpc_epoch_info:
+    prober: http
+    timeout: 5s
+    http:
+      valid_status_codes: [200]
+      method: POST
+      headers:
+        Content-Type: application/json
+      body: '{"jsonrpc":"2.0","id":1,"method":"getEpochInfo","params":[]}'
+      fail_if_body_matches_regexp:
+        - '"error"\s*:'
+      fail_if_body_not_matches_regexp:
+        - '"absoluteSlot"\s*:\s*[0-9]+'
+      body_size_limit: 64KB
+      follow_redirects: false
+      preferred_ip_protocol: ip4
+      ip_protocol_fallback: false
+
+  tcp_connect:
+    prober: tcp
+    timeout: 5s

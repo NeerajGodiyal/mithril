@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "manifest_id": "replace-at-deploy",
+  "targets": [
+    {"target_job": "mithril-node", "required": true},
+    {"target_job": "mithril-monitor", "required": true},
+    {"target_job": "mithril-notifier", "required": true},
+    {"target_job": "mithril-agent", "required": false},
+    {"target_job": "node-exporter", "required": true},
+    {"target_job": "blackbox-exporter", "required": true},
+    {"target_job": "prometheus", "required": true},
+    {"target_job": "alertmanager", "required": true}
+  ],
+  "filesystems": [
+    {"role": "root", "mountpoint": "/", "required": true},
+    {"role": "accounts", "mountpoint": "/mnt/mithril-accounts", "required": true},
+    {"role": "ledger", "mountpoint": "/mnt/mithril-ledger", "required": true}
+  ]
+}

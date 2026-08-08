@@ -1,0 +1,81 @@
+# Runtime deployment replaces addresses and supplies secret files. No receiver
+# credential is stored in this repository.
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: [alertname, deployment_id, severity]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: telegram-primary
+  routes:
+    - matchers: [alertname="MithrilDeadmanHeartbeat"]
+      receiver: deadman
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 1m
+      continue: false
+
+    - matchers: [severity="info"]
+      receiver: telegram-info
+      continue: false
+
+    - matchers: [severity="critical"]
+      receiver: telegram-primary
+      continue: true
+    - matchers: [severity="critical"]
+      receiver: email-fallback
+
+receivers:
+  - name: telegram-primary
+    webhook_configs:
+      - url: https://localhost:9094/notify
+        send_resolved: true
+        timeout: 35s
+        http_config:
+          follow_redirects: false
+          tls_config:
+            ca_file: /etc/alertmanager/tls/notifier-server-ca.pem
+            cert_file: /etc/alertmanager/tls/alertmanager-client.pem
+            key_file: /etc/alertmanager/tls/alertmanager-client-key.pem
+            server_name: mithril-notifier
+            min_version: TLS12
+
+  - name: telegram-info
+    webhook_configs:
+      - url: https://localhost:9094/notify
+        send_resolved: false
+        timeout: 35s
+        http_config:
+          follow_redirects: false
+          tls_config:
+            ca_file: /etc/alertmanager/tls/notifier-server-ca.pem
+            cert_file: /etc/alertmanager/tls/alertmanager-client.pem
+            key_file: /etc/alertmanager/tls/alertmanager-client-key.pem
+            server_name: mithril-notifier
+            min_version: TLS12
+
+  - name: email-fallback
+    email_configs:
+      - to: replace-at-deploy@example.invalid
+        from: replace-at-deploy@example.invalid
+        smarthost: email-smtp.us-east-1.amazonaws.com:587
+        auth_username: replace-at-deploy
+        auth_password_file: /etc/alertmanager/secrets/ses-smtp-password
+        require_tls: true
+        send_resolved: true
+
+  # Replace this URL with an independent heartbeat receiver. A local phone or
+  # the primary monitoring host cannot detect its own silence.
+  - name: deadman
+    webhook_configs:
+      - url: https://replace-at-deploy.invalid/deadman
+        send_resolved: true
+        http_config:
+          follow_redirects: false
+
+inhibit_rules:
+  - source_matchers: [alertname="MithrilNodeProbeDown"]
+    target_matchers: [alertname=~"MithrilNodeBehindReference|MithrilNodeAheadOfReference|MithrilReplayStalled"]
+    equal: [deployment_id]

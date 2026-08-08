@@ -1,8 +1,92 @@
-# Sample Prometheus configuration file for scraping metrics from a Go application
+# Prometheus configuration for a Mithril operations host.
+#
+# Scrape addresses belong in root-owned file_sd files. The signed target and
+# filesystem inventory is verified by mithril-monitor and is not duplicated
+# here. Each target file must attach the same bounded deployment_id, matching
+# the protected monitor config and signed inventory manifest_id.
 global:
-  # The default interval for scraping targets.
-  scrape_interval: 15s 
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    deployment_id: replace-at-deploy
+    monitoring_instance: replace-at-deploy
+
+rule_files:
+  - rules/*.yml
+
+alerting:
+  alertmanagers:
+    - file_sd_configs:
+        - files:
+            - /etc/prometheus/targets/alertmanager.json
+
 scrape_configs:
-  - job_name: 'go_application_metrics'
+  - job_name: prometheus
     static_configs:
-      - targets: ['{server}:9090']
+      - targets: [127.0.0.1:9090]
+        labels:
+          deployment_id: replace-at-deploy
+          monitoring_peer_required: replace-at-deploy
+          notification_fallback_required: replace-at-deploy
+
+  - job_name: prometheus-peer
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/prometheus-peer.json
+
+  - job_name: alertmanager
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/alertmanager.json
+
+  - job_name: mithril-node
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/mithril-node.json
+
+  - job_name: mithril-monitor
+    # Preserve monitor-emitted identity labels if target discovery
+    # accidentally supplies a label with the same reserved name.
+    honor_labels: true
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/mithril-monitor.json
+
+  - job_name: mithril-notifier
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/mithril-notifier.json
+
+  - job_name: mithril-agent
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/mithril-agent.json
+
+  - job_name: node-exporter
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/node-exporter.json
+
+  - job_name: blackbox-exporter
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/blackbox-exporter.json
+
+  # Blackbox targets must be credential-free: __param_target is visible in the
+  # Prometheus targets API and to blackbox_exporter. Authenticated reference
+  # provider checks belong in mithril-monitor. instance comes from the bounded
+  # probe_name label supplied by file_sd.
+  - job_name: mithril-rpc-offhost
+    metrics_path: /probe
+    params:
+      module: [mithril_rpc_epoch_info]
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/mithril-rpc-offhost.json
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [probe_name]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115

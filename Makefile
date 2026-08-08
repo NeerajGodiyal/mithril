@@ -13,13 +13,15 @@ LDFLAGS := -X github.com/Overclock-Validator/mithril/pkg/version.Version=$(VERSI
 build:
 	go build -ldflags "$(LDFLAGS)" -o mithril ./cmd/mithril
 	go build -ldflags "$(LDFLAGS)" -o mithril-monitor ./cmd/mithril-monitor
+	go build -ldflags "$(LDFLAGS)" -o mithril-notifier ./cmd/mithril-notifier
 
 release:
 	go build -ldflags "$(LDFLAGS) -s -w" -o mithril ./cmd/mithril
 	go build -ldflags "$(LDFLAGS) -s -w" -o mithril-monitor ./cmd/mithril-monitor
+	go build -ldflags "$(LDFLAGS) -s -w" -o mithril-notifier ./cmd/mithril-notifier
 
 clean:
-	rm -f mithril mithril-monitor
+	rm -f mithril mithril-monitor mithril-notifier
 
 # Server setup scripts (require sudo - run as: sudo make server-setup ...)
 server-setup:
