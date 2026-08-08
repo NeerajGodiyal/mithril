@@ -53,6 +53,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/Overclock-Validator/mithril/pkg/tpu"
 	"github.com/Overclock-Validator/mithril/pkg/turbine"
+	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/Overclock-Validator/mithril/pkg/version"
 	solana "github.com/gagliardetto/solana-go"
 	solrpc "github.com/gagliardetto/solana-go/rpc"
@@ -134,7 +135,8 @@ var (
 	paramArenaSizeMB         uint64
 	borrowedAccountArenaSize uint64
 
-	rpcPort int
+	rpcBindAddress string
+	rpcPort        int
 
 	// Lightbringer sidecar config
 	lightbringerEnabled          bool
@@ -394,6 +396,7 @@ func init() {
 	Run.Flags().StringVar(&cluster, "cluster", "", "Solana cluster: 'alpenglow' (default), 'mainnet-beta', 'testnet', or 'devnet'")
 
 	// [rpc] section flags (Mithril's RPC server)
+	Run.Flags().StringVar(&rpcBindAddress, "rpc-bind-address", rpcserver.DefaultRPCBindAddress, "IP address for the RPC server. Defaults to loopback.")
 	Run.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
 
 	// [replay] section flags
@@ -688,6 +691,13 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	}
 
 	// [rpc] section - Mithril's RPC server
+	rpcBindAddress = strings.TrimSpace(getString("rpc-bind-address", "rpc.bind_address"))
+	if rpcBindAddress == "" {
+		rpcBindAddress = rpcserver.DefaultRPCBindAddress
+	}
+	if net.ParseIP(rpcBindAddress) == nil {
+		return fmt.Errorf("rpc.bind_address must be an IP address")
+	}
 	rpcPort = getInt("rpc-port", "rpc.port")
 
 	// Top-level
@@ -2322,13 +2332,52 @@ postBootstrap:
 		}
 	}
 
-	var rpcServer *rpcserver.RpcServer
+	var (
+		rpcServer             *rpcserver.RpcServer
+		submittedTransactions txstatus.Store
+		shutdownRPCOnce       sync.Once
+	)
+	shutdownRPC := func() {
+		shutdownRPCOnce.Do(func() {
+			if rpcServer == nil {
+				return
+			}
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := rpcServer.Shutdown(shutdownCtx); err != nil {
+				mlog.Log.Warnf("RPC server shutdown did not complete cleanly: %v", err)
+			}
+		})
+	}
 	if rpcPort < 0 || rpcPort > 65535 {
 		klog.Fatalf("invalid port: %d", rpcPort)
 	} else if rpcPort != 0 {
-		rpcServer = rpcserver.NewRpcServer(accountsDb, uint16(rpcPort), epochScheduleFromState(mithrilState))
+		rpcServer, err = rpcserver.NewRpcServerWithClusterRPCEndpointsE(
+			accountsDb,
+			rpcBindAddress,
+			uint16(rpcPort),
+			epochScheduleFromState(mithrilState),
+			rpcEndpoints,
+		)
+		if err != nil {
+			klog.Fatalf("create RPC server: %v", err)
+		}
+		if mithrilState != nil && mithrilState.GenesisHash != "" {
+			if err := rpcServer.SetGenesisHash(mithrilState.GenesisHash); err != nil {
+				klog.Fatalf("set RPC genesis hash: %v", err)
+			}
+		}
+		submittedTransactions, err = txstatus.NewIndex(txstatus.Config{
+			MaxReceipts: 8192,
+			Retention:   time.Hour,
+		})
+		if err != nil {
+			klog.Fatalf("start transaction receipt tracking: %v", err)
+		}
+		rpcServer.SetTransactionReceipts(submittedTransactions)
 		rpcServer.Start()
-		mlog.Log.Infof("Started RPC server on port %d", rpcPort)
+		defer shutdownRPC()
+		mlog.Log.Infof("Started RPC server on %s", net.JoinHostPort(rpcBindAddress, strconv.Itoa(rpcPort)))
 	}
 
 	// The Alpenglow observer is forkchoice authority in both Alpenglow modes.
@@ -2672,7 +2721,7 @@ postBootstrap:
 	if alpenglowMode {
 		turbineAlpenglowAddr = alpenglowAddrForGossip(alpenglowObserverBindAddr)
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, uint16(turbineShredVersion), turbineAlpenglowAddr, validatorIdentity, blockstorePath, int(txParallelism), true, useLightbringer, useTurbine, dbgOpts, metricsWriter, slotCtxSetter, mithrilState, blockFetchOpts, consensusOpts, compactCfg.RewindHorizonBatches, replayStartTime)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, uint16(turbineShredVersion), turbineAlpenglowAddr, validatorIdentity, blockstorePath, int(txParallelism), true, useLightbringer, useTurbine, dbgOpts, metricsWriter, slotCtxSetter, submittedTransactions, mithrilState, blockFetchOpts, consensusOpts, compactCfg.RewindHorizonBatches, replayStartTime)
 
 	if result.Error != nil {
 		if result.LastPersistedSlot == 0 {
@@ -2771,6 +2820,7 @@ postBootstrap:
 	}
 
 	mlog.Log.Infof("Done replaying, closing DB")
+	shutdownRPC()
 	accountsDb.CloseDb()
 }
 
@@ -4212,6 +4262,7 @@ func runReplayWithRecovery(
 	dbgOpts *replay.DebugOptions,
 	metricsWriter io.Writer,
 	rpcServer replay.SlotCtxSetter,
+	submittedTransactions txstatus.Sink,
 	mithrilState *state.MithrilState,
 	blockFetchOpts *replay.BlockFetchOpts,
 	consensusOpts *replay.ConsensusOpts,
@@ -4226,7 +4277,7 @@ func runReplayWithRecovery(
 			turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr,
 			turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr,
 			turbineIdentity, blockDir, txParallelism, isLive, useLightbringer,
-			useTurbine, dbgOpts, metricsWriter, rpcServer, mithrilState,
+			useTurbine, dbgOpts, metricsWriter, rpcServer, submittedTransactions, mithrilState,
 			blockFetchOpts, consensusOpts, rewindHorizon, replayStartTime,
 		)
 	})
@@ -4260,6 +4311,7 @@ func runReplayWithForkRecovery(
 	dbgOpts *replay.DebugOptions,
 	metricsWriter io.Writer,
 	rpcServer replay.SlotCtxSetter,
+	submittedTransactions txstatus.Sink,
 	mithrilState *state.MithrilState,
 	blockFetchOpts *replay.BlockFetchOpts,
 	consensusOpts *replay.ConsensusOpts,
@@ -4330,7 +4382,7 @@ func runReplayWithForkRecovery(
 		return nil
 	}
 
-	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, submittedTransactions, blockFetchOpts, consensusOpts, onCancelWriteState)
 	if consensusOpts == nil || !consensusOpts.Alpenglow {
 		return result
 	}
@@ -4453,7 +4505,15 @@ func runReplayWithForkRecovery(
 		}
 		mlog.Log.Warnf("fork switch: %s; re-replaying the selected chain from rooted slot %d (attempt %d/%d)",
 			recoveryReason, retryStart-1, attempt, maxForkSwitchRetries)
-		result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, rs, retryStart, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
+		if submittedTransactions != nil {
+			durableThrough := uint64(0)
+			if retryStart > 0 {
+				durableThrough = retryStart - 1
+			}
+			submittedTransactions.DurableRewound(durableThrough)
+			submittedTransactions.Unwound(retryStart)
+		}
+		result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, rs, retryStart, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, submittedTransactions, blockFetchOpts, consensusOpts, onCancelWriteState)
 	}
 	return result
 }
