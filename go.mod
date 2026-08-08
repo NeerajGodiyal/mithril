@@ -65,6 +65,7 @@ require (
 	github.com/rogpeppe/go-internal v1.12.0 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/zeebo/assert v1.3.0 // indirect
@@ -129,6 +130,7 @@ require (
 	github.com/ethereum/go-ethereum v1.15.12-0.20250620111820-f26b5653e8bf
 	github.com/fatih/color v1.16.0 // indirect
 	github.com/filecoin-project/go-jsonrpc v0.8.0
+	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/gagliardetto/treeout v0.1.4 // indirect
 	github.com/gammazero/deque v1.0.0
 	github.com/go-logr/logr v1.4.2 // indirect

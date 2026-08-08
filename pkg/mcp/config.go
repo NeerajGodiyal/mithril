@@ -24,7 +24,7 @@ const (
 	// Disk thresholds are percentages of the configured filesystem capacity.
 	DefaultDiskWarnPercent     = 85.0
 	DefaultDiskCriticalPercent = 95.0
-	DefaultApprovalTTLSeconds  = 60
+	DefaultApprovalTTLSeconds  = 120
 	MinApprovalTTLSeconds      = 15
 	MaxApprovalTTLSeconds      = 300
 
@@ -35,7 +35,7 @@ const (
 	DefaultOutputBudgetBytes = 1 << 20 // 1 MiB
 	// DefaultToolCallTimeout bounds one tool call. mithril_diagnose chains
 	// several 10s outbound requests, so the ceiling sits well above them.
-	DefaultToolCallTimeout = 90 * time.Second
+	DefaultToolCallTimeout = 3 * time.Minute
 	MaxToolCallTimeout     = 10 * time.Minute
 
 	// The minimum leaves room for the fixed output-rejection result.
@@ -105,12 +105,19 @@ type Config struct {
 
 	// Operator-only lifecycle controls. The unit and executable are fixed at
 	// process startup; tools never accept either as input.
-	ControlEnabled     bool
-	SystemdUnit        string
-	SystemdScope       string
-	SystemctlPath      string
-	ApprovalKeyPath    string
-	ApprovalTTLSeconds uint64
+	ControlEnabled bool
+	SystemdUnit    string
+	SystemdScope   string
+	SystemctlPath  string
+	// AllowedServiceActions is the explicit operator allowlist. Operator mode
+	// refuses to start without it.
+	AllowedServiceActions  []string
+	ApproverKeysDir        string
+	ApproverHistoryKeysDir string
+	ControlTargetID        string
+	ApprovalTTLSeconds     uint64
+	ControlStateDir        string
+	AuditClientConfigPath  string
 
 	MaxConcurrent     int
 	RatePerSecond     float64
@@ -141,12 +148,19 @@ func ConfigFromEnv() Config {
 		NodeCgroupPath:      os.Getenv("MITHRIL_NODE_CGROUP_PATH"),
 		BlockSource:         os.Getenv("MITHRIL_BLOCK_SOURCE"),
 
-		ControlEnabled:     parseEnvBool("MITHRIL_MCP_CONTROL_ENABLED", false),
-		SystemdUnit:        envOr("MITHRIL_MCP_SYSTEMD_UNIT", "mithril.service"),
-		SystemdScope:       envOr("MITHRIL_MCP_SYSTEMD_SCOPE", "system"),
-		SystemctlPath:      envOr("MITHRIL_MCP_SYSTEMCTL_PATH", "/usr/bin/systemctl"),
-		ApprovalKeyPath:    os.Getenv("MITHRIL_MCP_APPROVAL_KEY_FILE"),
-		ApprovalTTLSeconds: parseEnvApprovalTTL(),
+		ControlEnabled: parseEnvBool("MITHRIL_MCP_CONTROL_ENABLED", false),
+		// No default: an unset allowlist must fail operator startup rather
+		// than silently permitting every action.
+		AllowedServiceActions:  parseEnvList("MITHRIL_MCP_ALLOWED_ACTIONS"),
+		SystemdUnit:            envOr("MITHRIL_MCP_SYSTEMD_UNIT", "mithril.service"),
+		SystemdScope:           envOr("MITHRIL_MCP_SYSTEMD_SCOPE", "system"),
+		SystemctlPath:          envOr("MITHRIL_MCP_SYSTEMCTL_PATH", "/usr/bin/systemctl"),
+		ApproverKeysDir:        envOr("MITHRIL_MCP_APPROVER_KEYS_DIR", "/etc/mithril-mcp/approvers"),
+		ApproverHistoryKeysDir: os.Getenv("MITHRIL_MCP_APPROVER_HISTORY_KEYS_DIR"),
+		ControlTargetID:        os.Getenv("MITHRIL_MCP_CONTROL_TARGET_ID"),
+		ApprovalTTLSeconds:     parseEnvApprovalTTL(),
+		ControlStateDir:        envOr("MITHRIL_MCP_CONTROL_STATE_DIR", "/var/lib/mithril-mcp/control"),
+		AuditClientConfigPath:  envOr("MITHRIL_MCP_AUDIT_CLIENT_CONFIG", "/etc/mithril-mcp/audit-client.json"),
 
 		MaxConcurrent:     parseEnvPositiveInt("MITHRIL_MCP_MAX_CONCURRENT", DefaultMaxConcurrent),
 		RatePerSecond:     parseEnvPositiveFloat("MITHRIL_MCP_RATE_PER_SECOND", DefaultRatePerSecond),
@@ -204,8 +218,20 @@ func (cfg Config) normalized() Config {
 	if cfg.SystemctlPath == "" {
 		cfg.SystemctlPath = "/usr/bin/systemctl"
 	}
+	if cfg.ApproverKeysDir == "" {
+		cfg.ApproverKeysDir = "/etc/mithril-mcp/approvers"
+	}
+	if cfg.ApproverHistoryKeysDir == "" {
+		cfg.ApproverHistoryKeysDir = cfg.ApproverKeysDir
+	}
 	if cfg.ApprovalTTLSeconds == 0 {
 		cfg.ApprovalTTLSeconds = DefaultApprovalTTLSeconds
+	}
+	if cfg.ControlStateDir == "" {
+		cfg.ControlStateDir = "/var/lib/mithril-mcp/control"
+	}
+	if cfg.AuditClientConfigPath == "" {
+		cfg.AuditClientConfigPath = "/etc/mithril-mcp/audit-client.json"
 	}
 	if cfg.BlockSource != "" {
 		if source, err := ParseBlockSource(cfg.BlockSource); err == nil {
@@ -313,6 +339,22 @@ func parseEnvPositiveFloat(key string, def float64) float64 {
 		return def
 	}
 	return v
+}
+
+// parseEnvList splits a comma-separated environment value. Empty entries are
+// dropped so a trailing comma cannot produce a phantom allowlist member.
+func parseEnvList(key string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func parseEnvBool(key string, def bool) bool {

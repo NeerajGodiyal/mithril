@@ -54,7 +54,9 @@ func validateURL(raw string) (*url.URL, error) {
 		}
 		return u, nil
 	}
-	switch strings.ToLower(host) {
+	// Fully qualified and bare hostnames resolve identically, so normalize all
+	// trailing dots before checking metadata-service names.
+	switch strings.TrimRight(strings.ToLower(host), ".") {
 	case "metadata.google.internal", "metadata.google.com", "instance-data":
 		return nil, fmt.Errorf("URL resolves to blocked metadata service: %s", host)
 	}

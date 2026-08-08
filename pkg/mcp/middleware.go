@@ -165,9 +165,9 @@ func (m *toolCallMiddleware) wrap(next mcpsdk.MethodHandler) mcpsdk.MethodHandle
 		if callResult.IsError {
 			status = "tool_error"
 		}
-		// Only the call budget expiring counts as a timeout; a cancelled parent
-		// is the client going away, which is reported as "cancelled" elsewhere.
-		if ctx.Err() == nil && errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+		if ctx.Err() != nil {
+			status = "cancelled"
+		} else if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
 			status = "timed_out"
 		}
 		finish(status, size)

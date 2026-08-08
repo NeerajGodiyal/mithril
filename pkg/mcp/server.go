@@ -12,7 +12,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Overclock-Validator/mithril/pkg/version"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/term"
 )
 
 // serverVersion is the MCP server's own version, reported in the initialize
@@ -45,6 +47,7 @@ var (
 	annRuntimeDiagnostic = &mcpsdk.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(false), OpenWorldHint: boolPtr(true)}
 	annControlPrepare    = &mcpsdk.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(false), OpenWorldHint: boolPtr(false)}
 	annControlExecute    = &mcpsdk.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(false)}
+	annControlVerify     = &mcpsdk.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(false), IdempotentHint: true, OpenWorldHint: boolPtr(false)}
 	// Dynamic outputs still guarantee an object at the protocol boundary.
 	dynamicObjectOutputSchema = map[string]any{"type": "object"}
 )
@@ -87,6 +90,7 @@ var toolPolicies = map[string]toolPolicy{
 	"mithril_service_status":         {exposureControl, annReadOnlyLocal, "Mithril Service Status"},
 	"mithril_prepare_service_action": {exposureControl, annControlPrepare, "Prepare Service Action"},
 	"mithril_execute_service_action": {exposureControl, annControlExecute, "Execute Service Action"},
+	"mithril_verify_service_action":  {exposureControl, annControlVerify, "Verify Service Action"},
 	"mithril_simulate_transaction":   {exposureDiagnostic, annRuntimeDiagnostic, "Simulate Transaction"},
 	"mithril_tail_log":               {exposureObservation, annReadOnlyLocal, "Recent Node Logs"},
 }
@@ -135,31 +139,58 @@ func addTool[In, Out any](server *mcpsdk.Server, cfg Config, tool *mcpsdk.Tool, 
 	}
 }
 
+func prepareServeConfig(cfg Config) (Config, approvalAuthority, error) {
+	authority, err := validateAndLoadOperatorConfig(cfg)
+	if err != nil {
+		return Config{}, approvalAuthority{}, err
+	}
+	if cfg.BlockSource != "" {
+		if _, err := ParseBlockSource(cfg.BlockSource); err != nil {
+			return Config{}, approvalAuthority{}, err
+		}
+	}
+	return cfg.normalized(), authority, nil
+}
+
+// ValidateServeConfig performs the static startup checks without opening
+// operator state, TLS material, or the off-host audit connection. Serve also
+// verifies those runtime resources before it starts the transport.
+func ValidateServeConfig(cfg Config) error {
+	_, _, err := prepareServeConfig(cfg)
+	return err
+}
+
 // Serve starts the MCP server over stdio and blocks until the client that owns
 // stdin/stdout disconnects or ctx is cancelled. For a remote node, an MCP host
 // can launch this command as the remote command of an SSH stdio connection.
 func Serve(ctx context.Context, cfg Config) error {
-	approvalKey, err := validateAndLoadOperatorConfig(cfg)
+	cfg, authority, err := prepareServeConfig(cfg)
 	if err != nil {
 		return err
 	}
-	defer clear(approvalKey)
-	if cfg.BlockSource != "" {
-		if _, err := ParseBlockSource(cfg.BlockSource); err != nil {
-			return err
-		}
+	runtime, err := openControlRuntime(ctx, cfg, authority)
+	if err != nil {
+		return err
 	}
-	cfg = cfg.normalized()
-	if stdin, err := os.Stdin.Stat(); err == nil {
-		writeInteractiveServeHint(os.Stderr, stdin.Mode())
+	if runtime != nil {
+		defer runtime.close()
 	}
+	writeInteractiveServeHint(
+		os.Stderr,
+		term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())),
+	)
 	telemetry := newAsyncTelemetryWriter(os.Stderr, telemetryQueueCapacity)
 	defer func() {
 		flushCtx, cancel := context.WithTimeout(context.Background(), telemetryShutdownTimeout)
 		defer cancel()
 		_ = telemetry.close(flushCtx)
 	}()
-	server := newServerWithTelemetryAndApprovalKey(cfg, telemetry, approvalKey)
+	server := newServerWithTelemetryAndAuthorityAndRuntime(
+		cfg,
+		telemetry,
+		authority,
+		runtime,
+	)
 	reader := newBoundedFrameReadCloser(os.Stdin, maxStdioInputFrameBytes)
 	frameRate, frameBurst := stdioFrameLimits(cfg)
 	reader.frameAdmission = newTokenBucket(frameRate, frameBurst, time.Now())
@@ -178,8 +209,8 @@ func Serve(ctx context.Context, cfg Config) error {
 	return err
 }
 
-func writeInteractiveServeHint(writer io.Writer, mode os.FileMode) {
-	if mode&os.ModeCharDevice != 0 {
+func writeInteractiveServeHint(writer io.Writer, terminal bool) {
+	if terminal {
 		_, _ = fmt.Fprintln(writer, interactiveServeMessage)
 	}
 }
@@ -196,7 +227,25 @@ func stdioFrameLimits(cfg Config) (float64, int) {
 	return rate, burst
 }
 
-func newServerWithTelemetryAndApprovalKey(cfg Config, telemetry telemetrySink, approvalKey []byte) *mcpsdk.Server {
+func newServerWithTelemetryAndAuthority(
+	cfg Config,
+	telemetry telemetrySink,
+	authority approvalAuthority,
+) *mcpsdk.Server {
+	return newServerWithTelemetryAndAuthorityAndRuntime(
+		cfg,
+		telemetry,
+		authority,
+		nil,
+	)
+}
+
+func newServerWithTelemetryAndAuthorityAndRuntime(
+	cfg Config,
+	telemetry telemetrySink,
+	authority approvalAuthority,
+	runtime *controlRuntime,
+) *mcpsdk.Server {
 	cfg = cfg.normalized()
 	server := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:    "mithril",
@@ -209,7 +258,7 @@ func newServerWithTelemetryAndApprovalKey(cfg Config, telemetry telemetrySink, a
 		},
 	})
 
-	registerTools(server, cfg, approvalKey)
+	registerTools(server, cfg, authority, runtime)
 	server.AddReceivingMiddleware(newToolCallMiddlewareWithTelemetry(cfg, telemetry))
 	return server
 }
@@ -277,16 +326,16 @@ func (r *boundedFrameReadCloser) Read(p []byte) (int, error) {
 			r.terminalRead = errStdioInputFrameInvalid
 			return 0, r.terminalRead
 		}
-		if r.frameAdmission != nil && !r.frameAdmission.wait() {
-			r.terminalRead = errStdioInputFrameRateLimited
-			return 0, r.terminalRead
-		}
 		if len(bytes.TrimSpace(payload)) == 0 {
 			if errors.Is(readErr, io.EOF) {
 				r.terminalRead = io.EOF
 				return 0, io.EOF
 			}
 			continue
+		}
+		if r.frameAdmission != nil && !r.frameAdmission.wait() {
+			r.terminalRead = errStdioInputFrameRateLimited
+			return 0, r.terminalRead
 		}
 
 		decoder := json.NewDecoder(bytes.NewReader(payload))
@@ -330,7 +379,11 @@ func serverInstructions(profile Profile) string {
 		instructions += " Diagnostic tools may profile, simulate, or add node log entries; check their annotations."
 	}
 	if profile == ProfileOperator {
-		return instructions + " Lifecycle actions require a separate, short-lived operator approval token; preparing an action does not execute it."
+		return instructions +
+			" Lifecycle actions require a short-lived Ed25519 approval from a separate approver; preparing an action does not execute it." +
+			" Treat the systemd outcome and node readiness as separate results." +
+			" For dispatch_started, dispatched, or verifying phases, call mithril_verify_service_action with the same action ID and never repeat the action." +
+			" A terminal outcome_unknown is never retried; follow its new_action_allowed_at and fresh-approval instructions."
 	}
 	return instructions + " No tool changes node process state, ledger state, or account state."
 }
@@ -353,8 +406,13 @@ func isCleanShutdown(err error) bool {
 }
 
 // registerTools registers the complete catalog for the selected profile.
-func registerTools(server *mcpsdk.Server, cfg Config, approvalKey []byte) {
-	registerInfoTool(server, cfg)
+func registerTools(
+	server *mcpsdk.Server,
+	cfg Config,
+	authority approvalAuthority,
+	runtime *controlRuntime,
+) {
+	registerInfoTool(server, cfg, authority)
 	registerMetricsTools(server, cfg)
 	registerRPCTools(server, cfg)
 	registerLogTools(server, cfg)
@@ -366,13 +424,15 @@ func registerTools(server *mcpsdk.Server, cfg Config, approvalKey []byte) {
 	registerRewardsTool(server, cfg)
 	registerDiagnoseTool(server, cfg)
 	registerHostTools(server, cfg)
-	registerControlTools(server, cfg, approvalKey)
+	registerControlTools(server, cfg, authority, runtime)
 }
 
 type infoInput struct{}
 
 type infoOutput struct {
 	ServerVersion          string               `json:"server_version"`
+	BuildVersion           string               `json:"build_version"`
+	BuildCommit            string               `json:"build_commit"`
 	Profile                Profile              `json:"profile"`
 	DiagnosticToolsExposed bool                 `json:"diagnostic_tools_exposed"`
 	OperatorToolsExposed   bool                 `json:"operator_tools_exposed"`
@@ -393,9 +453,16 @@ type infoOutput struct {
 	BlockSource            string               `json:"block_source,omitempty"`
 	NodeCgroupConfigured   bool                 `json:"node_cgroup_configured"`
 	ControlConfigured      bool                 `json:"control_configured"`
-	ServiceUnit            string               `json:"service_unit,omitempty"`
-	SystemdScope           string               `json:"systemd_scope,omitempty"`
-	ApprovalTTLSeconds     uint64               `json:"approval_ttl_seconds,omitempty"`
+	ControlTargetID        string               `json:"control_target_id,omitempty"`
+	ApproverKeyIDs         []string             `json:"approver_key_ids,omitempty"`
+	// AllowedServiceActions is the explicit operator allowlist. Reported so a
+	// caller can see what this deployment permits BEFORE attempting an action,
+	// rather than discovering it from a rejection.
+	AllowedServiceActions    []string `json:"allowed_service_actions,omitempty"`
+	ServiceUnit              string   `json:"service_unit,omitempty"`
+	SystemdScope             string   `json:"systemd_scope,omitempty"`
+	ApprovalTTLSeconds       uint64   `json:"approval_ttl_seconds,omitempty"`
+	ServiceActionWaitSeconds uint64   `json:"service_action_wait_seconds,omitempty"`
 }
 
 type infoThresholdsOutput struct {
@@ -406,18 +473,19 @@ type infoThresholdsOutput struct {
 }
 
 type infoLimitsOutput struct {
-	MaxConcurrent      int     `json:"max_concurrent"`
-	RatePerSecond      float64 `json:"rate_per_second"`
-	RateBurst          int     `json:"rate_burst"`
-	OutputBudgetBytes  int     `json:"output_budget_bytes"`
-	OutputBudgetScope  string  `json:"output_budget_scope"`
-	MaxInputFrameBytes int     `json:"max_input_frame_bytes"`
-	InputFramesPerSec  float64 `json:"input_frames_per_second"`
-	InputFrameBurst    int     `json:"input_frame_burst"`
+	MaxConcurrent          int     `json:"max_concurrent"`
+	RatePerSecond          float64 `json:"rate_per_second"`
+	RateBurst              int     `json:"rate_burst"`
+	OutputBudgetBytes      int     `json:"output_budget_bytes"`
+	OutputBudgetScope      string  `json:"output_budget_scope"`
+	ToolCallTimeoutSeconds uint64  `json:"tool_call_timeout_seconds"`
+	MaxInputFrameBytes     int     `json:"max_input_frame_bytes"`
+	InputFramesPerSec      float64 `json:"input_frames_per_second"`
+	InputFrameBurst        int     `json:"input_frame_burst"`
 }
 
 // registerInfoTool reports the server's effective configuration without I/O.
-func registerInfoTool(server *mcpsdk.Server, cfg Config) {
+func registerInfoTool(server *mcpsdk.Server, cfg Config, authority approvalAuthority) {
 	addTool(server, cfg, &mcpsdk.Tool{
 		Name:        "mithril_mcp_info",
 		Annotations: annReadOnlyLocal,
@@ -429,15 +497,20 @@ func registerInfoTool(server *mcpsdk.Server, cfg Config) {
 		frameRate, frameBurst := stdioFrameLimits(cfg)
 		out := infoOutput{
 			ServerVersion:          serverVersion,
+			BuildVersion:           version.Version,
+			BuildCommit:            version.GitCommit,
 			Profile:                cfg.Profile,
 			DiagnosticToolsExposed: diagnostic,
 			OperatorToolsExposed:   operator,
 			Limits: infoLimitsOutput{
-				MaxConcurrent:      cfg.MaxConcurrent,
-				RatePerSecond:      cfg.RatePerSecond,
-				RateBurst:          cfg.RateBurst,
-				OutputBudgetBytes:  cfg.OutputBudgetBytes,
-				OutputBudgetScope:  outputBudgetScope,
+				MaxConcurrent:     cfg.MaxConcurrent,
+				RatePerSecond:     cfg.RatePerSecond,
+				RateBurst:         cfg.RateBurst,
+				OutputBudgetBytes: cfg.OutputBudgetBytes,
+				OutputBudgetScope: outputBudgetScope,
+				ToolCallTimeoutSeconds: uint64(
+					cfg.ToolCallTimeout / time.Second,
+				),
 				MaxInputFrameBytes: maxStdioInputFrameBytes,
 				InputFramesPerSec:  frameRate,
 				InputFrameBurst:    frameBurst,
@@ -460,15 +533,27 @@ func registerInfoTool(server *mcpsdk.Server, cfg Config) {
 			ReferenceRPC:         cfg.ReferenceRPCURL != "",
 			BlockSource:          cfg.BlockSource,
 			NodeCgroupConfigured: cfg.NodeCgroupPath != "",
-			ControlConfigured:    operator && cfg.ControlEnabled && cfg.ApprovalKeyPath != "",
+			ControlConfigured:    operator && cfg.ControlEnabled && authority.configured(),
 		}
 		if metricsConfigured {
 			out.MetricsOrigin = sanitizeEndpointForDisplay(cfg.MetricsURL)
 		}
 		if operator {
+			out.ControlTargetID = cfg.ControlTargetID
+			out.ApproverKeyIDs = authority.keyIDs()
 			out.ServiceUnit = cfg.SystemdUnit
 			out.SystemdScope = cfg.SystemdScope
+			// Report the parsed allowlist, not the raw config: what is shown
+			// is exactly what dispatch will accept.
+			if allowed, err := parseAllowedServiceActions(cfg.AllowedServiceActions); err == nil {
+				for _, action := range []serviceAction{actionStart, actionStop, actionRestart} {
+					if allowed[action] {
+						out.AllowedServiceActions = append(out.AllowedServiceActions, string(action))
+					}
+				}
+			}
 			out.ApprovalTTLSeconds = cfg.ApprovalTTLSeconds
+			out.ServiceActionWaitSeconds = uint64(actionTimeout / time.Second)
 		}
 		if diagnostic {
 			out.PprofOrigin = configuredOrigin(cfg.PprofURL)
