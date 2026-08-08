@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"strings"
@@ -44,11 +45,9 @@ func (endpoint tpuEndpoint) String() string {
 }
 
 type sendTransactionConfig struct {
-	encoding            string
-	skipPreflight       bool
-	preflightCommitment string
-	maxRetries          *uint
-	minContextSlot      *uint64
+	encoding       string
+	skipPreflight  bool
+	minContextSlot *uint64
 }
 
 const (
@@ -59,6 +58,7 @@ const (
 	sendTransactionTargetCount              = sendTransactionLeaderForwardCount + 1
 	sendTransactionLeaderLookahead          = 64
 	sendTransactionClusterNodesRefreshEvery = 10 * time.Minute
+	sendTransactionLeaderRefreshTimeout     = 2 * time.Second
 	sendTransactionTPUSendTimeout           = 3 * time.Second
 	maxSanitizedInstructionCount            = 64
 )
@@ -68,6 +68,9 @@ var errInvalidSanitizedTransaction = &InvalidParamsError{
 }
 
 func (rpcServer *RpcServer) SendTransaction(ctx context.Context, p jsonrpc.RawParams) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	params, err := jsonrpc.DecodeParams[[]interface{}](p)
 	if err != nil {
 		return "", &InvalidParamsError{Message: fmt.Sprintf("decoding params: %v", err)}
@@ -81,24 +84,32 @@ func (rpcServer *RpcServer) SendTransaction(ctx context.Context, p jsonrpc.RawPa
 		return "", &InvalidParamsError{Message: "sendTransaction requires a transaction string as first parameter"}
 	}
 
-	conf := parseSendTransactionConfig(params)
+	conf, err := parseSendTransactionConfig(params)
+	if err != nil {
+		return "", err
+	}
 
 	tx, wire, err := decodeSendTransaction(txStr, conf.encoding)
 	if err != nil {
 		return "", err
 	}
 
+	slotCtx := rpcServer.getSlotCtx()
 	// Legacy and already-expanded txs can be bounds-checked immediately.
-	if err := validateSendTransactionSanitize(tx, featuresForSendValidation(rpcServer.getSlotCtx()), shouldValidateInstructionIndexes(tx)); err != nil {
+	if err := validateSendTransactionSanitize(tx, featuresForSendValidation(slotCtx), shouldValidateInstructionIndexes(tx)); err != nil {
 		return "", err
 	}
 
-	if conf.minContextSlot != nil && global.Slot() < *conf.minContextSlot {
-		return "", &MinContextSlotNotReachedError{ContextSlot: *conf.minContextSlot}
+	if conf.minContextSlot != nil {
+		if slotCtx == nil || slotCtx.Slot < *conf.minContextSlot {
+			return "", &MinContextSlotNotReachedError{ContextSlot: *conf.minContextSlot}
+		}
 	}
 
 	if !conf.skipPreflight {
-		slotCtx := rpcServer.getSlotCtx()
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if slotCtx == nil {
 			return "", fmt.Errorf("node is not ready for transaction preflight")
 		}
@@ -112,45 +123,92 @@ func (rpcServer *RpcServer) SendTransaction(ctx context.Context, p jsonrpc.RawPa
 		return "", err
 	}
 
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	// Record the attempt immediately before forwarding. If forwarding fails
+	// partway the transaction may still have reached a leader, so that outcome
+	// remains explicitly ambiguous until replay supplies evidence.
+	if err := rpcServer.recordSubmissionAttempt(tx, signature); err != nil {
+		return "", err
+	}
 	if err := rpcServer.forwardTransactionToUpcomingLeaders(ctx, wire); err != nil {
 		return "", err
 	}
+	rpcServer.recordSubmissionForwarded(signature)
 
 	return signature.String(), nil
 }
 
-func parseSendTransactionConfig(params []interface{}) sendTransactionConfig {
+func parseSendTransactionConfig(params []interface{}) (sendTransactionConfig, error) {
 	conf := sendTransactionConfig{
 		encoding: "base58",
 	}
+	if len(params) > 2 {
+		return conf, &InvalidParamsError{Message: "sendTransaction accepts at most two parameters"}
+	}
 	if len(params) < 2 {
-		return conf
+		return conf, nil
 	}
 
 	confMap, ok := params[1].(map[string]interface{})
 	if !ok {
-		return conf
+		return conf, &InvalidParamsError{Message: "sendTransaction config must be an object"}
 	}
 
-	if encoding, ok := confMap["encoding"].(string); ok {
+	if value, exists := confMap["encoding"]; exists {
+		encoding, ok := value.(string)
+		if !ok {
+			return conf, invalidRPCOption("sendTransaction", "encoding", "must be a string")
+		}
 		conf.encoding = encoding
 	}
-	if skipPreflight, ok := confMap["skipPreflight"].(bool); ok {
+	if value, exists := confMap["skipPreflight"]; exists {
+		skipPreflight, ok := value.(bool)
+		if !ok {
+			return conf, invalidRPCOption("sendTransaction", "skipPreflight", "must be a boolean")
+		}
 		conf.skipPreflight = skipPreflight
 	}
-	if preflightCommitment, ok := confMap["preflightCommitment"].(string); ok {
-		conf.preflightCommitment = preflightCommitment
+	if value, exists := confMap["preflightCommitment"]; exists {
+		preflightCommitment, ok := value.(string)
+		if !ok {
+			return conf, invalidRPCOption("sendTransaction", "preflightCommitment", "must be a string")
+		}
+		if preflightCommitment != "processed" {
+			return conf, invalidRPCOption("sendTransaction", "preflightCommitment", `only "processed" is supported`)
+		}
 	}
-	if maxRetries, ok := confMap["maxRetries"].(float64); ok && maxRetries >= 0 {
-		v := uint(maxRetries)
-		conf.maxRetries = &v
+	if value, exists := confMap["maxRetries"]; exists {
+		maxRetries, err := parseExactJSONUint(value, "sendTransaction", "maxRetries")
+		if err != nil {
+			return conf, err
+		}
+		if maxRetries != 0 {
+			return conf, invalidRPCOption("sendTransaction", "maxRetries", "only 0 is supported")
+		}
 	}
-	if minContextSlot, ok := confMap["minContextSlot"].(float64); ok && minContextSlot >= 0 {
-		v := uint64(minContextSlot)
-		conf.minContextSlot = &v
+	if value, exists := confMap["minContextSlot"]; exists {
+		minContextSlot, err := parseExactJSONUint(value, "sendTransaction", "minContextSlot")
+		if err != nil {
+			return conf, err
+		}
+		conf.minContextSlot = &minContextSlot
 	}
 
-	return conf
+	return conf, nil
+}
+
+func parseExactJSONUint(value interface{}, method, name string) (uint64, error) {
+	number, ok := value.(float64)
+	if !ok || number < 0 || number != math.Trunc(number) || number > 1<<53-1 {
+		return 0, invalidRPCOption(method, name, "must be a non-negative exact integer")
+	}
+	return uint64(number), nil
+}
+
+func invalidRPCOption(method, name, reason string) error {
+	return &InvalidParamsError{Message: fmt.Sprintf("invalid %s %s: %s", method, name, reason)}
 }
 
 func decodeSendTransaction(txStr string, encoding string) (*solana.Transaction, []byte, error) {
@@ -255,6 +313,9 @@ func firstSignature(tx *solana.Transaction) (solana.Signature, error) {
 }
 
 func (rpcServer *RpcServer) preflightSendTransaction(ctx context.Context, tx *solana.Transaction, slotCtx *sealevel.SlotCtx) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := rpcServer.resolveAddressTablesForPreflight(ctx, tx, slotCtx); err != nil {
 		return err
 	}
@@ -267,6 +328,9 @@ func (rpcServer *RpcServer) preflightSendTransaction(ctx context.Context, tx *so
 		return signaturePreflightFailure()
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	output := replay.LoadAndExecuteTransaction(replay.LoadAndExecuteTransactionInput{
 		SlotCtx:                 slotCtx,
 		Transaction:             tx,
@@ -274,6 +338,9 @@ func (rpcServer *RpcServer) preflightSendTransaction(ctx context.Context, tx *so
 		IsSimulation:            true,
 		RecordInnerInstructions: false,
 	})
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if output.ProcessingResult.TransactionError == nil {
 		return nil
@@ -469,7 +536,7 @@ func (rpcServer *RpcServer) resolveUpcomingLeaderTPUEndpoints(ctx context.Contex
 	targets, updatedAt := rpcServer.collectUpcomingLeaderTPUEndpointsFromCache(want)
 	cacheStale := updatedAt.IsZero() || time.Since(updatedAt) >= rpcServer.clusterNodesRefreshInterval()
 	if cacheStale || len(targets) < want {
-		if err := rpcServer.refreshLeaderTPUCache(ctx); err != nil {
+		if err := rpcServer.refreshLeaderTPUCacheForSend(ctx); err != nil {
 			if len(targets) == 0 {
 				return nil, err
 			}
@@ -483,6 +550,16 @@ func (rpcServer *RpcServer) resolveUpcomingLeaderTPUEndpoints(ctx context.Contex
 		return nil, fmt.Errorf("unable to resolve TPU addresses for upcoming leaders from current leader schedule")
 	}
 	return targets, nil
+}
+
+func (rpcServer *RpcServer) refreshLeaderTPUCacheForSend(ctx context.Context) error {
+	timeout := sendTransactionLeaderRefreshTimeout
+	if configured := rpcServer.clusterNodesRefreshTimeout; configured > 0 && configured < timeout {
+		timeout = configured
+	}
+	refreshCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return rpcServer.refreshLeaderTPUCache(refreshCtx)
 }
 
 func (rpcServer *RpcServer) fetchClusterNodes(ctx context.Context) ([]*solanarpc.GetClusterNodesResult, error) {

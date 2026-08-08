@@ -8,7 +8,6 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
-	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -127,6 +126,9 @@ type simulateAccountsConfig struct {
 func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.RawParams) (SimulateTransactionResp, error) {
 	metrics.GlobalSimulate.TotalCalls.Inc()
 	defer metrics.GlobalSimulate.HandlerLatency.AddTimingSince(time.Now())
+	if err := ctx.Err(); err != nil {
+		return SimulateTransactionResp{}, err
+	}
 
 	params, err := jsonrpc.DecodeParams[[]interface{}](p)
 	if err != nil {
@@ -142,7 +144,10 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 		return SimulateTransactionResp{}, &InvalidParamsError{Message: "simulateTransaction requires a transaction string as first parameter"}
 	}
 
-	conf := parseSimulateConfig(params)
+	conf, err := parseSimulateConfig(params)
+	if err != nil {
+		return SimulateTransactionResp{}, err
+	}
 
 	// Validate the encoding name BEFORE attempting tx decode so a bad
 	// encoding surfaces as "unsupported encoding: …" not "failed to decode".
@@ -199,21 +204,8 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 				Message: "base58 encoding not supported",
 			}
 		}
-	}
-
-	if conf.minContextSlot != nil && global.Slot() < *conf.minContextSlot {
-		return SimulateTransactionResp{}, &MinContextSlotNotReachedError{
-			ContextSlot: *conf.minContextSlot,
-		}
-	}
-
-	var replacementBlockhash *ReplacementBlockhashPayload
-	if conf.replaceRecentBlockhash {
-		latestBlockhash := global.LatestBlockHash()
-		tx.Message.RecentBlockhash = solana.Hash(latestBlockhash)
-		replacementBlockhash = &ReplacementBlockhashPayload{
-			Blockhash:            base58.Encode(latestBlockhash[:]),
-			LastValidBlockHeight: global.BlockHeight(),
+		if _, err := parseGetAcctDataEncodingType(conf.accounts.encoding); err != nil {
+			return SimulateTransactionResp{}, &InvalidParamsError{Message: err.Error()}
 		}
 	}
 
@@ -221,12 +213,30 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 	if slotCtx == nil {
 		return SimulateTransactionResp{}, fmt.Errorf("node is not ready for simulation")
 	}
+	if conf.minContextSlot != nil && slotCtx.Slot < *conf.minContextSlot {
+		return SimulateTransactionResp{}, &MinContextSlotNotReachedError{
+			ContextSlot: *conf.minContextSlot,
+		}
+	}
+
+	var replacementBlockhash *ReplacementBlockhashPayload
+	if conf.replaceRecentBlockhash {
+		lastValidBlockHeight, ok := recentBlockhashLastValidHeight(slotCtx.BlockHeight)
+		if !ok {
+			return SimulateTransactionResp{}, fmt.Errorf("block height is too large to calculate blockhash validity")
+		}
+		tx.Message.RecentBlockhash = solana.Hash(slotCtx.Blockhash)
+		replacementBlockhash = &ReplacementBlockhashPayload{
+			Blockhash:            base58.Encode(slotCtx.Blockhash[:]),
+			LastValidBlockHeight: lastValidBlockHeight,
+		}
+	}
 
 	// ALT resolve runs before sigVerify so the failure response carries the
 	// resolved loadedAddresses, not empty arrays.
 	if err := replay.ResolveAddrTableLookupsForTx(ctx, rpcServer.acctsDb, slotCtx.Slot, tx); err != nil {
 		metrics.GlobalSimulate.AddressLookupFails.Inc()
-		return earlyFailResponse("AddressLookupTableNotFound", replacementBlockhash, conf, tx), nil
+		return earlyFailResponse("AddressLookupTableNotFound", replacementBlockhash, conf, tx, slotCtx.Slot), nil
 	}
 
 	// Cap uses post-ALT-resolve key count; pre-resolve would reject valid
@@ -243,10 +253,13 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 	if conf.sigVerify {
 		err = tx.VerifySignatures()
 		if err != nil {
-			return earlyFailResponse("SignatureFailure", replacementBlockhash, conf, tx), nil
+			return earlyFailResponse("SignatureFailure", replacementBlockhash, conf, tx, slotCtx.Slot), nil
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return SimulateTransactionResp{}, err
+	}
 	output := replay.LoadAndExecuteTransaction(replay.LoadAndExecuteTransactionInput{
 		SlotCtx:                 slotCtx,
 		Transaction:             tx,
@@ -254,6 +267,9 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 		IsSimulation:            true,
 		RecordInnerInstructions: conf.innerInstructions,
 	})
+	if err := ctx.Err(); err != nil {
+		return SimulateTransactionResp{}, err
+	}
 
 	// Default to empty slice so JSON marshals "logs":[] not null when the
 	// simulator ran.
@@ -268,7 +284,7 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 	resp := SimulateTransactionResp{
 		Context: SimulateTransactionRespContext{
 			ApiVersion: "mithril 0.1",
-			Slot:       global.Slot(),
+			Slot:       slotCtx.Slot,
 		},
 		Value: SimulateTransactionRespValue{
 			Logs:                 ptrSlice(logs),
@@ -399,61 +415,107 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 	return resp, nil
 }
 
-func parseSimulateConfig(params []interface{}) simulateTransactionConfig {
+func parseSimulateConfig(params []interface{}) (simulateTransactionConfig, error) {
 	conf := simulateTransactionConfig{
 		encoding: "base64",
 	}
 
+	if len(params) > 2 {
+		return conf, &InvalidParamsError{Message: "simulateTransaction accepts at most two parameters"}
+	}
 	if len(params) < 2 {
-		return conf
+		return conf, nil
 	}
 
 	confMap, ok := params[1].(map[string]interface{})
 	if !ok {
-		return conf
+		return conf, &InvalidParamsError{Message: "simulateTransaction config must be an object"}
 	}
 
-	if sigVerify, ok := confMap["sigVerify"].(bool); ok {
+	if value, exists := confMap["sigVerify"]; exists {
+		sigVerify, ok := value.(bool)
+		if !ok {
+			return conf, invalidRPCOption("simulateTransaction", "sigVerify", "must be a boolean")
+		}
 		conf.sigVerify = sigVerify
 	}
 
-	if replaceRecentBlockhash, ok := confMap["replaceRecentBlockhash"].(bool); ok {
+	if value, exists := confMap["replaceRecentBlockhash"]; exists {
+		replaceRecentBlockhash, ok := value.(bool)
+		if !ok {
+			return conf, invalidRPCOption("simulateTransaction", "replaceRecentBlockhash", "must be a boolean")
+		}
 		conf.replaceRecentBlockhash = replaceRecentBlockhash
 	}
 
-	if encoding, ok := confMap["encoding"].(string); ok {
+	if value, exists := confMap["encoding"]; exists {
+		encoding, ok := value.(string)
+		if !ok {
+			return conf, invalidRPCOption("simulateTransaction", "encoding", "must be a string")
+		}
 		conf.encoding = encoding
 	}
 
-	if commitment, ok := confMap["commitment"].(string); ok {
+	if value, exists := confMap["commitment"]; exists {
+		commitment, ok := value.(string)
+		if !ok {
+			return conf, invalidRPCOption("simulateTransaction", "commitment", "must be a string")
+		}
+		if commitment != "processed" {
+			return conf, invalidRPCOption("simulateTransaction", "commitment", `only "processed" is supported`)
+		}
 		conf.commitment = commitment
 	}
 
-	if minSlot, ok := confMap["minContextSlot"].(float64); ok && minSlot >= 0 {
-		v := uint64(minSlot)
-		conf.minContextSlot = &v
+	if value, exists := confMap["minContextSlot"]; exists {
+		minContextSlot, err := parseExactJSONUint(value, "simulateTransaction", "minContextSlot")
+		if err != nil {
+			return conf, err
+		}
+		conf.minContextSlot = &minContextSlot
 	}
 
-	if innerInstr, ok := confMap["innerInstructions"].(bool); ok {
+	if value, exists := confMap["innerInstructions"]; exists {
+		innerInstr, ok := value.(bool)
+		if !ok {
+			return conf, invalidRPCOption("simulateTransaction", "innerInstructions", "must be a boolean")
+		}
 		conf.innerInstructions = innerInstr
 	}
 
-	if accountsObj, ok := confMap["accounts"].(map[string]interface{}); ok {
+	if value, exists := confMap["accounts"]; exists {
+		accountsObj, ok := value.(map[string]interface{})
+		if !ok {
+			return conf, invalidRPCOption("simulateTransaction", "accounts", "must be an object")
+		}
 		acctConf := &simulateAccountsConfig{}
-		if addresses, ok := accountsObj["addresses"].([]interface{}); ok {
+		if value, exists := accountsObj["addresses"]; exists {
+			addresses, ok := value.([]interface{})
+			if !ok {
+				return conf, invalidRPCOption("simulateTransaction", "accounts.addresses", "must be an array of strings")
+			}
 			for _, addr := range addresses {
-				if addrStr, ok := addr.(string); ok {
-					acctConf.addresses = append(acctConf.addresses, addrStr)
+				addrStr, ok := addr.(string)
+				if !ok {
+					return conf, invalidRPCOption("simulateTransaction", "accounts.addresses", "must be an array of strings")
 				}
+				if _, err := solana.PublicKeyFromBase58(addrStr); err != nil {
+					return conf, invalidRPCOption("simulateTransaction", "accounts.addresses", "contains an invalid public key")
+				}
+				acctConf.addresses = append(acctConf.addresses, addrStr)
 			}
 		}
-		if encoding, ok := accountsObj["encoding"].(string); ok {
+		if value, exists := accountsObj["encoding"]; exists {
+			encoding, ok := value.(string)
+			if !ok {
+				return conf, invalidRPCOption("simulateTransaction", "accounts.encoding", "must be a string")
+			}
 			acctConf.encoding = encoding
 		}
 		conf.accounts = acctConf
 	}
 
-	return conf
+	return conf, nil
 }
 
 // postBalancesFromExecCtx returns the lamport balance of every account key
@@ -550,7 +612,13 @@ func clampReturnData(data []byte) []byte {
 // completed (sigVerify-fail path), the resolved writable/readonly arrays
 // are emitted. For pre-ALT failures (ALT-not-found), tx may be nil or
 // not-yet-resolved, in which case loadedAddresses is the empty payload.
-func earlyFailResponse(errStr string, replacementBlockhash *ReplacementBlockhashPayload, conf simulateTransactionConfig, tx *solana.Transaction) SimulateTransactionResp {
+func earlyFailResponse(
+	errStr string,
+	replacementBlockhash *ReplacementBlockhashPayload,
+	conf simulateTransactionConfig,
+	tx *solana.Transaction,
+	slot uint64,
+) SimulateTransactionResp {
 	zeroUnits := uint64(0)
 	zeroSize := uint32(0)
 	emptyLogs := []string{}
@@ -561,7 +629,7 @@ func earlyFailResponse(errStr string, replacementBlockhash *ReplacementBlockhash
 	resp := SimulateTransactionResp{
 		Context: SimulateTransactionRespContext{
 			ApiVersion: "mithril 0.1",
-			Slot:       global.Slot(),
+			Slot:       slot,
 		},
 		Value: SimulateTransactionRespValue{
 			Err:                    errStr,
@@ -603,6 +671,7 @@ func ptrSliceTokenBalance(s []TokenBalancePayload) *[]TokenBalancePayload {
 // in caller-specified order. Lookup precedence:
 //  1. post-execution transaction context (most up-to-date for tx accounts)
 //  2. accountsdb fallback (for addresses NOT touched by the tx)
+//
 // Each entry is nil (JSON null) when the address can't be resolved.
 // Always returns a slice of length len(conf.accounts.addresses), matching
 // Agave so clients can index by request order.
