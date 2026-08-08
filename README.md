@@ -125,10 +125,11 @@ go version
 make build
 ```
 
-This builds the `mithril` and `mithril-monitor` binaries with version, commit,
-and branch information embedded. Alternatively, use `make release` for smaller
-binaries with debug symbols stripped. See the [Mithril MCP quick
-start](docs/mcp.md) for client setup.
+This builds the `mithril`, `mithril-monitor`, and `mithril-notifier` binaries
+with version, commit, and branch information embedded. Alternatively, use
+`make release` for smaller binaries with debug symbols stripped. See the
+[Mithril MCP quick start](docs/mcp.md) for client setup and the [monitoring
+guide](prometheus/README.md) for node alerts.
 
 ### Configuration
 
