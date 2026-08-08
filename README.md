@@ -123,7 +123,10 @@ go version
 make build
 ```
 
-This builds the `mithril` binary with version, commit, and branch information embedded. Alternatively, you can use `make release` for a smaller binary with debug symbols stripped.
+This builds the `mithril` and `mithril-audit` binaries with version, commit, and
+branch information embedded. Alternatively, use `make release` for smaller
+binaries with debug symbols stripped. See the [MCP operator guide](docs/mcp-operator.md)
+for separately approved service controls.
 
 ### Configuration
 
