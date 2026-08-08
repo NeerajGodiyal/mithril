@@ -60,10 +60,16 @@ var SlotSkipped = errors.New("slot skipped")
 // attempt and a hard timeout. Used by the trailing verifier, which does its
 // own scheduling/backoff and must never block the caller for long.
 func (fetcher *RpcClient) GetBlockFinalizedOnce(slot uint64) (*rpc.GetBlockResult, error) {
+	return fetcher.GetBlockFinalizedOnceContext(context.Background(), slot)
+}
+
+// GetBlockFinalizedOnceContext is GetBlockFinalizedOnce with caller-owned
+// cancellation. The per-call timeout remains an upper bound.
+func (fetcher *RpcClient) GetBlockFinalizedOnceContext(ctx context.Context, slot uint64) (*rpc.GetBlockResult, error) {
 	includeRewards := false
 	maxSupportedTxVer := uint64(0)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	result, err := fetcher.client.GetBlockWithOpts(

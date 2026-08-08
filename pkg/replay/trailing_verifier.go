@@ -3,12 +3,12 @@ package replay
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
-	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -33,57 +33,43 @@ import (
 // VerifierConfig configures the trailing verifier ([verifier] section).
 type VerifierConfig struct {
 	Enabled             bool
-	LagSlots            uint64 // don't attempt verification until executedTip - LagSlots
-	MaxRPS              int    // verifier's own RPC budget (never shares block fetch)
-	Required            bool   // gate folds on the verified watermark
-	ValidatorFooterHash bool   // validator mode uses certified footer/local bank-hash parity, never RPC blocks
+	LagSlots            uint64        // don't attempt verification until executedTip - LagSlots
+	MaxRPS              int           // verifier's own RPC budget (never shares block fetch)
+	StallWindow         time.Duration // max time behind without watermark progress
+	Required            bool          // gate folds on the verified watermark
+	ValidatorFooterHash bool          // validator mode uses footer/local bank-hash parity, never RPC blocks
 }
 
+const (
+	defaultTrailingVerifierMaxRPS = 8
+	maxTrailingVerifierRPS        = 1000
+)
+
 // TrailingVerifierDefaults returns the default configuration: enabled,
-// required, 32-slot lag, 8 requests/second.
+// required, 32-slot lag, 8 requests/second, and a five-minute stall window.
 func TrailingVerifierDefaults() VerifierConfig {
-	return VerifierConfig{Enabled: true, LagSlots: 32, MaxRPS: 8, Required: true}
+	return VerifierConfig{
+		Enabled:     true,
+		LagSlots:    32,
+		MaxRPS:      defaultTrailingVerifierMaxRPS,
+		StallWindow: 5 * time.Minute,
+		Required:    true,
+	}
+}
+
+// ValidateTrailingVerifierMaxRPS rejects values that cannot form a useful
+// verifier cadence. The verifier issues requests serially, so a 1 ms cadence
+// is already well above its practical throughput.
+func ValidateTrailingVerifierMaxRPS(maxRPS int) error {
+	if maxRPS < 1 || maxRPS > maxTrailingVerifierRPS {
+		return fmt.Errorf("verifier.max_rps must be between 1 and %d", maxTrailingVerifierRPS)
+	}
+	return nil
 }
 
 // TrailingVerifierCfg is the active configuration ([verifier] section), set by
 // node startup before ReplayBlocks.
 var TrailingVerifierCfg = TrailingVerifierDefaults()
-
-// recordReplayDivergenceEvidence persists a confirmed execution divergence to
-// the state file (written on shutdown), so restarts refuse to fold at or past
-// the disputed slot until the operator clears the evidence after triage.
-func recordReplayDivergenceEvidence(st *state.MithrilState, d *ReplayDivergence) {
-	if st == nil || d == nil {
-		return
-	}
-	for _, ev := range st.ReplayDivergenceEvidence {
-		if ev.Slot == d.Slot && ev.TxIndex == d.TxIndex && ev.Kind == d.Kind {
-			return
-		}
-	}
-	st.ReplayDivergenceEvidence = append(st.ReplayDivergenceEvidence, state.ReplayDivergenceRecord{
-		Slot:        d.Slot,
-		TxIndex:     d.TxIndex,
-		TxSignature: d.TxSignature,
-		Kind:        d.Kind,
-		Detail:      d.Detail,
-		RecordedAt:  time.Now().UTC().Format(time.RFC3339),
-	})
-	mlog.Log.Errorf("replay divergence evidence recorded for slot %d (%s) — folds blocked at that slot until cleared", d.Slot, d.Kind)
-}
-
-// ReplayDivergence identifies the first verified execution mismatch.
-type ReplayDivergence struct {
-	Slot        uint64
-	TxIndex     int
-	TxSignature string
-	Kind        string // "tx_record", "tx_count", "skip_mismatch", "missing_record"
-	Detail      string
-}
-
-func (d *ReplayDivergence) Error() string {
-	return fmt.Sprintf("replay divergence at slot %d tx %d (%s): %s — %s", d.Slot, d.TxIndex, d.TxSignature, d.Kind, d.Detail)
-}
 
 // verifierTx is one transaction's externally-attested record extracted from
 // RPC metadata.
@@ -105,7 +91,7 @@ type verifiedBlock struct {
 // Returns rpcclient.SlotSkipped for finalized-skipped slots; any other error
 // is transient (backoff + retry). Faked in tests.
 type blockVerificationSource interface {
-	FetchFinalized(slot uint64) (*verifiedBlock, error)
+	FetchFinalized(context.Context, uint64) (*verifiedBlock, error)
 }
 
 // rpcVerificationSource adapts an RpcClient to blockVerificationSource.
@@ -113,8 +99,8 @@ type rpcVerificationSource struct {
 	rpcc *rpcclient.RpcClient
 }
 
-func (r *rpcVerificationSource) FetchFinalized(slot uint64) (*verifiedBlock, error) {
-	result, err := r.rpcc.GetBlockFinalizedOnce(slot)
+func (r *rpcVerificationSource) FetchFinalized(ctx context.Context, slot uint64) (*verifiedBlock, error) {
+	result, err := r.rpcc.GetBlockFinalizedOnceContext(ctx, slot)
 	if err != nil {
 		return nil, err
 	}
@@ -150,13 +136,17 @@ type TrailingVerifier struct {
 	cfg VerifierConfig
 	src blockVerificationSource
 
-	mu          sync.Mutex
-	pending     map[uint64]*pendingDigest
-	order       []uint64 // ascending recorded slots not yet verified
-	firstSlot   uint64   // first slot ever recorded (watermark floor anchor)
-	verified    uint64   // all recorded slots <= verified are verified
-	executedTip uint64
-	failure     *ReplayDivergence
+	mu           sync.Mutex
+	pending      map[uint64]*pendingDigest
+	order        []uint64 // ascending recorded slots not yet verified
+	firstSlot    uint64   // first slot ever recorded (watermark floor anchor)
+	verified     uint64   // all recorded slots <= verified are verified
+	executedTip  uint64
+	failure      *ReplayDivergence
+	evidenceOK   bool
+	behind       bool
+	lastProgress time.Time
+	now          func() time.Time
 
 	verifiedCount uint64
 	requeues      uint64
@@ -166,13 +156,26 @@ func newTrailingVerifier(src blockVerificationSource, cfg VerifierConfig) *Trail
 	if cfg.LagSlots == 0 {
 		cfg.LagSlots = 32
 	}
-	if cfg.MaxRPS <= 0 {
-		cfg.MaxRPS = 8
+	cfg.MaxRPS = safeTrailingVerifierMaxRPS(cfg.MaxRPS)
+	if cfg.StallWindow <= 0 {
+		cfg.StallWindow = 5 * time.Minute
 	}
 	return &TrailingVerifier{
 		cfg:     cfg,
 		src:     src,
 		pending: make(map[uint64]*pendingDigest),
+		now:     time.Now,
+	}
+}
+
+func safeTrailingVerifierMaxRPS(maxRPS int) int {
+	switch {
+	case maxRPS <= 0:
+		return defaultTrailingVerifierMaxRPS
+	case maxRPS > maxTrailingVerifierRPS:
+		return maxTrailingVerifierRPS
+	default:
+		return maxRPS
 	}
 }
 
@@ -185,17 +188,29 @@ func (v *TrailingVerifier) Record(d *SlotDigest) {
 	defer v.mu.Unlock()
 	if v.firstSlot == 0 || d.Slot < v.firstSlot {
 		v.firstSlot = d.Slot
-		if v.verified == 0 {
-			v.verified = d.Slot - 1
+		floor := slotBefore(d.Slot)
+		if v.verified == 0 || v.verified > floor {
+			v.verified = floor
 		}
 	}
 	if _, exists := v.pending[d.Slot]; !exists {
-		v.order = append(v.order, d.Slot)
+		index := sort.Search(len(v.order), func(i int) bool { return v.order[i] >= d.Slot })
+		v.order = append(v.order, 0)
+		copy(v.order[index+1:], v.order[index:])
+		v.order[index] = d.Slot
 	}
 	v.pending[d.Slot] = &pendingDigest{digest: d}
 	if d.Slot > v.executedTip {
 		v.executedTip = d.Slot
 	}
+	v.publishStatusLocked()
+}
+
+func slotBefore(slot uint64) uint64 {
+	if slot == 0 {
+		return 0
+	}
+	return slot - 1
 }
 
 // RecordSkip registers a slot replay treated as skipped.
@@ -212,6 +227,7 @@ func (v *TrailingVerifier) SetExecutedTip(slot uint64) {
 	if slot > v.executedTip {
 		v.executedTip = slot
 	}
+	v.publishStatusLocked()
 	v.mu.Unlock()
 }
 
@@ -255,10 +271,40 @@ func (v *TrailingVerifier) PruneThrough(slot uint64) {
 	v.order = kept
 }
 
+// RewindFrom discards verifier state for an abandoned fork suffix.
+func (v *TrailingVerifier) RewindFrom(slot uint64) {
+	if v == nil {
+		return
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	kept := v.order[:0]
+	for _, recorded := range v.order {
+		if recorded >= slot {
+			delete(v.pending, recorded)
+			continue
+		}
+		kept = append(kept, recorded)
+	}
+	v.order = kept
+	floor := slotBefore(slot)
+	if v.verified > floor {
+		v.verified = floor
+	}
+	if v.executedTip >= slot {
+		v.executedTip = floor
+	}
+	if v.firstSlot == 0 || v.firstSlot >= slot {
+		v.firstSlot = slot
+	}
+	v.publishStatusLocked()
+}
+
 // Run drives verification until ctx is done. One slot per permit, oldest
 // first, capped at MaxRPS.
 func (v *TrailingVerifier) Run(ctx context.Context) {
-	interval := time.Second / time.Duration(v.cfg.MaxRPS)
+	interval := time.Second / time.Duration(safeTrailingVerifierMaxRPS(v.cfg.MaxRPS))
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -266,13 +312,34 @@ func (v *TrailingVerifier) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			v.verifyNext()
+			v.verifyNextContext(ctx)
 		}
+	}
+}
+
+func startTrailingVerifier(ctx context.Context, verifier *TrailingVerifier) func() {
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		verifier.Run(runCtx)
+	}()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cancel()
+			<-done
+		})
 	}
 }
 
 // verifyNext picks the oldest eligible pending slot and verifies it.
 func (v *TrailingVerifier) verifyNext() {
+	v.verifyNextContext(context.Background())
+}
+
+func (v *TrailingVerifier) verifyNextContext(ctx context.Context) {
 	v.mu.Lock()
 	if v.failure != nil {
 		v.mu.Unlock()
@@ -280,7 +347,8 @@ func (v *TrailingVerifier) verifyNext() {
 	}
 	var slot uint64
 	var pd *pendingDigest
-	now := time.Now()
+	backedOff := false
+	now := v.now()
 	for _, s := range v.order {
 		cand := v.pending[s]
 		if cand == nil {
@@ -290,25 +358,33 @@ func (v *TrailingVerifier) verifyNext() {
 			break // too fresh; order is ascending so nothing later is eligible
 		}
 		if now.Before(cand.nextTry) {
+			backedOff = true
 			continue
 		}
 		slot, pd = s, cand
 		break
+	}
+	if pd == nil && backedOff {
+		v.publishStatusLocked()
 	}
 	v.mu.Unlock()
 	if pd == nil {
 		return
 	}
 
-	result, err := v.src.FetchFinalized(slot)
+	result, err := v.src.FetchFinalized(ctx, slot)
 	v.mu.Lock()
-	defer v.mu.Unlock()
+	defer func() {
+		v.publishStatusLocked()
+		v.mu.Unlock()
+	}()
 	if v.pending[slot] != pd { // pruned concurrently
 		return
 	}
 
 	switch {
 	case err == rpcclient.SlotSkipped:
+		v.evidenceOK = true
 		if pd.digest.Skipped {
 			v.markVerifiedLocked(slot)
 			return
@@ -322,14 +398,16 @@ func (v *TrailingVerifier) verifyNext() {
 			return
 		}
 		pd.attempts++
-		pd.nextTry = time.Now().Add(5 * time.Second)
+		pd.nextTry = v.now().Add(5 * time.Second)
 		return
 	case err != nil:
 		// Transient (not yet finalized on the RPC view, outage, etc.): back off.
+		v.evidenceOK = false
 		pd.attempts++
-		pd.nextTry = time.Now().Add(backoffFor(pd.attempts))
+		pd.nextTry = v.now().Add(backoffFor(pd.attempts))
 		return
 	}
+	v.evidenceOK = true
 
 	if pd.digest.Skipped {
 		// We skipped; RPC has a finalized block. Confirm, then diverge.
@@ -340,7 +418,7 @@ func (v *TrailingVerifier) verifyNext() {
 			return
 		}
 		pd.attempts++
-		pd.nextTry = time.Now().Add(5 * time.Second)
+		pd.nextTry = v.now().Add(5 * time.Second)
 		return
 	}
 
@@ -354,7 +432,7 @@ func (v *TrailingVerifier) verifyNext() {
 				slot, pd.siblingHits)
 		}
 		pd.attempts++
-		pd.nextTry = time.Now().Add(backoffFor(pd.attempts))
+		pd.nextTry = v.now().Add(backoffFor(pd.attempts))
 		return
 	}
 
@@ -363,6 +441,41 @@ func (v *TrailingVerifier) verifyNext() {
 		return
 	}
 	v.markVerifiedLocked(slot)
+}
+
+func (v *TrailingVerifier) publishStatusLocked() {
+	eligible := uint64(0)
+	if v.executedTip >= v.cfg.LagSlots {
+		eligible = v.executedTip - v.cfg.LagSlots
+	}
+	now := v.now()
+	behind := v.cfg.Required && v.evidenceOK && v.verified < eligible
+	if behind && !v.behind {
+		// Start the clock when usable evidence first shows that coverage is
+		// behind. Time spent with an unavailable source is reported as
+		// unavailable, not retroactively relabelled as a verifier stall.
+		v.lastProgress = now
+	}
+	v.behind = behind
+	sinceProgress := time.Duration(0)
+	if behind && !v.lastProgress.IsZero() {
+		sinceProgress = now.Sub(v.lastProgress)
+		if sinceProgress < 0 {
+			sinceProgress = 0
+		}
+	}
+	state := EvaluateCoverage(
+		v.cfg.Required,
+		v.evidenceOK,
+		v.verified,
+		eligible,
+		sinceProgress,
+		v.cfg.StallWindow,
+	)
+	if v.failure != nil {
+		state = VerificationDiverged
+	}
+	updateVerificationProgress(state, v.verified, eligible)
 }
 
 func backoffFor(attempts int) time.Duration {
@@ -379,6 +492,7 @@ func (v *TrailingVerifier) markVerifiedLocked(slot uint64) {
 	if _, ok := v.pending[slot]; !ok {
 		return
 	}
+	before := v.verified
 	v.pending[slot] = nil
 	v.verifiedCount++
 	for len(v.order) > 0 {
@@ -391,6 +505,9 @@ func (v *TrailingVerifier) markVerifiedLocked(slot uint64) {
 		if s > v.verified {
 			v.verified = s
 		}
+	}
+	if v.verified > before {
+		v.lastProgress = v.now()
 	}
 }
 
