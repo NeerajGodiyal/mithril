@@ -13,26 +13,38 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Overclock-Validator/mithril/pkg/version"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/term"
 )
 
 func TestInteractiveServeHint(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		mode os.FileMode
-		want string
+		name     string
+		terminal bool
+		want     string
 	}{
-		{name: "terminal", mode: os.ModeCharDevice, want: interactiveServeMessage + "\n"},
+		{name: "terminal", terminal: true, want: interactiveServeMessage + "\n"},
 		{name: "pipe"},
-		{name: "regular file", mode: 0o600},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stderr bytes.Buffer
-			writeInteractiveServeHint(&stderr, test.mode)
+			writeInteractiveServeHint(&stderr, test.terminal)
 			if got := stderr.String(); got != test.want {
 				t.Fatalf("stderr = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestCharacterDeviceIsNotAssumedToBeTerminal(t *testing.T) {
+	file, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if term.IsTerminal(int(file.Fd())) {
+		t.Fatal("null device was reported as an interactive terminal")
 	}
 }
 
@@ -64,6 +76,51 @@ func TestIsCleanShutdown(t *testing.T) {
 			t.Errorf("isCleanShutdown(%v) = true, want false (real error)", err)
 		}
 	}
+}
+
+// Frames are accepted intact or rejected atomically, never truncated.
+func FuzzBoundedFrameReadCloser(f *testing.F) {
+	// Frames are built as valid JSON so the length boundary is what is being
+	// tested, not JSON validity, which the reader checks separately and later.
+	// The payload is padding+8 bytes ({"a":"…"}), so with a 64-byte limit the
+	// exact boundary is padding 56. Seed either side of it: an off-by-one that
+	// counts the newline only misbehaves at exactly that point.
+	for _, seed := range []int{0, 1, 7, 8, 9, 55, 56, 57, 63, 64, 65, 100} {
+		f.Add(seed, 64)
+	}
+
+	f.Fuzz(func(t *testing.T, padding, limit int) {
+		// A non-positive buffer size is a programming error, not an input
+		// condition, and huge sizes only slow the fuzzer down.
+		if limit < 16 || limit > 4096 || padding < 0 || padding > 8192 {
+			t.Skip()
+		}
+
+		// {"a":"<padding>"} — a single valid JSON value of a controlled length.
+		frame := `{"a":"` + strings.Repeat("x", padding) + `"}`
+		input := frame + "\n"
+
+		reader := newBoundedFrameReadCloser(io.NopCloser(strings.NewReader(input)), limit)
+		got, err := io.ReadAll(reader)
+
+		// The bound applies to the payload, so the newline is not counted.
+		if len(frame) > limit {
+			if !errors.Is(err, errStdioInputFrameTooLarge) {
+				t.Fatalf("payload of %d bytes exceeded the %d-byte limit but was not rejected: err=%v, read %d bytes",
+					len(frame), limit, err, len(got))
+			}
+			if len(got) != 0 {
+				t.Fatalf("rejected frame still emitted %d bytes; a partial request must never reach the decoder", len(got))
+			}
+			return
+		}
+		if err != nil {
+			t.Fatalf("payload of %d bytes within the %d-byte limit was rejected: %v", len(frame), limit, err)
+		}
+		if string(got) != input {
+			t.Fatalf("content was altered\n in: %q\nout: %q", input, string(got))
+		}
+	})
 }
 
 func TestBoundedFrameReadCloserEnforcesEachNDJSONFrame(t *testing.T) {
@@ -119,6 +176,20 @@ func TestBoundedFrameReadCloserRejectsFrameBurstBeforeSDKDecode(t *testing.T) {
 	}
 }
 
+func TestBoundedFrameReadCloserDoesNotChargeBlankLines(t *testing.T) {
+	input := strings.Repeat(" \t\n", 100) + "{}\n{}\n"
+	reader := newBoundedFrameReadCloser(io.NopCloser(strings.NewReader(input)), 64)
+	reader.frameAdmission = newTokenBucket(0, 1, time.Now())
+
+	got, err := io.ReadAll(reader)
+	if !errors.Is(err, errStdioInputFrameRateLimited) {
+		t.Fatalf("frame burst error = %v, want %v", err, errStdioInputFrameRateLimited)
+	}
+	if string(got) != "{}\n" {
+		t.Fatalf("bytes admitted before frame burst rejection = %q, want one JSON frame", got)
+	}
+}
+
 func TestBoundedFrameReadCloserBackpressuresFrameBurst(t *testing.T) {
 	reader := newBoundedFrameReadCloser(io.NopCloser(strings.NewReader("{}\n{}\n{}\n")), 64)
 	reader.frameAdmission = newTokenBucket(1000, 2, time.Now())
@@ -150,7 +221,7 @@ func connectServerForTest(t *testing.T, server *mcpsdk.Server, clientName string
 
 func connectNewServerForTest(t *testing.T, cfg Config, telemetry *bytes.Buffer) *mcpsdk.ClientSession {
 	t.Helper()
-	return connectServerForTest(t, newServerWithTelemetryAndApprovalKey(cfg, newTelemetryWriter(telemetry), nil), "test-client")
+	return connectServerForTest(t, newServerWithTelemetryAndAuthority(cfg, newTelemetryWriter(telemetry), approvalAuthority{}), "test-client")
 }
 
 func toolResultText(result *mcpsdk.CallToolResult) string {
@@ -265,6 +336,7 @@ func TestProfileToolCatalogsAndMetadata(t *testing.T) {
 		"mithril_execute_service_action",
 		"mithril_prepare_service_action",
 		"mithril_service_status",
+		"mithril_verify_service_action",
 	)
 	allNames := append(append([]string(nil), diagnosticNames...), operatorNames[len(monitorNames):]...)
 	expectedPolicies := make(map[string]struct{}, len(allNames))
@@ -338,6 +410,10 @@ func TestProfileToolCatalogsAndMetadata(t *testing.T) {
 				} else if toolPolicies[tool.Name].annotations == annRuntimeDiagnostic || toolPolicies[tool.Name].annotations == annControlPrepare {
 					if tool.Annotations.ReadOnlyHint || tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint || tool.Annotations.IdempotentHint {
 						t.Errorf("effectful non-destructive tool %q has incorrect annotations: %+v", tool.Name, tool.Annotations)
+					}
+				} else if toolPolicies[tool.Name].annotations == annControlVerify {
+					if tool.Annotations.ReadOnlyHint || tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint || !tool.Annotations.IdempotentHint {
+						t.Errorf("control verification tool %q has incorrect annotations: %+v", tool.Name, tool.Annotations)
 					}
 				} else if toolPolicies[tool.Name].annotations == annControlExecute {
 					if tool.Annotations.ReadOnlyHint || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint || tool.Annotations.IdempotentHint {
@@ -474,8 +550,18 @@ func TestMCPInfoSanitizesOriginsAndReportsPolicyLimits(t *testing.T) {
 	if !info.MetricsConfigured || !info.RPCConfigured {
 		t.Fatal("configured metrics/RPC endpoint was reported as unavailable")
 	}
+	if info.BuildVersion != version.Version || info.BuildCommit != version.GitCommit {
+		t.Fatalf(
+			"build identity = %q/%q, want %q/%q",
+			info.BuildVersion,
+			info.BuildCommit,
+			version.Version,
+			version.GitCommit,
+		)
+	}
 	if info.Profile != ProfileDiagnostic || !info.DiagnosticToolsExposed || info.Limits.MaxConcurrent != 2 || info.Limits.RatePerSecond != 3.5 || info.Limits.RateBurst != 6 ||
 		info.Limits.OutputBudgetBytes != 16*1024 || info.Limits.OutputBudgetScope != outputBudgetScope ||
+		info.Limits.ToolCallTimeoutSeconds != uint64(DefaultToolCallTimeout/time.Second) ||
 		info.Limits.MaxInputFrameBytes != maxStdioInputFrameBytes || info.Limits.InputFramesPerSec != stdioInputFramesPerSec || info.Limits.InputFrameBurst != stdioInputFrameBurst {
 		t.Fatalf("profile/limits mismatch: %+v", info)
 	}
@@ -520,6 +606,76 @@ func TestMCPInfoOmitsInactiveOptionalDetails(t *testing.T) {
 	} {
 		if got := string(fields[name]); got != want {
 			t.Errorf("%s = %s, want %s", name, got, want)
+		}
+	}
+}
+
+func TestServeRejectsInvalidConfigBeforeServing(t *testing.T) {
+	systemctl := ""
+	for _, candidate := range []string{"/usr/bin/systemctl", "/usr/bin/true", "/bin/true"} {
+		if _, err := resolveExecutable(candidate); err == nil {
+			systemctl = candidate
+			break
+		}
+	}
+	if systemctl == "" {
+		t.Skip("no root-owned executable is available for operator startup validation")
+	}
+	operatorCfg := Config{
+		Profile:               ProfileOperator,
+		ControlEnabled:        true,
+		SystemdUnit:           "mithril.service",
+		SystemdScope:          "system",
+		SystemctlPath:         systemctl,
+		ApproverKeysDir:       "relative/approvers",
+		ControlTargetID:       "test-node",
+		ApprovalTTLSeconds:    60,
+		AuditClientConfigPath: "/etc/mithril-mcp/audit-client.json",
+		AllowedServiceActions: []string{"restart"},
+	}
+
+	badSource := Config{Profile: ProfileMonitor, BlockSource: "gossip"}
+
+	both := operatorCfg
+	both.BlockSource = "gossip"
+
+	cases := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"unsafe approver key directory", operatorCfg, "clean absolute path"},
+		{"unknown block source", badSource, "unknown Mithril block source"},
+		// Both invalid: the credential problem must be reported first, since
+		// that is the check that gates holding key bytes at all.
+		{"credential failure precedes block source", both, "clean absolute path"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// A rejected config must not reach the stdio loop, so this returns
+			// rather than blocking on a reader that never yields.
+			done := make(chan error, 1)
+			go func() { done <- Serve(context.Background(), tc.cfg) }()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("Serve accepted an invalid configuration")
+				}
+				if !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("error = %q, want it to mention %q", err, tc.want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Serve began serving on an invalid configuration instead of returning")
+			}
+		})
+	}
+
+	// Every accepted block source must pass validation, or a valid deployment
+	// would be refused at startup.
+	for _, source := range []string{"rpc", "lightbringer", "turbine", "TURBINE", " rpc "} {
+		if _, err := ParseBlockSource(source); err != nil {
+			t.Errorf("ParseBlockSource(%q) rejected a supported source: %v", source, err)
 		}
 	}
 }

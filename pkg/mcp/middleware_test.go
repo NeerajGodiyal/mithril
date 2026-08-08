@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -84,6 +85,22 @@ func middlewareValueHandler(value string) mcpsdk.ToolHandlerFor[middlewareTestIn
 	return func(_ context.Context, _ *mcpsdk.CallToolRequest, _ middlewareTestInput) (*mcpsdk.CallToolResult, middlewareTestOutput, error) {
 		return nil, middlewareTestOutput{Value: value}, nil
 	}
+}
+
+// startMiddlewareSessionWriter is startMiddlewareSession with an arbitrary
+// telemetry sink, so a test needing race-free reads can supply a synchronized
+// writer instead of a bare buffer.
+func startMiddlewareSessionWriter(
+	t *testing.T,
+	cfg Config,
+	telemetry io.Writer,
+	handler mcpsdk.ToolHandlerFor[middlewareTestInput, middlewareTestOutput],
+) *mcpsdk.ClientSession {
+	t.Helper()
+	server := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "middleware-test", Version: "0"}, nil)
+	mcpsdk.AddTool(server, &mcpsdk.Tool{Name: middlewareTestToolName}, handler)
+	server.AddReceivingMiddleware(newToolCallMiddlewareWithTelemetry(cfg, newTelemetryWriter(telemetry)))
+	return connectServerForTest(t, server, "middleware-client")
 }
 
 func startMiddlewareSession(
@@ -270,6 +287,99 @@ func TestMiddlewareConcurrencyLimitFailsFast(t *testing.T) {
 	releaseCall()
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first call failed: %v", err)
+	}
+}
+
+func TestMiddlewareCallTimeoutIsReportedAsTimedOut(t *testing.T) {
+	var telemetry bytes.Buffer
+	cfg := defaultMiddlewareTestConfig()
+	cfg.ToolCallTimeout = 50 * time.Millisecond
+
+	session := startMiddlewareSession(t, cfg, &telemetry, func(ctx context.Context, _ *mcpsdk.CallToolRequest, _ middlewareTestInput) (*mcpsdk.CallToolResult, middlewareTestOutput, error) {
+		// Outlive the call budget, then return normally so the middleware
+		// classifies the outcome rather than the handler reporting an error.
+		<-ctx.Done()
+		return nil, middlewareTestOutput{Value: "late"}, nil
+	})
+
+	started := time.Now()
+	if _, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: middlewareTestToolName}); err != nil {
+		t.Fatalf("timed-out call returned a protocol error: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < cfg.ToolCallTimeout {
+		t.Fatalf("call returned in %v, before the %v budget elapsed", elapsed, cfg.ToolCallTimeout)
+	}
+	if logged := telemetry.String(); !strings.Contains(logged, `"status":"timed_out"`) {
+		t.Fatalf("call exceeding the budget was not recorded as timed_out: %s", logged)
+	}
+}
+
+// syncTelemetryBuffer makes telemetry readable from the test goroutine while it
+// is written asynchronously — by the middleware in-process, or by os/exec's
+// stderr-copying goroutine for the stdio subprocess tests. Reading a bare
+// bytes.Buffer in either case races, and worse, usually reads empty and makes an
+// assertion pass vacuously.
+type syncTelemetryBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncTelemetryBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncTelemetryBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// waitForRecord polls until a telemetry record lands or the deadline passes,
+// so the assertion cannot pass simply because nothing had been written yet.
+func (b *syncTelemetryBuffer) waitForRecord(t *testing.T) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if logged := b.String(); strings.TrimSpace(logged) != "" {
+			return logged
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("no telemetry record was written within the deadline")
+	return ""
+}
+
+func TestClientCancellationIsNotReportedAsTimeout(t *testing.T) {
+	telemetry := &syncTelemetryBuffer{}
+	cfg := defaultMiddlewareTestConfig()
+	cfg.ToolCallTimeout = time.Minute // long enough that it cannot be the cause
+
+	entered := make(chan struct{})
+	var enteredOnce sync.Once
+	session := startMiddlewareSessionWriter(t, cfg, telemetry, func(ctx context.Context, _ *mcpsdk.CallToolRequest, _ middlewareTestInput) (*mcpsdk.CallToolResult, middlewareTestOutput, error) {
+		enteredOnce.Do(func() { close(entered) })
+		<-ctx.Done()
+		return nil, middlewareTestOutput{Value: "cancelled"}, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = session.CallTool(ctx, &mcpsdk.CallToolParams{Name: middlewareTestToolName})
+	}()
+	<-entered
+	cancel()
+	<-done
+
+	logged := telemetry.waitForRecord(t)
+	if strings.Contains(logged, `"status":"timed_out"`) {
+		t.Fatalf("client cancellation was misreported as a call timeout: %s", logged)
+	}
+	if !strings.Contains(logged, `"status":"cancelled"`) {
+		t.Fatalf("client cancellation was not reported as cancelled: %s", logged)
 	}
 }
 

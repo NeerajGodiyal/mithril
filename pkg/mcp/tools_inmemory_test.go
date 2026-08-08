@@ -21,7 +21,7 @@ import (
 func startInMemorySession(t *testing.T, cfg Config) *mcpsdk.ClientSession {
 	t.Helper()
 	cfg.Profile = ProfileDiagnostic
-	return connectServerForTest(t, newServerWithTelemetryAndApprovalKey(cfg, newTelemetryWriter(io.Discard), nil), "test")
+	return connectServerForTest(t, newServerWithTelemetryAndAuthority(cfg, newTelemetryWriter(io.Discard), approvalAuthority{}), "test")
 }
 
 func callToolText(t *testing.T, s *mcpsdk.ClientSession, name string, args map[string]any) (string, bool) {
