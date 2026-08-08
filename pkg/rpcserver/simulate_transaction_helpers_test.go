@@ -89,25 +89,59 @@ func TestParseSimulateConfig_MinContextSlot(t *testing.T) {
 		"unused-tx-string",
 		map[string]interface{}{"minContextSlot": float64(417500000)},
 	}
-	conf := parseSimulateConfig(params)
+	conf, err := parseSimulateConfig(params)
+	require.NoError(t, err)
 	if assert.NotNil(t, conf.minContextSlot) {
 		assert.Equal(t, uint64(417500000), *conf.minContextSlot)
 	}
 }
 
-func TestParseSimulateConfig_Commitment(t *testing.T) {
+func TestParseSimulateConfig_ProcessedCommitment(t *testing.T) {
 	params := []interface{}{
 		"unused-tx-string",
-		map[string]interface{}{"commitment": "confirmed"},
+		map[string]interface{}{"commitment": "processed"},
 	}
-	conf := parseSimulateConfig(params)
-	assert.Equal(t, "confirmed", conf.commitment)
+	conf, err := parseSimulateConfig(params)
+	require.NoError(t, err)
+	assert.Equal(t, "processed", conf.commitment)
 }
 
 func TestParseSimulateConfig_DefaultsOmitOptional(t *testing.T) {
-	conf := parseSimulateConfig([]interface{}{"unused", map[string]interface{}{}})
+	conf, err := parseSimulateConfig([]interface{}{"unused", map[string]interface{}{}})
+	require.NoError(t, err)
 	assert.Nil(t, conf.minContextSlot)
 	assert.Empty(t, conf.commitment)
+}
+
+func TestParseSimulateConfigRejectsMalformedOrUnsupportedOptions(t *testing.T) {
+	tests := []struct {
+		name   string
+		params []interface{}
+	}{
+		{name: "too many parameters", params: []interface{}{"tx", map[string]interface{}{}, "extra"}},
+		{name: "config is not object", params: []interface{}{"tx", "processed"}},
+		{name: "sigVerify type", params: []interface{}{"tx", map[string]interface{}{"sigVerify": "true"}}},
+		{name: "replacement type", params: []interface{}{"tx", map[string]interface{}{"replaceRecentBlockhash": 1}}},
+		{name: "encoding type", params: []interface{}{"tx", map[string]interface{}{"encoding": true}}},
+		{name: "commitment type", params: []interface{}{"tx", map[string]interface{}{"commitment": true}}},
+		{name: "unsupported commitment", params: []interface{}{"tx", map[string]interface{}{"commitment": "confirmed"}}},
+		{name: "slot type", params: []interface{}{"tx", map[string]interface{}{"minContextSlot": "1"}}},
+		{name: "fractional slot", params: []interface{}{"tx", map[string]interface{}{"minContextSlot": 1.5}}},
+		{name: "inner instructions type", params: []interface{}{"tx", map[string]interface{}{"innerInstructions": "true"}}},
+		{name: "accounts type", params: []interface{}{"tx", map[string]interface{}{"accounts": []interface{}{}}}},
+		{name: "addresses type", params: []interface{}{"tx", map[string]interface{}{"accounts": map[string]interface{}{"addresses": "address"}}}},
+		{name: "address member type", params: []interface{}{"tx", map[string]interface{}{"accounts": map[string]interface{}{"addresses": []interface{}{1.0}}}}},
+		{name: "invalid address", params: []interface{}{"tx", map[string]interface{}{"accounts": map[string]interface{}{"addresses": []interface{}{"not-a-public-key"}}}}},
+		{name: "account encoding type", params: []interface{}{"tx", map[string]interface{}{"accounts": map[string]interface{}{"encoding": true}}}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseSimulateConfig(test.params)
+			var invalid *InvalidParamsError
+			require.ErrorAs(t, err, &invalid)
+		})
+	}
 }
 
 func TestPostBalancesFromExecCtx_Nil(t *testing.T) {
