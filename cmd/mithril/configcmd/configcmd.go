@@ -264,7 +264,8 @@ sigverify_backend = "auto" # auto|r51|generic|stdlib; stdlib uses Go's crypto/ed
 
 # ── Mithril's RPC server ─────────────────────────────────────────────────
 [rpc]
-port = 8899               # 0 = disabled; binds all interfaces
+bind_address = "127.0.0.1" # An exact non-loopback IP adds remote access; loopback remains available
+port = 8899                # 0 = disabled
 
 # ── Logging ──────────────────────────────────────────────────────────────
 [log]

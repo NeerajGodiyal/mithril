@@ -1006,6 +1006,7 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 	fmt.Fprintf(&cfg, "max_full_snapshots = %s\n\n", m.snapshotKeep)
 
 	cfg.WriteString("[rpc]\n")
+	cfg.WriteString("bind_address = \"127.0.0.1\"\n")
 	fmt.Fprintf(&cfg, "port = %s\n\n", m.rpcPort)
 
 	cfg.WriteString("[log]\n")
@@ -1094,6 +1095,7 @@ alpenglow_bls_dst = ""            # BLS DST override (must match cluster solana-
 max_full_snapshots = 1   # 0 = stream only, saves disk
 
 [rpc]
+bind_address = "127.0.0.1"
 port = 8899   # Mithril's RPC server (0 = disabled)
 
 [log]

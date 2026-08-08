@@ -197,12 +197,13 @@ You can also specify a config file explicitly:
 
 ### Mithril's Simple RPC Server
 
-Mithril includes a basic RPC server implementation that exposes a subset of Solana-compatible JSON-RPC methods. This is still under active development and not yet feature-complete.
+Mithril includes a basic RPC server implementation that provides a subset of Solana-compatible JSON-RPC methods. This is still under active development and not yet feature-complete.
 
-To enable it, set the port in your config:
+To enable it, set the listener address and port in your config:
 
 ```toml
 [rpc]
+    bind_address = "127.0.0.1"
     port = 8899
 ```
 
@@ -214,11 +215,17 @@ curl http://localhost:8899 -X POST -H "Content-Type: application/json" -d '
   {"jsonrpc":"2.0","id":1,"method":"getBlockHeight"}
 '
 
-# Query from another server (replace with your Mithril host IP)
-curl http://YOUR_MITHRIL_IP:8899 -X POST -H "Content-Type: application/json" -d '
+# For remote use, keep the listener local and forward the port over SSH.
+ssh -N -L 8899:127.0.0.1:8899 USER@MITHRIL_HOST
+curl http://127.0.0.1:8899 -X POST -H "Content-Type: application/json" -d '
   {"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["YOUR_PUBKEY",{"encoding":"base64"}]}
 '
 ```
+
+Direct non-loopback binding is intended for a protected network. Use the exact
+configured IP in the request URL and restrict the port with network access
+rules. Mithril also keeps the same port available on loopback for local MCP and
+health clients.
 
 **Currently supported RPC methods:**
 - `getAccountInfo` - Get account data and lamports
@@ -226,8 +233,25 @@ curl http://YOUR_MITHRIL_IP:8899 -X POST -H "Content-Type: application/json" -d 
 - `getBlockHeight` - Get current block height
 - `getEpochInfo` - Get current epoch info
 - `getLatestBlockhash` - Get recent blockhash
+- `getSubmittedTransactionStatus` - Query local receipts for transactions submitted through this node
+- `sendTransaction` - Validate and forward a signed transaction
+- `simulateTransaction` - Simulate a transaction against local replay state
 
-We're actively expanding RPC method coverage. Upcoming methods include transaction simulation, send transaction, and get leader schedule.
+The state-backed methods currently use this node's published `processed` bank.
+An omitted commitment uses that bank; explicit `confirmed` or `finalized`
+requests are rejected instead of returning weaker results. `sendTransaction`
+accepts `maxRetries: 0`; positive retry counts are not implemented. A successful
+response means the transaction was accepted and forwarded, not confirmed.
+
+`getSubmittedTransactionStatus` covers only signatures submitted by this
+running Mithril process. Receipts are bounded and kept in memory, so a restart
+or completed-receipt eviction returns tracking to unknown. Landing and
+execution-failure states remain provisional until Alpenglow durable promotion
+roots them. Classic mode does not currently produce terminal inclusion results
+through this method. Automated actions should still use an independent RPC
+source for final confirmation.
+
+RPC method coverage is still expanding.
 
 ### Current Limitations
 
