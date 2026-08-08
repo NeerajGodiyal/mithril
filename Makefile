@@ -12,12 +12,14 @@ LDFLAGS := -X github.com/Overclock-Validator/mithril/pkg/version.Version=$(VERSI
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o mithril ./cmd/mithril
+	go build -ldflags "$(LDFLAGS)" -o mithril-audit ./cmd/mithril-audit
 
 release:
 	go build -ldflags "$(LDFLAGS) -s -w" -o mithril ./cmd/mithril
+	go build -ldflags "$(LDFLAGS) -s -w" -o mithril-audit ./cmd/mithril-audit
 
 clean:
-	rm -f mithril
+	rm -f mithril mithril-audit
 
 # Server setup scripts (require sudo - run as: sudo make server-setup ...)
 server-setup:
