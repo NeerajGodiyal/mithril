@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/DataDog/zstd"
@@ -76,6 +78,30 @@ func TestGetSlotInfoSemanticLabels(t *testing.T) {
 	}
 	if info.Consistency != "node_reported_non_atomic" || info.Finality != "local_unfinalized" {
 		t.Fatalf("slot info semantic labels missing: %+v", info)
+	}
+}
+
+func TestGetGenesisHash(t *testing.T) {
+	client := newRPCClientWithResponse(t, `{"jsonrpc":"2.0","id":1,"result":"`+testHash+`"}`)
+	hash, err := client.getGenesisHash(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hash != testHash {
+		t.Fatalf("getGenesisHash = %q, want %q", hash, testHash)
+	}
+}
+
+func TestGetGenesisHashRejectsMalformedResult(t *testing.T) {
+	for _, result := range []string{
+		`123`,
+		`"11111111111111111111111111111111"`,
+		`"not-base58"`,
+	} {
+		client := newRPCClientWithResponse(t, `{"jsonrpc":"2.0","id":1,"result":`+result+`}`)
+		if _, err := client.getGenesisHash(context.Background()); err == nil {
+			t.Fatalf("getGenesisHash accepted %s", result)
+		}
 	}
 }
 
@@ -423,6 +449,32 @@ func TestGetAccountInfoSanitizesAndBoundsAPIVersion(t *testing.T) {
 	}
 }
 
+func TestGetAccountInfoReportsAbsenceWithoutMaskingRPCErrors(t *testing.T) {
+	var response atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if response.Add(1) == 1 {
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":7},"value":null}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"account read failed"}}`)
+	}))
+	defer srv.Close()
+
+	session := startInMemorySession(t, Config{RPCURL: srv.URL, MetricsURL: srv.URL})
+	args := map[string]any{"pubkey": "11111111111111111111111111111111"}
+	text, isError := callToolText(t, session, "mithril_get_account_info", args)
+	if isError || !strings.Contains(text, `"found":false`) ||
+		!strings.Contains(text, `"consistency":"node_reported_absent"`) {
+		t.Fatalf("absent account = isError:%v text:%q", isError, text)
+	}
+
+	text, isError = callToolText(t, session, "mithril_get_account_info", args)
+	if !isError || !strings.Contains(text, "account read failed") ||
+		strings.Contains(text, `"found":false`) {
+		t.Fatalf("RPC read failure = isError:%v text:%q", isError, text)
+	}
+}
+
 func TestGetAccountInfoRejectsImpossibleAccountSpace(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, fmt.Sprintf(
@@ -455,5 +507,99 @@ func TestValidatePubkeyAndHash(t *testing.T) {
 	}
 	if err := validateHash("11111111111111111111111111111111"); err == nil {
 		t.Error("all-zero hash must be rejected")
+	}
+}
+
+func TestGetBlockHeightRejectsNonNumericResults(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		client := newRPCClientWithResponse(t, `{"jsonrpc":"2.0","id":1,"result":435409407}`)
+		height, err := client.getBlockHeight(context.Background())
+		if err != nil {
+			t.Fatalf("getBlockHeight: %v", err)
+		}
+		if height != 435409407 {
+			t.Fatalf("height = %d, want 435409407", height)
+		}
+	})
+
+	for _, tc := range []struct{ name, result string }{
+		{"string", `"435409407"`},
+		{"null", `null`},
+		{"object", `{"height":1}`},
+		{"array", `[1]`},
+		{"float", `1.5`},
+		{"negative", `-1`},
+		{"bool", `true`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newRPCClientWithResponse(t, `{"jsonrpc":"2.0","id":1,"result":`+tc.result+`}`)
+			height, err := client.getBlockHeight(context.Background())
+			if err == nil {
+				t.Fatalf("result %s accepted, returning height %d", tc.result, height)
+			}
+			if height != 0 {
+				t.Fatalf("failed call returned height %d, want 0", height)
+			}
+		})
+	}
+
+	t.Run("rpc error", func(t *testing.T) {
+		client := newRPCClientWithResponse(t, `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}`)
+		if _, err := client.getBlockHeight(context.Background()); err == nil {
+			t.Fatal("JSON-RPC error response accepted as a block height")
+		}
+	})
+}
+
+// A node that refuses because it knows its own state is untrustworthy must
+// reach the caller as a typed refusal. Flattening it into a generic error makes
+// a node that is answering clearly indistinguishable from one that is
+// unreachable, which downgrades a diagnosis from "diverged" to "unknown".
+func TestNodeRefusalIsTypedAndReasonIsAllowlisted(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		wantTyped  bool
+		wantReason string
+	}{
+		{
+			name:       "diverged is preserved",
+			body:       `{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"unhealthy","data":{"reason":"diverged"}}}`,
+			wantTyped:  true,
+			wantReason: "diverged",
+		},
+		{
+			name:       "unknown reason is dropped but refusal stays typed",
+			body:       `{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"unhealthy","data":{"reason":"nonsense"}}}`,
+			wantTyped:  true,
+			wantReason: "",
+		},
+		{
+			name:       "missing data still yields a typed refusal",
+			body:       `{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"unhealthy"}}`,
+			wantTyped:  true,
+			wantReason: "",
+		},
+		{
+			name:      "an ordinary rpc error is not a refusal",
+			body:      `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad params"}}`,
+			wantTyped: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newRPCClientWithResponse(t, tc.body)
+			_, err := client.call(context.Background(), "getEpochInfo", []any{})
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			var refused *NodeRefusedError
+			if got := errors.As(err, &refused); got != tc.wantTyped {
+				t.Fatalf("typed refusal: got %v, want %v (err %v)", got, tc.wantTyped, err)
+			}
+			if tc.wantTyped && refused.Reason != tc.wantReason {
+				t.Fatalf("reason: got %q, want %q", refused.Reason, tc.wantReason)
+			}
+		})
 	}
 }

@@ -1238,6 +1238,10 @@ func TestResolvedConfigRejectsExplicitMissingOrInvalidConfig(t *testing.T) {
 	if _, err := resolvedConfig(); err == nil || !strings.Contains(err.Error(), "rpc.port") {
 		t.Fatalf("invalid RPC port error = %v", err)
 	}
+	config.ConfigFile = writeConfigFile(t, "[rpc]\nbind_address = 'node.example'\nport = 8899\n")
+	if _, err := resolvedConfig(); err == nil || !strings.Contains(err.Error(), "rpc.bind_address") {
+		t.Fatalf("invalid RPC bind address error = %v", err)
+	}
 	config.ConfigFile = writeConfigFile(t, "[rpc]\nport = 'not-a-number'\n[tuning.pprof]\nport = 'also-not-a-number'\n")
 	if _, err := resolvedConfig(); err == nil || !strings.Contains(err.Error(), "rpc.port must be an integer") {
 		t.Fatalf("wrong RPC port type error = %v", err)

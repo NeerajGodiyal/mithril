@@ -311,8 +311,10 @@ func TestProfileToolCatalogsAndMetadata(t *testing.T) {
 	monitorNames := []string{
 		"mithril_cross_check_slot",
 		"mithril_diagnose",
+		"mithril_get_account_info",
 		"mithril_get_bank_hash",
 		"mithril_get_block_height",
+		"mithril_get_genesis_hash",
 		"mithril_get_latest_blockhash",
 		"mithril_get_slot_info",
 		"mithril_grep_log",
@@ -327,7 +329,6 @@ func TestProfileToolCatalogsAndMetadata(t *testing.T) {
 		"mithril_tail_log",
 	}
 	diagnosticNames := append(append([]string(nil), monitorNames...),
-		"mithril_get_account_info",
 		"mithril_pprof_heap",
 		"mithril_pprof_profile",
 		"mithril_simulate_transaction",
