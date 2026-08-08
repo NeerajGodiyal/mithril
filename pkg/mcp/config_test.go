@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"math"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -166,4 +168,140 @@ func TestToolCallTimeoutFromEnv(t *testing.T) {
 	if got := (Config{ToolCallTimeout: MaxToolCallTimeout + time.Second}).normalized().ToolCallTimeout; got != DefaultToolCallTimeout {
 		t.Errorf("over-max should fall back to default, got %v", got)
 	}
+}
+
+func TestEnvParsersRejectMalformedValues(t *testing.T) {
+	const key = "MITHRIL_MCP_TEST_PARSER"
+
+	t.Run("uint", func(t *testing.T) {
+		cases := map[string]uint64{
+			"":                     7, // unset falls back
+			"0":                    0, // zero is a legal threshold here
+			"42":                   42,
+			"18446744073709551615": math.MaxUint64,
+			"18446744073709551616": 7, // overflows uint64
+			"-1":                   7,
+			"4.2":                  7,
+			" 42":                  7, // ParseUint does not trim
+			"42 ":                  7,
+			"42abc":                7, // must not partially parse
+			"0x2a":                 7,
+			"abc":                  7,
+		}
+		for raw, want := range cases {
+			t.Setenv(key, raw)
+			if got := parseEnvUint(key, 7); got != want {
+				t.Errorf("parseEnvUint(%q) = %d, want %d", raw, got, want)
+			}
+		}
+	})
+
+	t.Run("bool", func(t *testing.T) {
+		cases := map[string]bool{
+			"true": true, "TRUE": true, "True": true, "1": true, "t": true,
+			"false": false, "FALSE": false, "0": false, "f": false,
+			// Not accepted by strconv.ParseBool, so these take the default.
+			"yes": true, "on": true, "enabled": true, "": true, " true": true,
+		}
+		for raw, want := range cases {
+			t.Setenv(key, raw)
+			if got := parseEnvBool(key, true); got != want {
+				t.Errorf("parseEnvBool(%q, true) = %v, want %v", raw, got, want)
+			}
+		}
+	})
+
+	t.Run("positive int", func(t *testing.T) {
+		cases := map[string]int{
+			"": 9, "5": 5, "0": 9, "-3": 9, "abc": 9, "5.5": 9, "5x": 9,
+		}
+		for raw, want := range cases {
+			t.Setenv(key, raw)
+			if got := parseEnvPositiveInt(key, 9); got != want {
+				t.Errorf("parseEnvPositiveInt(%q) = %d, want %d", raw, got, want)
+			}
+		}
+	})
+
+	t.Run("positive float", func(t *testing.T) {
+		cases := map[string]float64{
+			"": 2.5, "1.5": 1.5, "0": 2.5, "-1": 2.5, "abc": 2.5,
+			"NaN": 2.5, "Inf": 2.5, "+Inf": 2.5, "-Inf": 2.5,
+		}
+		for raw, want := range cases {
+			t.Setenv(key, raw)
+			if got := parseEnvPositiveFloat(key, 2.5); got != want {
+				t.Errorf("parseEnvPositiveFloat(%q) = %v, want %v", raw, got, want)
+			}
+		}
+	})
+}
+
+func TestControlToggleFailsClosed(t *testing.T) {
+	for _, raw := range []string{"yes", "on", "enabled", "TRUE ", "1 ", "maybe", "-1"} {
+		t.Setenv("MITHRIL_MCP_CONTROL_ENABLED", raw)
+		if ConfigFromEnv().ControlEnabled {
+			t.Errorf("MITHRIL_MCP_CONTROL_ENABLED=%q enabled service control; a value ParseBool rejects must fail closed", raw)
+		}
+	}
+	// The accepted spellings must still work, or the toggle is unusable.
+	for _, raw := range []string{"true", "TRUE", "1", "t", "True"} {
+		t.Setenv("MITHRIL_MCP_CONTROL_ENABLED", raw)
+		if !ConfigFromEnv().ControlEnabled {
+			t.Errorf("MITHRIL_MCP_CONTROL_ENABLED=%q did not enable service control", raw)
+		}
+	}
+}
+
+func TestToolCallTimeoutClampsBeforeScaling(t *testing.T) {
+	const key = "MITHRIL_MCP_TOOL_TIMEOUT_SECONDS"
+	maxSecs := int64(MaxToolCallTimeout / time.Second)
+
+	cases := map[string]time.Duration{
+		"":                               DefaultToolCallTimeout, // unset
+		"0":                              DefaultToolCallTimeout, // rejected as non-positive
+		"-1":                             DefaultToolCallTimeout,
+		"abc":                            DefaultToolCallTimeout,
+		"1":                              time.Second,
+		"90":                             90 * time.Second,
+		strconv.FormatInt(maxSecs, 10):   MaxToolCallTimeout,
+		strconv.FormatInt(maxSecs+1, 10): MaxToolCallTimeout, // clamped
+		"999999999":                      MaxToolCallTimeout,
+		"9223372036854775807":            MaxToolCallTimeout,     // math.MaxInt64 seconds
+		"18446744073709551616":           DefaultToolCallTimeout, // unparseable, not clamped
+	}
+
+	for raw, want := range cases {
+		t.Setenv(key, raw)
+		got := parseEnvToolCallTimeout(key)
+		if got != want {
+			t.Errorf("parseEnvToolCallTimeout(%q) = %v, want %v", raw, got, want)
+		}
+		// The property that matters regardless of the exact value: a deadline
+		// must always be positive and never exceed the declared maximum.
+		if got <= 0 {
+			t.Errorf("parseEnvToolCallTimeout(%q) = %v, which would abort every call", raw, got)
+		}
+		if got > MaxToolCallTimeout {
+			t.Errorf("parseEnvToolCallTimeout(%q) = %v, above the %v maximum", raw, got, MaxToolCallTimeout)
+		}
+	}
+}
+
+func FuzzToolCallTimeoutAlwaysUsable(f *testing.F) {
+	for _, seed := range []string{"", "0", "-1", "90", "600", "601", "9223372036854775807", "abc", "1e9", " 90 ", "+90"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, raw string) {
+		// The OS rejects NUL inside an environment value, so such a string can
+		// never reach the parser and t.Setenv would fail the test on it.
+		if strings.ContainsRune(raw, 0) {
+			t.Skip()
+		}
+		t.Setenv("MITHRIL_MCP_TOOL_TIMEOUT_SECONDS", raw)
+		got := parseEnvToolCallTimeout("MITHRIL_MCP_TOOL_TIMEOUT_SECONDS")
+		if got <= 0 || got > MaxToolCallTimeout {
+			t.Fatalf("env %q produced unusable tool deadline %v", raw, got)
+		}
+	})
 }
