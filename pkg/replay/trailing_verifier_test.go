@@ -1,7 +1,9 @@
 package replay
 
 import (
+	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,10 +22,23 @@ type fakeVerificationSource struct {
 	skipped map[uint64]bool
 	errs    map[uint64]error
 	calls   int
+	slots   []uint64
 }
 
-func (f *fakeVerificationSource) FetchFinalized(slot uint64) (*verifiedBlock, error) {
+type blockingVerificationSource struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (f *blockingVerificationSource) FetchFinalized(ctx context.Context, _ uint64) (*verifiedBlock, error) {
+	f.once.Do(func() { close(f.started) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (f *fakeVerificationSource) FetchFinalized(_ context.Context, slot uint64) (*verifiedBlock, error) {
 	f.calls++
+	f.slots = append(f.slots, slot)
 	if f.errs[slot] != nil {
 		return nil, f.errs[slot]
 	}
@@ -94,6 +109,60 @@ func TestCompareSlotDigest(t *testing.T) {
 
 func newTestVerifier(src blockVerificationSource) *TrailingVerifier {
 	return newTrailingVerifier(src, VerifierConfig{Enabled: true, LagSlots: 4, MaxRPS: 1000, Required: true})
+}
+
+func TestTrailingVerifierMaxRPSBounds(t *testing.T) {
+	require.NoError(t, ValidateTrailingVerifierMaxRPS(1))
+	require.NoError(t, ValidateTrailingVerifierMaxRPS(maxTrailingVerifierRPS))
+	require.EqualError(t, ValidateTrailingVerifierMaxRPS(0), "verifier.max_rps must be between 1 and 1000")
+	require.EqualError(t, ValidateTrailingVerifierMaxRPS(maxTrailingVerifierRPS+1), "verifier.max_rps must be between 1 and 1000")
+
+	src := &fakeVerificationSource{}
+	require.Equal(t, defaultTrailingVerifierMaxRPS, newTrailingVerifier(src, VerifierConfig{}).cfg.MaxRPS)
+	require.Equal(t, maxTrailingVerifierRPS, newTrailingVerifier(src, VerifierConfig{
+		MaxRPS: maxTrailingVerifierRPS + 1,
+	}).cfg.MaxRPS)
+
+	v := newTrailingVerifier(src, VerifierConfig{MaxRPS: 1})
+	v.cfg.MaxRPS = int(time.Second) + 1
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NotPanics(t, func() { v.Run(ctx) })
+}
+
+func TestStopTrailingVerifierCancelsAndJoinsInFlightFetch(t *testing.T) {
+	ResetVerificationStatus(true, 0)
+	t.Cleanup(func() { ResetVerificationStatus(false, 0) })
+
+	src := &blockingVerificationSource{started: make(chan struct{})}
+	verifier := newTrailingVerifier(src, VerifierConfig{
+		Enabled:     true,
+		LagSlots:    1,
+		MaxRPS:      maxTrailingVerifierRPS,
+		Required:    true,
+		StallWindow: time.Minute,
+	})
+	verifier.Record(&SlotDigest{Slot: 10})
+	verifier.SetExecutedTip(20)
+	stop := startTrailingVerifier(context.Background(), verifier)
+
+	select {
+	case <-src.started:
+	case <-time.After(time.Second):
+		t.Fatal("verifier did not start its fetch")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("verifier stop did not join the canceled fetch")
+	}
+	stop()
 }
 
 // Watermark advances contiguously as slots verify, oldest-first.
@@ -223,4 +292,163 @@ func TestVerifierRespectsLag(t *testing.T) {
 	v.verifyNext()
 	assert.Equal(t, 1, src.calls)
 	assert.Equal(t, uint64(100), v.VerifiedWatermark())
+}
+
+func TestVerifierKeepsRecordedSlotsOrdered(t *testing.T) {
+	src := &fakeVerificationSource{blocks: map[uint64]*verifiedBlock{}, skipped: map[uint64]bool{}, errs: map[uint64]error{}}
+	v := newTestVerifier(src)
+
+	for _, slot := range []uint64{102, 100, 101} {
+		d, vb := digestFor(slot, vhash(byte(slot)), vsig(byte(slot)), 5000, false, []uint64{1}, []uint64{2}, []byte{0})
+		v.Record(d)
+		src.blocks[slot] = vb
+	}
+	v.SetExecutedTip(200)
+
+	for range 3 {
+		v.verifyNext()
+	}
+	assert.Equal(t, []uint64{100, 101, 102}, src.slots)
+	assert.Equal(t, uint64(102), v.VerifiedWatermark())
+}
+
+func TestVerifierRewindReplacesAbandonedSuffix(t *testing.T) {
+	src := &fakeVerificationSource{blocks: map[uint64]*verifiedBlock{}, skipped: map[uint64]bool{}, errs: map[uint64]error{}}
+	v := newTestVerifier(src)
+
+	for slot := uint64(100); slot <= 102; slot++ {
+		d, vb := digestFor(slot, vhash(byte(slot)), vsig(byte(slot)), 5000, false, []uint64{1}, []uint64{2}, []byte{0})
+		v.Record(d)
+		src.blocks[slot] = vb
+	}
+	v.SetExecutedTip(200)
+	for range 3 {
+		v.verifyNext()
+	}
+	require.Equal(t, uint64(102), v.VerifiedWatermark())
+
+	v.RewindFrom(101)
+	assert.Equal(t, uint64(100), v.VerifiedWatermark())
+
+	for slot := uint64(101); slot <= 102; slot++ {
+		d, vb := digestFor(slot, vhash(byte(slot+10)), vsig(byte(slot+10)), 6000, false, []uint64{2}, []uint64{3}, []byte{0})
+		v.Record(d)
+		src.blocks[slot] = vb
+	}
+	v.SetExecutedTip(200)
+	for range 2 {
+		v.verifyNext()
+	}
+	assert.Equal(t, uint64(102), v.VerifiedWatermark())
+	assert.Nil(t, v.Failure())
+}
+
+func TestVerifierPublishesLiveCoverageState(t *testing.T) {
+	ResetVerificationStatus(true, 0)
+	defer ResetVerificationStatus(false, 0)
+
+	src := &fakeVerificationSource{blocks: map[uint64]*verifiedBlock{}, skipped: map[uint64]bool{}, errs: map[uint64]error{}}
+	v := newTestVerifier(src)
+	d, vb := digestFor(100, vhash(1), vsig(1), 5000, false, []uint64{1}, []uint64{2}, []byte{0})
+	v.Record(d)
+	v.SetExecutedTip(104)
+
+	state, required, verified, eligible := VerificationSnapshot()
+	if !required || state != VerificationUnavailable || verified != 99 || eligible != 100 {
+		t.Fatalf("before evidence: state=%q required=%v verified=%d eligible=%d",
+			state, required, verified, eligible)
+	}
+
+	src.blocks[100] = vb
+	v.verifyNext()
+	state, _, verified, eligible = VerificationSnapshot()
+	if state != VerificationComplete || verified != 100 || eligible != 100 {
+		t.Fatalf("after verification: state=%q verified=%d eligible=%d",
+			state, verified, eligible)
+	}
+}
+
+func TestVerifierPublishesStalledAfterConfiguredWindow(t *testing.T) {
+	ResetVerificationStatus(true, 0)
+	defer ResetVerificationStatus(false, 0)
+
+	now := time.Unix(1_700_000_000, 0)
+	src := &fakeVerificationSource{
+		blocks:  map[uint64]*verifiedBlock{},
+		skipped: map[uint64]bool{},
+		errs:    map[uint64]error{},
+	}
+	v := newTrailingVerifier(src, VerifierConfig{
+		Enabled:     true,
+		LagSlots:    4,
+		MaxRPS:      1000,
+		StallWindow: time.Second,
+		Required:    true,
+	})
+	v.now = func() time.Time { return now }
+
+	d, vb := digestFor(100, vhash(1), vsig(1), 5000, false, []uint64{1}, []uint64{2}, []byte{0})
+	vb.Blockhash = vhash(2)
+	v.Record(d)
+	src.blocks[100] = vb
+	v.SetExecutedTip(104)
+	v.verifyNext()
+
+	state, _, _, _ := VerificationSnapshot()
+	require.Equal(t, VerificationIncomplete, state)
+
+	now = now.Add(time.Second)
+	v.verifyNext()
+	require.Equal(t, 1, src.calls, "backoff must prevent another RPC request")
+	state, _, _, _ = VerificationSnapshot()
+	require.Equal(t, VerificationStalled, state)
+	src.blocks[100].Blockhash = d.Blockhash
+	v.mu.Lock()
+	v.pending[100].nextTry = time.Time{}
+	v.mu.Unlock()
+	v.verifyNext()
+	state, _, _, _ = VerificationSnapshot()
+	require.Equal(t, VerificationComplete, state)
+}
+
+func TestVerifierOutageTimeDoesNotBecomeStallTime(t *testing.T) {
+	ResetVerificationStatus(true, 0)
+	defer ResetVerificationStatus(false, 0)
+
+	now := time.Unix(1_700_000_000, 0)
+	src := &fakeVerificationSource{
+		blocks:  map[uint64]*verifiedBlock{},
+		skipped: map[uint64]bool{},
+		errs:    map[uint64]error{100: errors.New("rpc unavailable")},
+	}
+	v := newTrailingVerifier(src, VerifierConfig{
+		Enabled:     true,
+		LagSlots:    4,
+		MaxRPS:      1000,
+		StallWindow: time.Minute,
+		Required:    true,
+	})
+	v.now = func() time.Time { return now }
+
+	d, vb := digestFor(100, vhash(1), vsig(1), 5000, false, []uint64{1}, []uint64{2}, []byte{0})
+	v.Record(d)
+	v.SetExecutedTip(104)
+	v.verifyNext()
+
+	now = now.Add(10 * time.Minute)
+	v.mu.Lock()
+	v.publishStatusLocked()
+	v.mu.Unlock()
+	state, _, _, _ := VerificationSnapshot()
+	require.Equal(t, VerificationUnavailable, state)
+
+	delete(src.errs, 100)
+	vb.Blockhash = vhash(2)
+	src.blocks[100] = vb
+	v.mu.Lock()
+	v.pending[100].nextTry = time.Time{}
+	v.mu.Unlock()
+	v.verifyNext()
+	state, _, _, _ = VerificationSnapshot()
+	require.Equal(t, VerificationIncomplete, state, "a recovered source starts a fresh stall window")
 }
