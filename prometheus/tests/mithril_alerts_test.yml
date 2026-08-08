@@ -1,0 +1,2200 @@
+rule_files:
+  - ../rules/mithril.yml
+
+evaluation_interval: 15s
+
+tests:
+  - name: missing target and deadman carry the expected identity
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-node",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'up{job="mithril-monitor",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'up{job="mithril-notifier",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'up{job="node-exporter",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'up{job="prometheus",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'up{job="alertmanager",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-node",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-monitor",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-notifier",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-agent",required="false",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="node-exporter",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="blackbox-exporter",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="prometheus",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="alertmanager",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilRequiredTargetMissing
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              job: blackbox-exporter
+              severity: critical
+            exp_annotations:
+              summary: "A required scrape job has no target for this deployment"
+      - eval_time: 1m
+        alertname: MithrilDeadmanHeartbeat
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: none
+            exp_annotations:
+              summary: "Deadman heartbeat; its absence means the alerting path failed"
+
+  - name: down scrape target fires then recovers
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-node",deployment_id="d1"}'
+        values: '0+0x8 1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-node",required="true",deployment_id="d1"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilScrapeTargetDown
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              job: mithril-node
+              severity: critical
+            exp_annotations:
+              summary: "A required scrape target is down"
+      - eval_time: 4m
+        alertname: MithrilScrapeTargetDown
+        exp_alerts: []
+
+  - name: prometheus anchors missing monitor before signed inventory is available
+    interval: 15s
+    input_series:
+      - series: 'up{job="prometheus",deployment_id="d1"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilRequiredTargetMissing
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              job: mithril-monitor
+              severity: critical
+            exp_annotations:
+              summary: "A required scrape job has no target for this deployment"
+
+  - name: monitor down remains alertable after its inventory is stale
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-monitor",deployment_id="d1"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilScrapeTargetDown
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              job: mithril-monitor
+              severity: critical
+            exp_annotations:
+              summary: "A required scrape target is down"
+
+  - name: deadman heartbeat disappears with the monitoring source
+    interval: 15s
+    input_series:
+      - series: 'up{job="prometheus",deployment_id="d1"}'
+        values: '1+0x3 stale'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: MithrilDeadmanHeartbeat
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: none
+            exp_annotations:
+              summary: "Deadman heartbeat; its absence means the alerting path failed"
+      - eval_time: 2m
+        alertname: MithrilDeadmanHeartbeat
+        exp_alerts: []
+
+  - name: monitoring peer and blackbox probe failures fire
+    interval: 15s
+    input_series:
+      - series: 'up{job="prometheus-peer",deployment_id="d1",instance="peer"}'
+        values: '0+0x12'
+      - series: 'probe_success{job="mithril-rpc-offhost",deployment_id="d1",instance="node-rpc"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilMonitoringPeerDown
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              instance: peer
+              job: prometheus-peer
+              severity: critical
+            exp_annotations:
+              summary: "The required monitoring peer is absent, unreachable, or has invalid policy"
+      - eval_time: 2m
+        alertname: MithrilBlackboxProbeDown
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              instance: node-rpc
+              job: mithril-rpc-offhost
+              severity: critical
+            exp_annotations:
+              summary: "The off-host RPC blackbox probe is failing"
+
+  - name: monitoring peer applicability gates absence
+    interval: 15s
+    input_series:
+      - series: 'up{job="prometheus",deployment_id="required",monitoring_peer_required="true"}'
+        values: '1+0x12'
+      - series: 'up{job="prometheus",deployment_id="optional",monitoring_peer_required="false"}'
+        values: '1+0x12'
+      - series: 'up{job="prometheus",deployment_id="invalid",monitoring_peer_required="maybe"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilMonitoringPeerDown
+        exp_alerts:
+          - exp_labels:
+              deployment_id: required
+              job: prometheus-peer
+              severity: critical
+            exp_annotations:
+              summary: "The required monitoring peer is absent, unreachable, or has invalid policy"
+          - exp_labels:
+              deployment_id: invalid
+              job: prometheus-peer
+              severity: critical
+            exp_annotations:
+              summary: "The required monitoring peer is absent, unreachable, or has invalid policy"
+
+  - name: monitor identity rejects missing mismatched duplicate malformed and non-one rows
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-monitor",deployment_id="missing"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_identity_info{signed_deployment_id="other",systemd_unit="mithril.service",systemd_scope="system",deployment_id="mismatch"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_identity_info{signed_deployment_id="duplicate",systemd_unit="mithril.service",systemd_scope="system",deployment_id="duplicate",instance="one"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_identity_info{signed_deployment_id="duplicate",systemd_unit="mithril.service",systemd_scope="system",deployment_id="duplicate",instance="two"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_identity_info{signed_deployment_id="bad id",systemd_unit="mithril.service",systemd_scope="system",deployment_id="malformed"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_identity_info{signed_deployment_id="bad-unit",systemd_unit="mithril.target",systemd_scope="system",deployment_id="bad-unit"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_identity_info{signed_deployment_id="bad-value",systemd_unit="mithril.service",systemd_scope="system",deployment_id="bad-value"}'
+        values: '2+0x12'
+      - series: 'mithril_monitor_identity_info{signed_deployment_id="user",systemd_unit="mithril.service",systemd_scope="user",deployment_id="user"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilMonitorIdentityInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: bad-unit
+              severity: critical
+            exp_annotations:
+              summary: "The off-host monitor deployment identity is missing or invalid"
+          - exp_labels:
+              deployment_id: bad-value
+              severity: critical
+            exp_annotations:
+              summary: "The off-host monitor deployment identity is missing or invalid"
+          - exp_labels:
+              deployment_id: duplicate
+              severity: critical
+            exp_annotations:
+              summary: "The off-host monitor deployment identity is missing or invalid"
+          - exp_labels:
+              deployment_id: malformed
+              severity: critical
+            exp_annotations:
+              summary: "The off-host monitor deployment identity is missing or invalid"
+          - exp_labels:
+              deployment_id: mismatch
+              severity: critical
+            exp_annotations:
+              summary: "The off-host monitor deployment identity is missing or invalid"
+          - exp_labels:
+              deployment_id: missing
+              severity: critical
+            exp_annotations:
+              summary: "The off-host monitor deployment identity is missing or invalid"
+          - exp_labels:
+              deployment_id: user
+              severity: critical
+            exp_annotations:
+              summary: "The off-host monitor deployment identity is missing or invalid"
+
+  - name: exact monitor identity and custom system unit are accepted
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-monitor",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_identity_info{signed_deployment_id="d1",systemd_unit="mithril-mainnet.service",systemd_scope="system",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'node_systemd_unit_state{name="mithril-mainnet.service",state="active",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'node_systemd_service_restart_total{name="mithril-mainnet.service",deployment_id="d1"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilMonitorIdentityInvalid
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: MithrilServiceDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: MithrilServiceRestartLoop
+        exp_alerts: []
+
+  - name: monitor inventory rejects a missing role and fractional boolean
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-monitor",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_rpc_probe_success{role="node",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_rpc_probe_success{role="reference_primary",deployment_id="d1"}'
+        values: '0.5+0x12'
+      - series: 'mithril_monitor_collect_success{collector="node_rpc",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_collect_success{collector="reference_rpc",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_collect_success{collector="state",deployment_id="d1"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilMonitorMetricsInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The off-host monitor metric inventory is invalid"
+
+  - name: complete monitor inventory is accepted
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-monitor",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_rpc_probe_success{role="node",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_rpc_probe_success{role="reference_primary",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_rpc_probe_success{role="reference_fallback",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="node",deployment_id="d1"}'
+        values: '0+15x12'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="reference_primary",deployment_id="d1"}'
+        values: '0+15x12'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="reference_fallback",deployment_id="d1"}'
+        values: '0+15x12'
+      - series: 'mithril_node_replay_slot{node_view="local_replay",deployment_id="d1"}'
+        values: '100+1x12'
+      - series: 'mithril_reference_slot{role="primary",commitment="confirmed",deployment_id="d1"}'
+        values: '100+1x12'
+      - series: 'mithril_reference_slot{role="fallback",commitment="confirmed",deployment_id="d1"}'
+        values: '100+1x12'
+      - series: 'mithril_node_slot_delta{role="primary",node_view="local_replay",commitment="confirmed",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_node_slot_delta{role="fallback",node_view="local_replay",commitment="confirmed",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_reference_slot_disagreement_slots{commitment="confirmed",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_monitor_collect_success{collector="node_rpc",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_collect_success{collector="reference_rpc",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_collect_success{collector="state",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_last_collection_timestamp_seconds{deployment_id="d1"}'
+        values: '0+15x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilMonitorMetricsInvalid
+        exp_alerts: []
+
+  - name: future monitor timestamps fail closed
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-monitor",deployment_id="future"}'
+        values: '1+0x12'
+      - series: 'mithril_rpc_probe_success{role="node",deployment_id="future"}'
+        values: '1+0x12'
+      - series: 'mithril_rpc_probe_success{role="reference_primary",deployment_id="future"}'
+        values: '1+0x12'
+      - series: 'mithril_rpc_probe_success{role="reference_fallback",deployment_id="future"}'
+        values: '1+0x12'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="node",deployment_id="future"}'
+        values: '1000+0x12'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="reference_primary",deployment_id="future"}'
+        values: '1000+0x12'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="reference_fallback",deployment_id="future"}'
+        values: '1000+0x12'
+      - series: 'mithril_node_replay_slot{node_view="local_replay",deployment_id="future"}'
+        values: '100+1x12'
+      - series: 'mithril_reference_slot{role="primary",commitment="confirmed",deployment_id="future"}'
+        values: '100+1x12'
+      - series: 'mithril_reference_slot{role="fallback",commitment="confirmed",deployment_id="future"}'
+        values: '100+1x12'
+      - series: 'mithril_node_slot_delta{role="primary",node_view="local_replay",commitment="confirmed",deployment_id="future"}'
+        values: '0+0x12'
+      - series: 'mithril_node_slot_delta{role="fallback",node_view="local_replay",commitment="confirmed",deployment_id="future"}'
+        values: '0+0x12'
+      - series: 'mithril_reference_slot_disagreement_slots{commitment="confirmed",deployment_id="future"}'
+        values: '0+0x12'
+      - series: 'mithril_monitor_collect_success{collector="node_rpc",deployment_id="future"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_collect_success{collector="reference_rpc",deployment_id="future"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_collect_success{collector="state",deployment_id="future"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_last_collection_timestamp_seconds{deployment_id="future"}'
+        values: '1000+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilMonitorMetricsInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: future
+              severity: critical
+            exp_annotations:
+              summary: "The off-host monitor metric inventory is invalid"
+
+  - name: state collector row is required and boolean
+    interval: 15s
+    input_series:
+      - series: 'mithril_monitor_collect_success{collector="node_rpc",deployment_id="missing"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_collect_success{collector="reference_rpc",deployment_id="missing"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_collect_success{collector="node_rpc",deployment_id="invalid"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_collect_success{collector="reference_rpc",deployment_id="invalid"}'
+        values: '1+0x12'
+      - series: 'mithril_monitor_collect_success{collector="state",deployment_id="invalid"}'
+        values: '0.5+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilMonitorMetricsInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: invalid
+              severity: critical
+            exp_annotations:
+              summary: "The off-host monitor metric inventory is invalid"
+          - exp_labels:
+              deployment_id: missing
+              severity: critical
+            exp_annotations:
+              summary: "The off-host monitor metric inventory is invalid"
+
+  - name: signed target inventory rejects missing duplicate and invalid rows
+    interval: 15s
+    input_series:
+      - series: 'mithril_expected_target{target_job="mithril-node",required="true",deployment_id="missing"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-monitor",required="true",deployment_id="missing"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-notifier",required="true",deployment_id="missing"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="node-exporter",required="true",deployment_id="missing"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="blackbox-exporter",required="true",deployment_id="missing"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="prometheus",required="true",deployment_id="missing"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="alertmanager",required="true",deployment_id="missing"}'
+        values: '1+0x12'
+
+      - series: 'mithril_expected_target{target_job="mithril-node",required="true",deployment_id="duplicate",instance="one"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-node",required="true",deployment_id="duplicate",instance="two"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-monitor",required="true",deployment_id="duplicate"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-notifier",required="true",deployment_id="duplicate"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="node-exporter",required="true",deployment_id="duplicate"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="blackbox-exporter",required="true",deployment_id="duplicate"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="prometheus",required="true",deployment_id="duplicate"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="alertmanager",required="true",deployment_id="duplicate"}'
+        values: '1+0x12'
+
+      - series: 'mithril_expected_target{target_job="mithril-node",required="false",deployment_id="invalid"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-monitor",required="true",deployment_id="invalid"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-notifier",required="true",deployment_id="invalid"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="unknown",required="false",deployment_id="invalid"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="node-exporter",required="true",deployment_id="invalid"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="blackbox-exporter",required="true",deployment_id="invalid"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="prometheus",required="true",deployment_id="invalid"}'
+        values: '0+0x12'
+      - series: 'mithril_expected_target{target_job="alertmanager",required="maybe",deployment_id="invalid"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilSignedTargetInventoryInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: duplicate
+              severity: critical
+            exp_annotations:
+              summary: "The signed target inventory is missing or invalid"
+          - exp_labels:
+              deployment_id: invalid
+              severity: critical
+            exp_annotations:
+              summary: "The signed target inventory is missing or invalid"
+          - exp_labels:
+              deployment_id: missing
+              severity: critical
+            exp_annotations:
+              summary: "The signed target inventory is missing or invalid"
+
+  - name: exact signed target inventory is accepted
+    interval: 15s
+    input_series:
+      - series: 'mithril_expected_target{target_job="mithril-node",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-monitor",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-notifier",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="mithril-agent",required="false",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="node-exporter",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="blackbox-exporter",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="prometheus",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_target{target_job="alertmanager",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilSignedTargetInventoryInvalid
+        exp_alerts: []
+
+  - name: signed filesystem inventory rejects missing duplicate and invalid rows
+    interval: 15s
+    input_series:
+      - series: 'mithril_expected_filesystem_role{role="root",required="true",deployment_id="missing"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_filesystem_role{role="accounts",required="true",deployment_id="missing"}'
+        values: '1+0x12'
+
+      - series: 'mithril_expected_filesystem_role{role="root",required="true",deployment_id="duplicate",instance="one"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_filesystem_role{role="root",required="true",deployment_id="duplicate",instance="two"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_filesystem_role{role="accounts",required="true",deployment_id="duplicate"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_filesystem_role{role="ledger",required="true",deployment_id="duplicate"}'
+        values: '1+0x12'
+
+      - series: 'mithril_expected_filesystem_role{role="root",required="false",deployment_id="invalid"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_filesystem_role{role="accounts",required="true",deployment_id="invalid"}'
+        values: '0+0x12'
+      - series: 'mithril_expected_filesystem_role{role="unknown",required="maybe",deployment_id="invalid"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilSignedFilesystemInventoryInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: duplicate
+              severity: critical
+            exp_annotations:
+              summary: "The signed filesystem inventory is missing or invalid"
+          - exp_labels:
+              deployment_id: invalid
+              severity: critical
+            exp_annotations:
+              summary: "The signed filesystem inventory is missing or invalid"
+          - exp_labels:
+              deployment_id: missing
+              severity: critical
+            exp_annotations:
+              summary: "The signed filesystem inventory is missing or invalid"
+
+  - name: exact signed filesystem inventory is accepted
+    interval: 15s
+    input_series:
+      - series: 'mithril_expected_filesystem_role{role="root",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_filesystem_role{role="accounts",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_filesystem_role{role="ledger",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilSignedFilesystemInventoryInvalid
+        exp_alerts: []
+
+  - name: running monitor anchors absent signed inventory and filesystem evidence
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-monitor",deployment_id="d1"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilSignedTargetInventoryInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The signed target inventory is missing or invalid"
+      - eval_time: 2m
+        alertname: MithrilSignedFilesystemInventoryInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The signed filesystem inventory is missing or invalid"
+      - eval_time: 2m
+        alertname: MithrilFilesystemMetricsInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "A required filesystem role has missing or invalid measurements"
+
+  - name: filesystem measurements reject missing duplicate invalid and inverted values
+    interval: 15s
+    input_series:
+      - series: 'mithril_expected_filesystem_role{role="root",required="true",deployment_id="missing"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_filesystem_role{role="accounts",required="true",deployment_id="missing"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_filesystem_role{role="ledger",required="true",deployment_id="missing"}'
+        values: '1+0x12'
+      - series: 'mithril_filesystem_avail_bytes{role="root",deployment_id="missing"}'
+        values: '90+0x12'
+      - series: 'mithril_filesystem_avail_bytes{role="accounts",deployment_id="missing"}'
+        values: '80+0x12'
+      - series: 'mithril_filesystem_size_bytes{role="root",deployment_id="missing"}'
+        values: '100+0x12'
+      - series: 'mithril_filesystem_size_bytes{role="accounts",deployment_id="missing"}'
+        values: '100+0x12'
+
+      - series: 'mithril_filesystem_avail_bytes{role="root",deployment_id="duplicate",instance="one"}'
+        values: '90+0x12'
+      - series: 'mithril_filesystem_avail_bytes{role="root",deployment_id="duplicate",instance="two"}'
+        values: '90+0x12'
+      - series: 'mithril_filesystem_avail_bytes{role="accounts",deployment_id="duplicate"}'
+        values: '80+0x12'
+      - series: 'mithril_filesystem_avail_bytes{role="ledger",deployment_id="duplicate"}'
+        values: '70+0x12'
+      - series: 'mithril_filesystem_size_bytes{role="root",deployment_id="duplicate"}'
+        values: '100+0x12'
+      - series: 'mithril_filesystem_size_bytes{role="accounts",deployment_id="duplicate"}'
+        values: '100+0x12'
+      - series: 'mithril_filesystem_size_bytes{role="ledger",deployment_id="duplicate"}'
+        values: '100+0x12'
+
+      - series: 'mithril_filesystem_avail_bytes{role="root",deployment_id="invalid"}'
+        values: 'NaN+0x12'
+      - series: 'mithril_filesystem_avail_bytes{role="accounts",deployment_id="invalid"}'
+        values: '-1+0x12'
+      - series: 'mithril_filesystem_avail_bytes{role="ledger",deployment_id="invalid"}'
+        values: '1.5+0x12'
+      - series: 'mithril_filesystem_size_bytes{role="root",deployment_id="invalid"}'
+        values: '+Inf+0x12'
+      - series: 'mithril_filesystem_size_bytes{role="accounts",deployment_id="invalid"}'
+        values: '0+0x12'
+      - series: 'mithril_filesystem_size_bytes{role="ledger",deployment_id="invalid"}'
+        values: '9007199254740992+0x12'
+
+      - series: 'mithril_filesystem_avail_bytes{role="root",deployment_id="inverted"}'
+        values: '101+0x12'
+      - series: 'mithril_filesystem_avail_bytes{role="accounts",deployment_id="inverted"}'
+        values: '80+0x12'
+      - series: 'mithril_filesystem_avail_bytes{role="ledger",deployment_id="inverted"}'
+        values: '70+0x12'
+      - series: 'mithril_filesystem_size_bytes{role="root",deployment_id="inverted"}'
+        values: '100+0x12'
+      - series: 'mithril_filesystem_size_bytes{role="accounts",deployment_id="inverted"}'
+        values: '100+0x12'
+      - series: 'mithril_filesystem_size_bytes{role="ledger",deployment_id="inverted"}'
+        values: '100+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilFilesystemMetricsInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: duplicate
+              severity: critical
+            exp_annotations:
+              summary: "A required filesystem role has missing or invalid measurements"
+          - exp_labels:
+              deployment_id: invalid
+              severity: critical
+            exp_annotations:
+              summary: "A required filesystem role has missing or invalid measurements"
+          - exp_labels:
+              deployment_id: inverted
+              severity: critical
+            exp_annotations:
+              summary: "A required filesystem role has missing or invalid measurements"
+          - exp_labels:
+              deployment_id: missing
+              severity: critical
+            exp_annotations:
+              summary: "A required filesystem role has missing or invalid measurements"
+
+  - name: exact filesystem measurements are accepted
+    interval: 15s
+    input_series:
+      - series: 'mithril_expected_filesystem_role{role="root",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_filesystem_role{role="accounts",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_expected_filesystem_role{role="ledger",required="true",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_filesystem_avail_bytes{role="root",deployment_id="d1"}'
+        values: '90+0x12'
+      - series: 'mithril_filesystem_avail_bytes{role="accounts",deployment_id="d1"}'
+        values: '80+0x12'
+      - series: 'mithril_filesystem_avail_bytes{role="ledger",deployment_id="d1"}'
+        values: '70+0x12'
+      - series: 'mithril_filesystem_size_bytes{role="root",deployment_id="d1"}'
+        values: '100+0x12'
+      - series: 'mithril_filesystem_size_bytes{role="accounts",deployment_id="d1"}'
+        values: '100+0x12'
+      - series: 'mithril_filesystem_size_bytes{role="ledger",deployment_id="d1"}'
+        values: '100+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilFilesystemMetricsInvalid
+        exp_alerts: []
+
+  - name: failed collector and stale loop fire then collector recovers
+    interval: 15s
+    input_series:
+      - series: 'mithril_monitor_collect_success{collector="node_rpc",deployment_id="d1"}'
+        values: '0+0x8 1+0x12'
+      - series: 'mithril_monitor_last_collection_timestamp_seconds{deployment_id="d1"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilMonitorCollectorFailing
+        exp_alerts:
+          - exp_labels:
+              collector: node_rpc
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "An off-host monitor collector is failing"
+      - eval_time: 4m
+        alertname: MithrilMonitorCollectorFailing
+        exp_alerts: []
+      - eval_time: 2m30s
+        alertname: MithrilMonitorStale
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The off-host monitor has stopped completing collection cycles"
+
+  - name: node and both reference probes report distinct severity
+    interval: 15s
+    input_series:
+      - series: 'mithril_rpc_probe_success{role="node",deployment_id="d1"}'
+        values: '0+0x20'
+      - series: 'mithril_rpc_probe_success{role="reference_primary",deployment_id="d1"}'
+        values: '0+0x20'
+      - series: 'mithril_rpc_probe_success{role="reference_fallback",deployment_id="d1"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MithrilNodeProbeDown
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              role: node
+              severity: critical
+            exp_annotations:
+              summary: "Node RPC is unreachable from the operations host"
+      - eval_time: 3m
+        alertname: MithrilReferenceProbeDown
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              role: reference_primary
+              severity: warning
+            exp_annotations:
+              summary: "One reference RPC provider is unreachable"
+          - exp_labels:
+              deployment_id: d1
+              role: reference_fallback
+              severity: warning
+            exp_annotations:
+              summary: "One reference RPC provider is unreachable"
+      - eval_time: 3m
+        alertname: MithrilBothReferencesDown
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              role: reference_primary
+              severity: critical
+            exp_annotations:
+              summary: "Both reference RPC providers are unreachable"
+
+  - name: fresh signed deltas distinguish behind ahead and disagreement
+    interval: 15s
+    input_series:
+      - series: 'mithril_rpc_probe_success{role="node",deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'mithril_rpc_probe_success{role="reference_primary",deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'mithril_rpc_probe_success{role="reference_fallback",deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="node",deployment_id="d1"}'
+        values: '0+15x20'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="reference_primary",deployment_id="d1"}'
+        values: '0+15x20'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="reference_fallback",deployment_id="d1"}'
+        values: '0+15x20'
+      - series: 'mithril_node_slot_delta{role="primary",node_view="local_replay",commitment="confirmed",deployment_id="d1"}'
+        values: '200+0x20'
+      - series: 'mithril_reference_slot_disagreement_slots{commitment="confirmed",deployment_id="d1"}'
+        values: '64+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MithrilNodeBehindReference
+        exp_alerts:
+          - exp_labels:
+              commitment: confirmed
+              deployment_id: d1
+              node_view: local_replay
+              role: primary
+              severity: critical
+            exp_annotations:
+              summary: "Node replay is more than 150 slots behind the preferred healthy reference"
+      - eval_time: 3m
+        alertname: MithrilNodeAheadOfReference
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: MithrilReferencesDisagree
+        exp_alerts:
+          - exp_labels:
+              commitment: confirmed
+              deployment_id: d1
+              severity: warning
+            exp_annotations:
+              summary: "Reference providers disagree by more than 32 slots"
+
+  - name: fresh negative delta reports local ahead
+    interval: 15s
+    input_series:
+      - series: 'mithril_rpc_probe_success{role="node",deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'mithril_rpc_probe_success{role="reference_primary",deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="node",deployment_id="d1"}'
+        values: '0+15x20'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="reference_primary",deployment_id="d1"}'
+        values: '0+15x20'
+      - series: 'mithril_node_slot_delta{role="primary",node_view="local_replay",commitment="confirmed",deployment_id="d1"}'
+        values: '-64+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MithrilNodeAheadOfReference
+        exp_alerts:
+          - exp_labels:
+              commitment: confirmed
+              deployment_id: d1
+              node_view: local_replay
+              role: primary
+              severity: warning
+            exp_annotations:
+              summary: "Node replay is ahead of the preferred healthy reference"
+
+  - name: fallback delta is used when primary reference is down
+    interval: 15s
+    input_series:
+      - series: 'mithril_rpc_probe_success{role="node",deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'mithril_rpc_probe_success{role="reference_primary",deployment_id="d1"}'
+        values: '0+0x20'
+      - series: 'mithril_rpc_probe_success{role="reference_fallback",deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="node",deployment_id="d1"}'
+        values: '0+15x20'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="reference_primary",deployment_id="d1"}'
+        values: '0+0x20'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="reference_fallback",deployment_id="d1"}'
+        values: '0+15x20'
+      - series: 'mithril_node_slot_delta{role="primary",node_view="local_replay",commitment="confirmed",deployment_id="d1"}'
+        values: '200+0x20'
+      - series: 'mithril_node_slot_delta{role="fallback",node_view="local_replay",commitment="confirmed",deployment_id="d1"}'
+        values: '200+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MithrilNodeBehindReference
+        exp_alerts:
+          - exp_labels:
+              commitment: confirmed
+              deployment_id: d1
+              node_view: local_replay
+              role: fallback
+              severity: critical
+            exp_annotations:
+              summary: "Node replay is more than 150 slots behind the preferred healthy reference"
+
+  - name: fallback ahead delta is used when primary reference is stale
+    interval: 15s
+    input_series:
+      - series: 'mithril_rpc_probe_success{role="node",deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'mithril_rpc_probe_success{role="reference_primary",deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'mithril_rpc_probe_success{role="reference_fallback",deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="node",deployment_id="d1"}'
+        values: '0+15x20'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="reference_primary",deployment_id="d1"}'
+        values: '0+0x20'
+      - series: 'mithril_rpc_probe_last_success_timestamp_seconds{role="reference_fallback",deployment_id="d1"}'
+        values: '0+15x20'
+      - series: 'mithril_node_slot_delta{role="primary",node_view="local_replay",commitment="confirmed",deployment_id="d1"}'
+        values: '-64+0x20'
+      - series: 'mithril_node_slot_delta{role="fallback",node_view="local_replay",commitment="confirmed",deployment_id="d1"}'
+        values: '-64+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MithrilNodeAheadOfReference
+        exp_alerts:
+          - exp_labels:
+              commitment: confirmed
+              deployment_id: d1
+              node_view: local_replay
+              role: fallback
+              severity: warning
+            exp_annotations:
+              summary: "Node replay is ahead of the preferred healthy reference"
+
+  - name: replay stall is suppressed during bootstrap
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-node",deployment_id="d1"}'
+        values: '1+0x40'
+      - series: 'mithril_replay_slot{deployment_id="d1"}'
+        values: '100+0x33 101+1x7'
+      - series: 'mithril_replay_last_success_timestamp_seconds{deployment_id="d1"}'
+        values: '0+0x33 510+15x7'
+      - series: 'mithril_replay_observation_started_timestamp_seconds{deployment_id="d1"}'
+        values: '1+0x40'
+      - series: 'snapshot_bootstrap_active{deployment_id="d1"}'
+        values: '1+0x16 0+0x24'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="d1"}'
+        values: '1+0x40'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MithrilReplayStalled
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: MithrilReplayStalled
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "Replay is not advancing"
+      - eval_time: 10m
+        alertname: MithrilReplayStalled
+        exp_alerts: []
+
+  - name: replay and bootstrap scalar evidence rejects invalid values
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-node",deployment_id="fractional-slot"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="fractional-slot"}'
+        values: '1+0x12'
+      - series: 'mithril_replay_slot{deployment_id="fractional-slot"}'
+        values: '100.5+0x12'
+      - series: 'mithril_replay_last_success_timestamp_seconds{deployment_id="fractional-slot"}'
+        values: '0+15x12'
+      - series: 'mithril_replay_observation_started_timestamp_seconds{deployment_id="fractional-slot"}'
+        values: '1+0x12'
+      - series: 'snapshot_bootstrap_active{deployment_id="fractional-slot"}'
+        values: '0+0x12'
+      - series: 'snapshot_bootstrap_started_timestamp_seconds{deployment_id="fractional-slot"}'
+        values: '0+0x12'
+
+      - series: 'up{job="mithril-node",deployment_id="negative-slot"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="negative-slot"}'
+        values: '1+0x12'
+      - series: 'mithril_replay_slot{deployment_id="negative-slot"}'
+        values: '-1+0x12'
+      - series: 'mithril_replay_last_success_timestamp_seconds{deployment_id="negative-slot"}'
+        values: '0+15x12'
+      - series: 'mithril_replay_observation_started_timestamp_seconds{deployment_id="negative-slot"}'
+        values: '1+0x12'
+      - series: 'snapshot_bootstrap_active{deployment_id="negative-slot"}'
+        values: '0+0x12'
+      - series: 'snapshot_bootstrap_started_timestamp_seconds{deployment_id="negative-slot"}'
+        values: '0+0x12'
+
+      - series: 'up{job="mithril-node",deployment_id="nan-slot"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="nan-slot"}'
+        values: '1+0x12'
+      - series: 'mithril_replay_slot{deployment_id="nan-slot"}'
+        values: 'NaN+0x12'
+      - series: 'mithril_replay_last_success_timestamp_seconds{deployment_id="nan-slot"}'
+        values: '0+15x12'
+      - series: 'mithril_replay_observation_started_timestamp_seconds{deployment_id="nan-slot"}'
+        values: '1+0x12'
+      - series: 'snapshot_bootstrap_active{deployment_id="nan-slot"}'
+        values: '0+0x12'
+      - series: 'snapshot_bootstrap_started_timestamp_seconds{deployment_id="nan-slot"}'
+        values: '0+0x12'
+
+      - series: 'up{job="mithril-node",deployment_id="fractional-last-success"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="fractional-last-success"}'
+        values: '1+0x12'
+      - series: 'mithril_replay_slot{deployment_id="fractional-last-success"}'
+        values: '100+0x12'
+      - series: 'mithril_replay_last_success_timestamp_seconds{deployment_id="fractional-last-success"}'
+        values: '100.5+0x12'
+      - series: 'mithril_replay_observation_started_timestamp_seconds{deployment_id="fractional-last-success"}'
+        values: '1+0x12'
+      - series: 'snapshot_bootstrap_active{deployment_id="fractional-last-success"}'
+        values: '0+0x12'
+      - series: 'snapshot_bootstrap_started_timestamp_seconds{deployment_id="fractional-last-success"}'
+        values: '0+0x12'
+
+      - series: 'up{job="mithril-node",deployment_id="future-last-success"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="future-last-success"}'
+        values: '1+0x12'
+      - series: 'mithril_replay_slot{deployment_id="future-last-success"}'
+        values: '100+0x12'
+      - series: 'mithril_replay_last_success_timestamp_seconds{deployment_id="future-last-success"}'
+        values: '1000+0x12'
+      - series: 'mithril_replay_observation_started_timestamp_seconds{deployment_id="future-last-success"}'
+        values: '1+0x12'
+      - series: 'snapshot_bootstrap_active{deployment_id="future-last-success"}'
+        values: '0+0x12'
+      - series: 'snapshot_bootstrap_started_timestamp_seconds{deployment_id="future-last-success"}'
+        values: '0+0x12'
+
+      - series: 'up{job="mithril-node",deployment_id="future-bootstrap-start"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="future-bootstrap-start"}'
+        values: '1+0x12'
+      - series: 'mithril_replay_slot{deployment_id="future-bootstrap-start"}'
+        values: '100+0x12'
+      - series: 'mithril_replay_last_success_timestamp_seconds{deployment_id="future-bootstrap-start"}'
+        values: '0+15x12'
+      - series: 'mithril_replay_observation_started_timestamp_seconds{deployment_id="future-bootstrap-start"}'
+        values: '1+0x12'
+      - series: 'snapshot_bootstrap_active{deployment_id="future-bootstrap-start"}'
+        values: '1+0x12'
+      - series: 'snapshot_bootstrap_started_timestamp_seconds{deployment_id="future-bootstrap-start"}'
+        values: '1000+0x12'
+
+      - series: 'up{job="mithril-node",deployment_id="infinite-slot"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="infinite-slot"}'
+        values: '1+0x12'
+      - series: 'mithril_replay_slot{deployment_id="infinite-slot"}'
+        values: '+Inf+0x12'
+      - series: 'mithril_replay_last_success_timestamp_seconds{deployment_id="infinite-slot"}'
+        values: '0+15x12'
+      - series: 'mithril_replay_observation_started_timestamp_seconds{deployment_id="infinite-slot"}'
+        values: '1+0x12'
+      - series: 'snapshot_bootstrap_active{deployment_id="infinite-slot"}'
+        values: '0+0x12'
+      - series: 'snapshot_bootstrap_started_timestamp_seconds{deployment_id="infinite-slot"}'
+        values: '0+0x12'
+
+      - series: 'up{job="mithril-node",deployment_id="too-large-slot"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="too-large-slot"}'
+        values: '1+0x12'
+      - series: 'mithril_replay_slot{deployment_id="too-large-slot"}'
+        values: '9007199254740992+0x12'
+      - series: 'mithril_replay_last_success_timestamp_seconds{deployment_id="too-large-slot"}'
+        values: '0+15x12'
+      - series: 'mithril_replay_observation_started_timestamp_seconds{deployment_id="too-large-slot"}'
+        values: '1+0x12'
+      - series: 'snapshot_bootstrap_active{deployment_id="too-large-slot"}'
+        values: '0+0x12'
+      - series: 'snapshot_bootstrap_started_timestamp_seconds{deployment_id="too-large-slot"}'
+        values: '0+0x12'
+
+      - series: 'up{job="mithril-node",deployment_id="valid"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="valid"}'
+        values: '1+0x12'
+      - series: 'mithril_replay_slot{deployment_id="valid"}'
+        values: '100+0x12'
+      - series: 'mithril_replay_last_success_timestamp_seconds{deployment_id="valid"}'
+        values: '0+15x12'
+      - series: 'mithril_replay_observation_started_timestamp_seconds{deployment_id="valid"}'
+        values: '1+0x12'
+      - series: 'snapshot_bootstrap_active{deployment_id="valid"}'
+        values: '0+0x12'
+      - series: 'snapshot_bootstrap_started_timestamp_seconds{deployment_id="valid"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilReplayMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              deployment_id: fractional-last-success
+              severity: critical
+            exp_annotations:
+              summary: "Required replay or bootstrap evidence is missing or invalid"
+          - exp_labels:
+              deployment_id: fractional-slot
+              severity: critical
+            exp_annotations:
+              summary: "Required replay or bootstrap evidence is missing or invalid"
+          - exp_labels:
+              deployment_id: future-bootstrap-start
+              severity: critical
+            exp_annotations:
+              summary: "Required replay or bootstrap evidence is missing or invalid"
+          - exp_labels:
+              deployment_id: future-last-success
+              severity: critical
+            exp_annotations:
+              summary: "Required replay or bootstrap evidence is missing or invalid"
+          - exp_labels:
+              deployment_id: infinite-slot
+              severity: critical
+            exp_annotations:
+              summary: "Required replay or bootstrap evidence is missing or invalid"
+          - exp_labels:
+              deployment_id: nan-slot
+              severity: critical
+            exp_annotations:
+              summary: "Required replay or bootstrap evidence is missing or invalid"
+          - exp_labels:
+              deployment_id: negative-slot
+              severity: critical
+            exp_annotations:
+              summary: "Required replay or bootstrap evidence is missing or invalid"
+          - exp_labels:
+              deployment_id: too-large-slot
+              severity: critical
+            exp_annotations:
+              summary: "Required replay or bootstrap evidence is missing or invalid"
+
+  - name: monitoring schema startup suppresses absent-family alerts
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-node",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="d1"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilRuntimeInfoInvalid
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: MithrilReplayMetricsMissing
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: MithrilBlockSourceInvalid
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: MithrilVerificationStateInvalid
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: MithrilFinalityMetricsInvalid
+        exp_alerts: []
+
+  - name: monitoring readiness rejects missing duplicate and non-boolean values
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-node",deployment_id="missing"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="duplicate",instance="a"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="duplicate",instance="b"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="nonboolean"}'
+        values: '0.5+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilRuntimeInfoInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: duplicate
+              severity: critical
+            exp_annotations:
+              summary: "Node runtime provenance or monitoring readiness is invalid"
+          - exp_labels:
+              deployment_id: missing
+              severity: critical
+            exp_annotations:
+              summary: "Node runtime provenance or monitoring readiness is invalid"
+          - exp_labels:
+              deployment_id: nonboolean
+              severity: critical
+            exp_annotations:
+              summary: "Node runtime provenance or monitoring readiness is invalid"
+
+  - name: monitoring readiness cannot remain false indefinitely
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-node",deployment_id="d1"}'
+        values: '1+0x1500'
+      - series: 'process_start_time_seconds{job="mithril-node",deployment_id="d1"}'
+        values: '0+0x1500'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="d1"}'
+        values: '0+0x1500'
+    alert_rule_test:
+      - eval_time: 6h2m
+        alertname: MithrilRuntimeInfoInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "Node runtime provenance or monitoring readiness is invalid"
+
+  - name: missing schema fails closed after initialization completes
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-node",deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="d1"}'
+        values: '0+0x8 1+0x12'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: MithrilRuntimeInfoInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "Node runtime provenance or monitoring readiness is invalid"
+      - eval_time: 4m
+        alertname: MithrilReplayMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "Required replay or bootstrap evidence is missing or invalid"
+      - eval_time: 4m
+        alertname: MithrilBlockSourceInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The active block-source inventory is invalid"
+      - eval_time: 4m
+        alertname: MithrilVerificationStateInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The verification metric inventory is invalid"
+      - eval_time: 4m
+        alertname: MithrilFinalityMetricsInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The finality metric inventory is missing or invalid"
+
+  - name: malformed and divergent evidence remains live during initialization
+    interval: 15s
+    input_series:
+      - series: 'mithril_monitoring_schema_ready{deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_runtime_info{protocol_mode="classic",consensus_mode="verifying",configured_block_source="rpc",deployment_id="d1"}'
+        values: '2+0x12'
+      - series: 'mithril_block_source_active{source="rpc",deployment_id="d1"}'
+        values: '2+0x12'
+      - series: 'mithril_verification_state{state="diverged",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_finality_slot{source="certificate",deployment_id="d1"}'
+        values: '-1+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilRuntimeInfoInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "Node runtime provenance or monitoring readiness is invalid"
+      - eval_time: 2m
+        alertname: MithrilBlockSourceInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The active block-source inventory is invalid"
+      - eval_time: 30s
+        alertname: MithrilVerificationDiverged
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+              state: diverged
+            exp_annotations:
+              summary: "Verification reports divergence"
+      - eval_time: 2m
+        alertname: MithrilFinalityMetricsInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The finality metric inventory is missing or invalid"
+
+  - name: missing replay evidence and long bootstrap fire
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-node",deployment_id="d1"}'
+        values: '1+0x1600'
+      - series: 'snapshot_bootstrap_active{deployment_id="d1"}'
+        values: '1+0x1600'
+      - series: 'snapshot_bootstrap_started_timestamp_seconds{deployment_id="d1"}'
+        values: '1+0x1600'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="d1"}'
+        values: '1+0x1600'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilReplayMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "Required replay or bootstrap evidence is missing or invalid"
+      - eval_time: 6h10m
+        alertname: MithrilSnapshotBootstrapTooLong
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "Snapshot bootstrap has exceeded six hours"
+
+  - name: replay latency and process restart loop fire
+    interval: 15s
+    input_series:
+      - series: 'mithril_replay_slot_duration_seconds_bucket{le="0.1",deployment_id="d1"}'
+        values: '0+0x80'
+      - series: 'mithril_replay_slot_duration_seconds_bucket{le="0.4",deployment_id="d1"}'
+        values: '0+0x80'
+      - series: 'mithril_replay_slot_duration_seconds_bucket{le="1",deployment_id="d1"}'
+        values: '0+20x80'
+      - series: 'mithril_replay_slot_duration_seconds_bucket{le="+Inf",deployment_id="d1"}'
+        values: '0+20x80'
+      - series: 'mithril_replay_slot_duration_seconds_count{deployment_id="d1"}'
+        values: '0+20x80'
+      - series: 'process_start_time_seconds{job="mithril-node",deployment_id="d1"}'
+        values: '1+1x80'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: MithrilReplayLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: warning
+            exp_annotations:
+              summary: "Replay p99 exceeds 400 milliseconds"
+      - eval_time: 1m
+        alertname: MithrilNodeRestartLoop
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              job: mithril-node
+              severity: critical
+            exp_annotations:
+              summary: "The Mithril node restarted more than twice in 15 minutes"
+
+  - name: runtime and block-source schemas reject invalid values
+    interval: 15s
+    input_series:
+      - series: 'mithril_runtime_info{protocol_mode="classic",consensus_mode="verifying",configured_block_source="rpc",deployment_id="d1"}'
+        values: '2+0x12'
+      - series: 'mithril_block_source_active{source="rpc",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_block_source_active{source="turbine",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_block_source_active{source="lightbringer",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_block_source_active{source="file",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_block_source_active{source="local",deployment_id="d1"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilRuntimeInfoInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "Node runtime provenance or monitoring readiness is invalid"
+      - eval_time: 2m
+        alertname: MithrilBlockSourceInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The active block-source inventory is invalid"
+
+  - name: complete active-source inventory is accepted
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-node",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_block_source_active{source="rpc",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_block_source_active{source="turbine",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_block_source_active{source="lightbringer",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_block_source_active{source="file",deployment_id="d1"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilBlockSourceInvalid
+        exp_alerts: []
+
+  - name: turbine may use rpc during catch-up or fallback
+    interval: 15s
+    input_series:
+      - series: 'mithril_runtime_info{protocol_mode="alpenglow",consensus_mode="verifying",configured_block_source="turbine",deployment_id="d1"}'
+        values: '1+0x30'
+      - series: 'mithril_block_source_active{source="rpc",deployment_id="d1"}'
+        values: '1+0x30'
+      - series: 'mithril_block_source_active{source="turbine",deployment_id="d1"}'
+        values: '0+0x30'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="d1"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MithrilConfiguredSourceNotActive
+        exp_alerts: []
+
+  - name: exact rpc source mismatch compares the actual label values
+    interval: 15s
+    input_series:
+      - series: 'mithril_runtime_info{protocol_mode="alpenglow",consensus_mode="verifying",configured_block_source="rpc",deployment_id="d1"}'
+        values: '1+0x30'
+      - series: 'mithril_block_source_active{source="rpc",deployment_id="d1"}'
+        values: '0+0x30'
+      - series: 'mithril_block_source_active{source="turbine",deployment_id="d1"}'
+        values: '1+0x30'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="d1"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MithrilConfiguredSourceNotActive
+        exp_alerts:
+          - exp_labels:
+              configured_block_source: rpc
+              consensus_mode: verifying
+              deployment_id: d1
+              protocol_mode: alpenglow
+              severity: warning
+              source: rpc
+            exp_annotations:
+              summary: "An exact block source is configured but not active"
+
+  - name: verification state rejects fractional values
+    interval: 15s
+    input_series:
+      - series: 'mithril_verification_state{state="complete",deployment_id="d1"}'
+        values: '0.5+0x12'
+      - series: 'mithril_verification_state{state="incomplete",deployment_id="d1"}'
+        values: '0.5+0x12'
+      - series: 'mithril_verification_state{state="stalled",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verification_state{state="diverged",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verification_state{state="unavailable",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verification_state{state="not_applicable",deployment_id="d1"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilVerificationStateInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The verification metric inventory is invalid"
+
+  - name: verification scalar evidence rejects non-finite fractional negative and oversized values
+    interval: 15s
+    input_series:
+      - series: 'mithril_rooted_slot{deployment_id="d1"}'
+        values: 'NaN+0x12'
+      - series: 'mithril_verified_slot{deployment_id="d1"}'
+        values: '+Inf+0x12'
+      - series: 'mithril_verification_lag_slots{deployment_id="d1"}'
+        values: '1.5+0x12'
+      - series: 'mithril_verifier_configured_lag_slots{deployment_id="d1"}'
+        values: '-1+0x12'
+      - series: 'mithril_fold_batch_slots{deployment_id="d1"}'
+        values: '9007199254740992+0x12'
+      - series: 'mithril_unrooted_tail_slots{deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_unrooted_tail_limit_slots{deployment_id="d1"}'
+        values: '100+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilVerificationStateInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The verification metric inventory is invalid"
+
+  - name: complete classic verification inventory is accepted
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-node",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_verification_state{state="complete",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verification_state{state="incomplete",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verification_state{state="stalled",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verification_state{state="diverged",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verification_state{state="unavailable",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verification_state{state="not_applicable",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_verification_required{deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_rooted_slot{deployment_id="d1"}'
+        values: '100+0x12'
+      - series: 'mithril_verified_slot{deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verification_lag_slots{deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verifier_configured_lag_slots{deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_fold_batch_slots{deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_unrooted_tail_slots{deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_unrooted_tail_limit_slots{deployment_id="d1"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilVerificationStateInvalid
+        exp_alerts: []
+
+  - name: duplicate enum members cannot hide missing members
+    interval: 15s
+    input_series:
+      - series: 'mithril_block_source_active{source="rpc",replica="a",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_block_source_active{source="rpc",replica="b",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_block_source_active{source="turbine",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_block_source_active{source="lightbringer",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verification_state{state="complete",replica="a",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_verification_state{state="complete",replica="b",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verification_state{state="incomplete",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verification_state{state="stalled",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verification_state{state="diverged",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_verification_state{state="unavailable",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_finality_slot{source="certificate",replica="a",deployment_id="d1"}'
+        values: '100+0x12'
+      - series: 'mithril_finality_slot{source="certificate",replica="b",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_finality_slot{source="delegated",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_finality_slot{source="mixed",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_notifier_last_attempt_timestamp_seconds{channel="telegram",replica="a",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_notifier_last_attempt_timestamp_seconds{channel="telegram",replica="b",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_notifier_last_success_timestamp_seconds{channel="telegram",replica="a",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_notifier_last_success_timestamp_seconds{channel="telegram",replica="b",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_notifier_delivered_total{channel="telegram",replica="a",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_notifier_delivered_total{channel="telegram",replica="b",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_notifier_failed_total{channel="telegram",replica="a",deployment_id="d1"}'
+        values: '0+0x12'
+      - series: 'mithril_notifier_failed_total{channel="telegram",replica="b",deployment_id="d1"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilBlockSourceInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+              source: rpc
+            exp_annotations:
+              summary: "The active block-source inventory is invalid"
+      - eval_time: 2m
+        alertname: MithrilVerificationStateInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+              state: complete
+            exp_annotations:
+              summary: "The verification metric inventory is invalid"
+      - eval_time: 2m
+        alertname: MithrilFinalityMetricsInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+              source: certificate
+            exp_annotations:
+              summary: "The finality metric inventory is missing or invalid"
+      - eval_time: 2m
+        alertname: MithrilNotifierMetricsInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The notifier metric inventory is missing or invalid"
+          - exp_labels:
+              channel: telegram
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The notifier metric inventory is missing or invalid"
+
+  - name: verification terminal and coverage states fire and recover
+    interval: 15s
+    input_series:
+      - series: 'mithril_verification_required{deployment_id="d1"}'
+        values: '1+0x32'
+      - series: 'mithril_verification_state{state="diverged",deployment_id="d1"}'
+        values: '1+0x4 0+0x28'
+      - series: 'mithril_verification_state{state="stalled",deployment_id="d1"}'
+        values: '1+0x16 0+0x16'
+      - series: 'mithril_verification_state{state="unavailable",deployment_id="d1"}'
+        values: '1+0x32'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: MithrilVerificationDiverged
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+              state: diverged
+            exp_annotations:
+              summary: "Verification reports divergence"
+      - eval_time: 2m
+        alertname: MithrilVerificationDiverged
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: MithrilVerificationStalled
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+              state: stalled
+            exp_annotations:
+              summary: "Required trailing verification has stalled"
+      - eval_time: 6m
+        alertname: MithrilVerificationUnavailable
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+              state: unavailable
+            exp_annotations:
+              summary: "Required verification evidence is unavailable"
+
+  - name: lag threshold is configured lag plus one fold batch
+    interval: 15s
+    input_series:
+      - series: 'mithril_verification_required{deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'mithril_verification_lag_slots{deployment_id="d1"}'
+        values: '31+0x20'
+      - series: 'mithril_verifier_configured_lag_slots{deployment_id="d1"}'
+        values: '10+0x20'
+      - series: 'mithril_fold_batch_slots{deployment_id="d1"}'
+        values: '20+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MithrilVerificationLagHigh
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: warning
+            exp_annotations:
+              summary: "Verification lag exceeds configured lag plus one fold batch"
+
+  - name: required watermark missing and alpenglow tail near limit fire
+    interval: 15s
+    input_series:
+      - series: 'mithril_verification_required{deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'mithril_runtime_info{protocol_mode="alpenglow",consensus_mode="verifying",configured_block_source="turbine",deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'mithril_unrooted_tail_slots{deployment_id="d1"}'
+        values: '81+0x20'
+      - series: 'mithril_unrooted_tail_limit_slots{deployment_id="d1"}'
+        values: '100+0x20'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="d1"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilVerificationRequiredButMissing
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "Verification is required but its watermark is missing"
+      - eval_time: 3m
+        alertname: MithrilUnrootedTailNearLimit
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: warning
+            exp_annotations:
+              summary: "The Alpenglow unrooted tail is near its halt limit"
+
+  - name: classic mode suppresses alpenglow-only alerts
+    interval: 15s
+    input_series:
+      - series: 'mithril_runtime_info{protocol_mode="classic",consensus_mode="verifying",configured_block_source="rpc",deployment_id="d1"}'
+        values: '1+0x60'
+      - series: 'mithril_unrooted_tail_slots{deployment_id="d1"}'
+        values: '90+0x60'
+      - series: 'mithril_unrooted_tail_limit_slots{deployment_id="d1"}'
+        values: '100+0x60'
+      - series: 'mithril_rooted_slot{deployment_id="d1"}'
+        values: '100+0x60'
+      - series: 'mithril_replay_slot{deployment_id="d1"}'
+        values: '100+1x60'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MithrilUnrootedTailNearLimit
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: MithrilAlpenglowRootStalled
+        exp_alerts: []
+
+  - name: alpenglow root stall finality inventory and regression fire
+    interval: 15s
+    input_series:
+      - series: 'mithril_runtime_info{protocol_mode="alpenglow",consensus_mode="verifying",configured_block_source="turbine",deployment_id="d1"}'
+        values: '1+0x60'
+      - series: 'mithril_rooted_slot{deployment_id="d1"}'
+        values: '100+0x44 90+0x16'
+      - series: 'mithril_replay_slot{deployment_id="d1"}'
+        values: '100+1x60'
+      - series: 'mithril_finality_slot{source="certificate",deployment_id="d1"}'
+        values: '100+0x60'
+      - series: 'mithril_finality_slot{source="delegated",deployment_id="d1"}'
+        values: '0+0x60'
+      - series: 'mithril_finality_slot{source="mixed",deployment_id="d1"}'
+        values: '0+0x60'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="d1"}'
+        values: '1+0x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MithrilAlpenglowRootStalled
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "Alpenglow replay advances but the durable root does not"
+      - eval_time: 2m
+        alertname: MithrilFinalityMetricsInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The finality metric inventory is missing or invalid"
+      - eval_time: 11m30s
+        alertname: MithrilDurableWatermarkRegressed
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "A durable root or finality watermark regressed"
+
+  - name: finality slots reject non-finite fractional negative and oversized values
+    interval: 15s
+    input_series:
+      - series: 'mithril_finality_slot{source="certificate",deployment_id="d1"}'
+        values: 'NaN+0x12'
+      - series: 'mithril_finality_slot{source="delegated",deployment_id="d1"}'
+        values: '+Inf+0x12'
+      - series: 'mithril_finality_slot{source="mixed",deployment_id="d1"}'
+        values: '1.5+0x12'
+      - series: 'mithril_finality_slot{source="classic",deployment_id="d1"}'
+        values: '9007199254740992+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilFinalityMetricsInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The finality metric inventory is missing or invalid"
+
+  - name: finality source transition clears safely and aggregate regression fires
+    interval: 15s
+    input_series:
+      - series: 'mithril_finality_slot{source="certificate",deployment_id="d1"}'
+        values: '100+0x6 0+0x10'
+      - series: 'mithril_finality_slot{source="delegated",deployment_id="d1"}'
+        values: '0+0x6 110+0x10'
+      - series: 'mithril_finality_slot{source="mixed",deployment_id="d1"}'
+        values: '0+0x16'
+      - series: 'mithril_finality_slot{source="classic",deployment_id="d1"}'
+        values: '0+0x16'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilDurableWatermarkRegressed
+        exp_alerts: []
+
+  - name: aggregate finality watermark regression fires
+    interval: 15s
+    input_series:
+      - series: 'mithril_finality_slot{source="certificate",deployment_id="d1"}'
+        values: '0+0x16'
+      - series: 'mithril_finality_slot{source="delegated",deployment_id="d1"}'
+        values: '110+0x6 90+0x10'
+      - series: 'mithril_finality_slot{source="mixed",deployment_id="d1"}'
+        values: '0+0x16'
+      - series: 'mithril_finality_slot{source="classic",deployment_id="d1"}'
+        values: '0+0x16'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilDurableWatermarkRegressed
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "A durable root or finality watermark regressed"
+
+  - name: node exporter collector and service failures fire
+    interval: 15s
+    input_series:
+      - series: 'mithril_monitor_identity_info{signed_deployment_id="d1",systemd_unit="mithril-mainnet.service",systemd_scope="system",deployment_id="d1"}'
+        values: '1+0x20'
+      - series: 'up{job="node-exporter",deployment_id="d1",instance="node1"}'
+        values: '1+0x20'
+      - series: 'node_scrape_collector_success{collector="systemd",deployment_id="d1",instance="node1"}'
+        values: '1+0x20'
+      - series: 'node_scrape_collector_success{collector="filesystem",deployment_id="d1",instance="node1"}'
+        values: '1+0x20'
+      - series: 'node_scrape_collector_success{collector="meminfo",deployment_id="d1",instance="node1"}'
+        values: '1+0x20'
+      - series: 'node_scrape_collector_success{collector="cpu",deployment_id="d1",instance="node1"}'
+        values: '1+0x20'
+      - series: 'node_systemd_unit_state{name="mithril-mainnet.service",state="active",deployment_id="d1",instance="node1"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilNodeExporterCollectorFailing
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              instance: node1
+              severity: critical
+            exp_annotations:
+              summary: "A required node_exporter collector is missing or failing"
+      - eval_time: 2m
+        alertname: MithrilServiceDown
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              name: mithril-mainnet.service
+              severity: critical
+            exp_annotations:
+              summary: "The Mithril systemd service is not active"
+
+  - name: service restart and resource pressure alerts fire
+    interval: 15s
+    input_series:
+      - series: 'mithril_monitor_identity_info{signed_deployment_id="d1",systemd_unit="mithril-mainnet.service",systemd_scope="system",deployment_id="d1"}'
+        values: '1+0x80'
+      - series: 'node_systemd_service_restart_total{name="mithril-mainnet.service",deployment_id="d1",instance="node1"}'
+        values: '0+1x80'
+      - series: 'mithril_filesystem_avail_bytes{role="root",deployment_id="d1"}'
+        values: '5+0x24 20+0x56'
+      - series: 'mithril_filesystem_size_bytes{role="root",deployment_id="d1"}'
+        values: '100+0x80'
+      - series: 'node_memory_MemAvailable_bytes{deployment_id="d1",instance="node1"}'
+        values: '5+0x80'
+      - series: 'node_memory_MemTotal_bytes{deployment_id="d1",instance="node1"}'
+        values: '100+0x80'
+      - series: 'process_resident_memory_bytes{job="mithril-node",deployment_id="d1",instance="node1"}'
+        values: '81+0x80'
+      - series: 'node_cpu_seconds_total{cpu="0",mode="idle",deployment_id="d1",instance="node1"}'
+        values: '0+0.75x80'
+      - series: 'node_pressure_memory_stalled_seconds_total{deployment_id="d1",instance="node1"}'
+        values: '0+3x80'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: MithrilServiceRestartLoop
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              name: mithril-mainnet.service
+              severity: critical
+            exp_annotations:
+              summary: "The Mithril service restarted more than twice in 15 minutes"
+      - eval_time: 6m
+        alertname: MithrilHostFilesystemLow
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              role: root
+              severity: critical
+            exp_annotations:
+              summary: "A required Mithril filesystem role has less than 10% free space"
+      - eval_time: 8m
+        alertname: MithrilHostFilesystemLow
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: MithrilHostMemoryLow
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              instance: node1
+              severity: critical
+            exp_annotations:
+              summary: "The monitored host has less than 10% available memory"
+      - eval_time: 6m
+        alertname: MithrilProcessMemoryHigh
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: warning
+            exp_annotations:
+              summary: "The Mithril process uses more than 80% of host memory"
+      - eval_time: 11m
+        alertname: MithrilHostCPUHigh
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              instance: node1
+              severity: warning
+            exp_annotations:
+              summary: "The monitored host CPU has remained above 90%"
+      - eval_time: 8m
+        alertname: MithrilHostMemoryPressure
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              instance: node1
+              severity: warning
+            exp_annotations:
+              summary: "The monitored host is under sustained memory pressure"
+
+  - name: notifier inventory and delivery failures fire
+    interval: 15s
+    input_series:
+      - series: 'mithril_notifier_last_attempt_timestamp_seconds{channel="telegram",deployment_id="d1"}'
+        values: '0+15x80'
+      - series: 'mithril_notifier_last_success_timestamp_seconds{channel="telegram",deployment_id="d1"}'
+        values: '0+0x80'
+      - series: 'mithril_notifier_delivered_total{channel="telegram",deployment_id="d1"}'
+        values: '0+0x80'
+      - series: 'mithril_notifier_failed_total{channel="telegram",deployment_id="d1"}'
+        values: '0+1x80'
+      - series: 'mithril_notifier_dedup_evictions_total{deployment_id="d1"}'
+        values: '0+0x80'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilNotifierMetricsInvalid
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: MithrilNotifierDeliveryFailing
+        exp_alerts:
+          - exp_labels:
+              channel: telegram
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "Telegram alert delivery or deduplication is failing"
+      - eval_time: 8m
+        alertname: MithrilNotifierRecentDeliveryFailed
+        exp_alerts:
+          - exp_labels:
+              channel: telegram
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "A recent notification attempt has no recent success"
+
+  - name: future notifier timestamps fail closed
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-notifier",deployment_id="future"}'
+        values: '1+0x12'
+      - series: 'mithril_notifier_last_attempt_timestamp_seconds{channel="telegram",deployment_id="future"}'
+        values: '1000+0x12'
+      - series: 'mithril_notifier_last_success_timestamp_seconds{channel="telegram",deployment_id="future"}'
+        values: '1000+0x12'
+      - series: 'mithril_notifier_delivered_total{channel="telegram",deployment_id="future"}'
+        values: '0+0x12'
+      - series: 'mithril_notifier_failed_total{channel="telegram",deployment_id="future"}'
+        values: '0+0x12'
+      - series: 'mithril_notifier_dedup_evictions_total{deployment_id="future"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilNotifierMetricsInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: future
+              severity: critical
+            exp_annotations:
+              summary: "The notifier metric inventory is missing or invalid"
+
+  - name: deduplication capacity eviction is a delivery failure
+    interval: 15s
+    input_series:
+      - series: 'mithril_notifier_dedup_evictions_total{deployment_id="d1"}'
+        values: '0+1x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilNotifierDeliveryFailing
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "Telegram alert delivery or deduplication is failing"
+
+  - name: notification probes fail close and recover
+    interval: 15s
+    input_series:
+      - series: 'mithril_notification_route_configured{route="primary_telegram",deployment_id="d1"}'
+        values: '1+0x600'
+      - series: 'mithril_notification_route_configured{route="secondary_ses",deployment_id="d1"}'
+        values: '1+0x600'
+      - series: 'mithril_notification_probe_attempts_total{route="primary_telegram",deployment_id="d1"}'
+        values: '1+0x60'
+      - series: 'mithril_notification_probe_attempts_total{route="secondary_ses",deployment_id="d1"}'
+        values: '1+0x60'
+      - series: 'mithril_notification_probe_failures_total{route="primary_telegram",deployment_id="d1"}'
+        values: '0+0x60'
+      - series: 'mithril_notification_probe_failures_total{route="secondary_ses",deployment_id="d1"}'
+        values: '0 1+0x59'
+      - series: 'mithril_notification_probe_success{route="primary_telegram",deployment_id="d1"}'
+        values: '1+0x60'
+      - series: 'mithril_notification_probe_success{route="secondary_ses",deployment_id="d1"}'
+        values: '0+0x24 1+0x36'
+      - series: 'mithril_notification_probe_last_success_timestamp_seconds{route="primary_telegram",deployment_id="d1"}'
+        values: '1+0x600'
+      - series: 'mithril_notification_probe_last_success_timestamp_seconds{route="secondary_ses",deployment_id="d1"}'
+        values: '1+0x600'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MithrilNotificationProbeUnhealthy
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              route: secondary_ses
+              severity: critical
+            exp_annotations:
+              summary: "A notification-route canary is unhealthy"
+      - eval_time: 15m
+        alertname: MithrilNotificationProbeUnhealthy
+        exp_alerts: []
+      - eval_time: 2h10m
+        alertname: MithrilNotificationProbeStale
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              route: primary_telegram
+              severity: critical
+            exp_annotations:
+              summary: "A notification-route canary has not succeeded in two hours"
+          - exp_labels:
+              deployment_id: d1
+              route: secondary_ses
+              severity: critical
+            exp_annotations:
+              summary: "A notification-route canary has not succeeded in two hours"
+
+  - name: future notification probe timestamp fails closed
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-notifier",deployment_id="future"}'
+        values: '1+0x24'
+      - series: 'mithril_notification_route_configured{route="primary_telegram",deployment_id="future"}'
+        values: '1+0x24'
+      - series: 'mithril_notification_route_configured{route="secondary_ses",deployment_id="future"}'
+        values: '1+0x24'
+      - series: 'mithril_notification_probe_attempts_total{route="primary_telegram",deployment_id="future"}'
+        values: '1+0x24'
+      - series: 'mithril_notification_probe_attempts_total{route="secondary_ses",deployment_id="future"}'
+        values: '1+0x24'
+      - series: 'mithril_notification_probe_failures_total{route="primary_telegram",deployment_id="future"}'
+        values: '0+0x24'
+      - series: 'mithril_notification_probe_failures_total{route="secondary_ses",deployment_id="future"}'
+        values: '0+0x24'
+      - series: 'mithril_notification_probe_success{route="primary_telegram",deployment_id="future"}'
+        values: '1+0x24'
+      - series: 'mithril_notification_probe_success{route="secondary_ses",deployment_id="future"}'
+        values: '1+0x24'
+      - series: 'mithril_notification_probe_last_success_timestamp_seconds{route="primary_telegram",deployment_id="future"}'
+        values: '1000+0x24'
+      - series: 'mithril_notification_probe_last_success_timestamp_seconds{route="secondary_ses",deployment_id="future"}'
+        values: '1000+0x24'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MithrilNotificationProbeUnhealthy
+        exp_alerts:
+          - exp_labels:
+              deployment_id: future
+              severity: critical
+            exp_annotations:
+              summary: "A notification-route canary is unhealthy"
+
+  - name: notification fallback applicability is explicit
+    interval: 15s
+    input_series:
+      - series: 'up{job="prometheus",deployment_id="required",notification_fallback_required="true"}'
+        values: '1+0x12'
+      - series: 'up{job="prometheus",deployment_id="optional",notification_fallback_required="false"}'
+        values: '1+0x12'
+      - series: 'up{job="prometheus",deployment_id="invalid",notification_fallback_required="maybe"}'
+        values: '1+0x12'
+      - series: 'mithril_notification_route_configured{route="secondary_ses",deployment_id="required"}'
+        values: '0+0x12'
+      - series: 'mithril_notification_route_configured{route="secondary_ses",deployment_id="optional"}'
+        values: '0+0x12'
+      - series: 'mithril_notification_route_configured{route="secondary_ses",deployment_id="invalid"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilNotificationFallbackNotConfigured
+        exp_alerts:
+          - exp_labels:
+              deployment_id: required
+              route: secondary_ses
+              severity: critical
+            exp_annotations:
+              summary: "The required SES fallback is not configured or its policy is invalid"
+          - exp_labels:
+              deployment_id: invalid
+              route: secondary_ses
+              severity: critical
+            exp_annotations:
+              summary: "The required SES fallback is not configured or its policy is invalid"
+
+  - name: unconfigured optional SES does not create probe alarms
+    interval: 15s
+    input_series:
+      - series: 'mithril_notification_route_configured{route="primary_telegram",deployment_id="d1"}'
+        values: '1+0x600'
+      - series: 'mithril_notification_route_configured{route="secondary_ses",deployment_id="d1"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_attempts_total{route="primary_telegram",deployment_id="d1"}'
+        values: '1+0x600'
+      - series: 'mithril_notification_probe_attempts_total{route="secondary_ses",deployment_id="d1"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_failures_total{route="primary_telegram",deployment_id="d1"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_failures_total{route="secondary_ses",deployment_id="d1"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_success{route="primary_telegram",deployment_id="d1"}'
+        values: '1+0x600'
+      - series: 'mithril_notification_probe_success{route="secondary_ses",deployment_id="d1"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_last_success_timestamp_seconds{route="primary_telegram",deployment_id="d1"}'
+        values: '0+15x600'
+      - series: 'mithril_notification_probe_last_success_timestamp_seconds{route="secondary_ses",deployment_id="d1"}'
+        values: '0+0x600'
+    alert_rule_test:
+      - eval_time: 2h10m
+        alertname: MithrilNotificationProbeUnhealthy
+        exp_alerts: []
+      - eval_time: 2h10m
+        alertname: MithrilNotificationProbeStale
+        exp_alerts: []
+
+  - name: alert delivery pipeline failure fires
+    interval: 15s
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{integration="webhook",reason="timeout",deployment_id="d1"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilAlertDeliveryPipelineFailing
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              integration: webhook
+              reason: timeout
+              severity: critical
+            exp_annotations:
+              summary: "Prometheus or Alertmanager is failing to deliver alerts"
