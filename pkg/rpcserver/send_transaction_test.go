@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/netip"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/leaderschedule"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/gagliardetto/solana-go"
 	solanarpc "github.com/gagliardetto/solana-go/rpc"
@@ -21,11 +23,71 @@ import (
 )
 
 func TestParseSendTransactionConfig_Defaults(t *testing.T) {
-	conf := parseSendTransactionConfig([]interface{}{"tx"})
+	conf, err := parseSendTransactionConfig([]interface{}{"tx"})
+	require.NoError(t, err)
 	assert.Equal(t, "base58", conf.encoding)
 	assert.False(t, conf.skipPreflight)
-	assert.Nil(t, conf.maxRetries)
 	assert.Nil(t, conf.minContextSlot)
+}
+
+func TestParseSendTransactionConfig_ValidatesAdvertisedOptions(t *testing.T) {
+	t.Parallel()
+
+	validMinSlot := float64(417_500_000)
+	tests := []struct {
+		name    string
+		params  []interface{}
+		wantErr string
+		check   func(*testing.T, sendTransactionConfig)
+	}{
+		{
+			name:   "supported options",
+			params: []interface{}{"tx", map[string]interface{}{"encoding": "base64", "skipPreflight": true, "preflightCommitment": "processed", "minContextSlot": validMinSlot}},
+			check: func(t *testing.T, conf sendTransactionConfig) {
+				assert.Equal(t, "base64", conf.encoding)
+				assert.True(t, conf.skipPreflight)
+				require.NotNil(t, conf.minContextSlot)
+				assert.Equal(t, uint64(validMinSlot), *conf.minContextSlot)
+			},
+		},
+		{name: "too many parameters", params: []interface{}{"tx", map[string]interface{}{}, "extra"}, wantErr: "accepts at most two parameters"},
+		{name: "config is not object", params: []interface{}{"tx", "base64"}, wantErr: "config must be an object"},
+		{name: "encoding type", params: []interface{}{"tx", map[string]interface{}{"encoding": true}}, wantErr: "encoding: must be a string"},
+		{name: "skip preflight type", params: []interface{}{"tx", map[string]interface{}{"skipPreflight": "true"}}, wantErr: "skipPreflight: must be a boolean"},
+		{name: "commitment type", params: []interface{}{"tx", map[string]interface{}{"preflightCommitment": true}}, wantErr: "preflightCommitment: must be a string"},
+		{name: "unsupported commitment", params: []interface{}{"tx", map[string]interface{}{"preflightCommitment": "confirmed"}}, wantErr: `preflightCommitment: only "processed" is supported`},
+		{name: "retry type", params: []interface{}{"tx", map[string]interface{}{"maxRetries": "1"}}, wantErr: "maxRetries: must be a non-negative exact integer"},
+		{name: "negative retries", params: []interface{}{"tx", map[string]interface{}{"maxRetries": float64(-1)}}, wantErr: "maxRetries: must be a non-negative exact integer"},
+		{name: "fractional retries", params: []interface{}{"tx", map[string]interface{}{"maxRetries": 1.5}}, wantErr: "maxRetries: must be a non-negative exact integer"},
+		{
+			name:   "zero retries",
+			params: []interface{}{"tx", map[string]interface{}{"maxRetries": float64(0)}},
+			check:  func(t *testing.T, conf sendTransactionConfig) {},
+		},
+		{name: "nonzero retries unsupported", params: []interface{}{"tx", map[string]interface{}{"maxRetries": float64(1)}}, wantErr: "maxRetries: only 0 is supported"},
+		{name: "slot type", params: []interface{}{"tx", map[string]interface{}{"minContextSlot": "1"}}, wantErr: "minContextSlot: must be a non-negative exact integer"},
+		{name: "negative slot", params: []interface{}{"tx", map[string]interface{}{"minContextSlot": float64(-1)}}, wantErr: "minContextSlot: must be a non-negative exact integer"},
+		{name: "fractional slot", params: []interface{}{"tx", map[string]interface{}{"minContextSlot": 1.5}}, wantErr: "minContextSlot: must be a non-negative exact integer"},
+		{name: "inexact slot", params: []interface{}{"tx", map[string]interface{}{"minContextSlot": float64(1 << 53)}}, wantErr: "minContextSlot: must be a non-negative exact integer"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			conf, err := parseSendTransactionConfig(tt.params)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				var invalidParams *InvalidParamsError
+				assert.ErrorAs(t, err, &invalidParams)
+				return
+			}
+
+			require.NoError(t, err)
+			tt.check(t, conf)
+		})
+	}
 }
 
 func TestSendTransaction_RejectsSanitizeFailure(t *testing.T) {
@@ -142,6 +204,9 @@ func TestSendTransaction_SkipPreflight_FansOutToUpcomingLeaders(t *testing.T) {
 			}, nil
 		},
 	}
+	receipts, err := txstatus.NewIndex(txstatus.Config{MaxReceipts: 8, Retention: time.Hour})
+	require.NoError(t, err)
+	rpcServer.SetTransactionReceipts(receipts)
 
 	gotSig, err := rpcServer.SendTransaction(
 		context.Background(),
@@ -153,6 +218,9 @@ func TestSendTransaction_SkipPreflight_FansOutToUpcomingLeaders(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, tx.Signatures[0].String(), gotSig)
 	assert.Equal(t, 1, fetchCount, "first send should populate the TPU cache once")
+	receipt, known := receipts.Lookup(tx.Signatures[0])
+	require.True(t, known)
+	assert.Equal(t, txstatus.StatusSubmitted, receipt.Status)
 
 	assert.Equal(t, wire, mustReadUDP(t, listenerA))
 	assert.Equal(t, wire, mustReadUDP(t, listenerB))
@@ -160,6 +228,48 @@ func TestSendTransaction_SkipPreflight_FansOutToUpcomingLeaders(t *testing.T) {
 	assert.Equal(t, wire, mustReadUDP(t, listenerD))
 	assert.Equal(t, wire, mustReadUDP(t, listenerE))
 	assert.Equal(t, wire, mustReadUDP(t, listenerF))
+}
+
+func TestSendTransaction_PreservesAmbiguityWhenForwardingFails(t *testing.T) {
+	leader := solana.PublicKey{0xA1}
+	global.SetLeaderSchedule(leaderschedule.NewLeaderScheduleFromKeyedSlots(
+		map[solana.PublicKey][]uint64{leader: {0}},
+		100,
+	))
+	global.SetSlot(100)
+	defer global.SetLeaderSchedule(nil)
+	defer global.SetSlot(0)
+
+	tx, wire := testLegacyTransaction(t)
+	receipts, err := txstatus.NewIndex(txstatus.Config{MaxReceipts: 8, Retention: time.Hour})
+	require.NoError(t, err)
+	rpcServer := &RpcServer{
+		clusterNodesRefreshEvery:          sendTransactionClusterNodesRefreshEvery,
+		sendTransactionLeaderForwardCount: 0,
+		clusterNodesFetcher: func(context.Context) ([]*solanarpc.GetClusterNodesResult, error) {
+			return []*solanarpc.GetClusterNodesResult{{
+				Pubkey: leader,
+				TPU:    stringPtr("127.0.0.1:9001"),
+			}}, nil
+		},
+		transactionSender: func(context.Context, []byte, tpuEndpoint) error {
+			return errors.New("ambiguous transport failure")
+		},
+	}
+	rpcServer.SetTransactionReceipts(receipts)
+
+	_, err = rpcServer.SendTransaction(
+		context.Background(),
+		mustRawParams(t, []interface{}{
+			base64.StdEncoding.EncodeToString(wire),
+			map[string]interface{}{"encoding": "base64", "skipPreflight": true},
+		}),
+	)
+	require.Error(t, err)
+	receipt, known := receipts.Lookup(tx.Signatures[0])
+	require.True(t, known)
+	assert.Equal(t, txstatus.StatusSubmissionUnknown, receipt.Status)
+	assert.False(t, receipt.Status.Terminal())
 }
 
 func TestResolveUpcomingLeaderTPUEndpoints_UsesFreshCacheWithoutRefetch(t *testing.T) {
@@ -258,6 +368,28 @@ func TestResolveUpcomingLeaderTPUEndpoints_RefreshesStaleCache(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, targets, 6)
 	assert.Equal(t, 2, fetchCount, "stale cache should trigger a refresh before resolving targets")
+}
+
+func TestResolveUpcomingLeaderTPUEndpointsBoundsOnPathRefresh(t *testing.T) {
+	rpcServer := &RpcServer{
+		clusterNodesRefreshTimeout: 20 * time.Millisecond,
+		clusterNodesFetcher: func(ctx context.Context) ([]*solanarpc.GetClusterNodesResult, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	started := time.Now()
+	_, err := rpcServer.resolveUpcomingLeaderTPUEndpoints(ctx, 1)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("resolve error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("on-path refresh took %v", elapsed)
+	}
 }
 
 func TestRefreshLeaderTPUCache_PrefersQUICEndpoints(t *testing.T) {
