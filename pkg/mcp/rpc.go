@@ -47,6 +47,41 @@ func newMithrilRPCClient(endpoint string) (*mithrilRPCClient, error) {
 type jsonRPCError struct {
 	Code    *int    `json:"code"`
 	Message *string `json:"message"`
+	Data    *struct {
+		Reason string `json:"reason"`
+	} `json:"data"`
+}
+
+// rpcCodeNodeUnhealthy mirrors pkg/rpcserver's refusal code. It is duplicated
+// rather than imported because pkg/mcp speaks to a node over the wire and must
+// not depend on the server package.
+const rpcCodeNodeUnhealthy = -32005
+
+// nodeHealthRefusalReasons are the only reasons echoed onward. The error object
+// comes from a node that may be faulty, so an unrecognized reason is dropped
+// rather than surfaced, matching how message text is already bounded.
+var nodeHealthRefusalReasons = map[string]struct{}{
+	"diverged":                   {},
+	"stalled":                    {},
+	"unavailable":                {},
+	"unknown_verification_state": {},
+	"no_published_slot":          {},
+}
+
+// NodeRefusedError reports that the node declined because it knows its own
+// state is untrustworthy. This is evidence, not an absence of evidence: a
+// caller must be able to tell it apart from a timeout or an unreachable
+// reference, which is why it is typed rather than flattened into a string.
+type NodeRefusedError struct {
+	Code   int
+	Reason string
+}
+
+func (e *NodeRefusedError) Error() string {
+	if e.Reason == "" {
+		return fmt.Sprintf("node refused: unhealthy (code %d)", e.Code)
+	}
+	return fmt.Sprintf("node refused: %s (code %d)", e.Reason, e.Code)
 }
 
 type jsonRPCResponse struct {
@@ -110,6 +145,18 @@ func (c *mithrilRPCClient) call(ctx context.Context, method string, params any) 
 		if bytes.Equal(bytes.TrimSpace(r.Error), []byte("null")) || json.Unmarshal(r.Error, &rpcErr) != nil || rpcErr.Code == nil || rpcErr.Message == nil {
 			return nil, errors.New("RPC response contains an invalid error object")
 		}
+		// A refusal is evidence in its own right, so it keeps its type instead
+		// of collapsing into an opaque string. The reason still passes through
+		// the allowlist: the node may be the faulty party here.
+		if *rpcErr.Code == rpcCodeNodeUnhealthy {
+			refusal := &NodeRefusedError{Code: *rpcErr.Code}
+			if rpcErr.Data != nil {
+				if _, known := nodeHealthRefusalReasons[rpcErr.Data.Reason]; known {
+					refusal.Reason = rpcErr.Data.Reason
+				}
+			}
+			return nil, refusal
+		}
 		// Bound strings returned by a compromised or faulty node.
 		msg := redactUntrustedText(*rpcErr.Message)
 		if rs := []rune(msg); len(rs) > 256 {
@@ -167,6 +214,25 @@ func (c *mithrilRPCClient) getSlotInfo(ctx context.Context) (SlotInfo, error) {
 		Consistency:      "node_reported_non_atomic",
 		Finality:         "local_unfinalized",
 	}, nil
+}
+
+func (c *mithrilRPCClient) getGenesisHash(ctx context.Context) (string, error) {
+	raw, err := c.call(ctx, "getGenesisHash", []any{})
+	if err != nil {
+		return "", err
+	}
+	var hash string
+	if err := json.Unmarshal(raw, &hash); err != nil {
+		return "", errors.New("getGenesisHash did not return a string")
+	}
+	if err := validateHash(hash); err != nil {
+		return "", fmt.Errorf("getGenesisHash returned invalid genesis hash: %w", err)
+	}
+	return hash, nil
+}
+
+type genesisHashOutput struct {
+	GenesisHash string `json:"genesis_hash"`
 }
 
 // getBankHash fetches the bank hash for a slot. Mithril's getBankHash REQUIRES a
@@ -542,6 +608,21 @@ func registerRPCTools(server *mcpsdk.Server, cfg Config) {
 	})
 
 	addTool(server, cfg, &mcpsdk.Tool{
+		Name:        "mithril_get_genesis_hash",
+		Annotations: annReadOnlyNetwork,
+		Description: "Read the genesis hash from Mithril's configured RPC endpoint. Use it to bind observations to the expected cluster.",
+	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, _ rpcEmptyInput) (*mcpsdk.CallToolResult, genesisHashOutput, error) {
+		if clientErr != nil {
+			return nil, genesisHashOutput{}, fmt.Errorf("RPC client init for %s failed: %w", safeRPCURL, clientErr)
+		}
+		hash, err := client.getGenesisHash(ctx)
+		if err != nil {
+			return nil, genesisHashOutput{}, fmt.Errorf("RPC getGenesisHash via %s failed: %w", safeRPCURL, err)
+		}
+		return nil, genesisHashOutput{GenesisHash: hash}, nil
+	})
+
+	addTool(server, cfg, &mcpsdk.Tool{
 		Name:        "mithril_get_bank_hash",
 		Annotations: annReadOnlyNetwork,
 		Description: "Read the persisted bank hash for an explicit replayed slot. The in-progress slot may not be persisted yet; a mismatch requires operator review.",
@@ -649,8 +730,8 @@ func registerRPCTools(server *mcpsdk.Server, cfg Config) {
 
 	addTool(server, cfg, &mcpsdk.Tool{
 		Name:        "mithril_get_account_info",
-		Annotations: annRuntimeDiagnostic,
-		Description: "Diagnostic profile only. Read bounded account data from local replay state. Results are unfinalized; found=false can mean a storage error, and dataSlice adds an info log.",
+		Annotations: annReadOnlyNetwork,
+		Description: "Read bounded account data from local replay state. Results are unfinalized, and read failures return an error.",
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in accountInfoInput) (*mcpsdk.CallToolResult, accountInfoOutput, error) {
 		if err := validatePubkey(in.Pubkey); err != nil {
 			return nil, accountInfoOutput{}, fmt.Errorf("invalid pubkey: %w", err)
@@ -690,7 +771,7 @@ func registerRPCTools(server *mcpsdk.Server, cfg Config) {
 			Consistency: "node_reported_non_atomic",
 		}
 		if result.Value == nil {
-			out.Consistency = "node_rpc_absence_or_storage_error"
+			out.Consistency = "node_reported_absent"
 			return nil, out, nil
 		}
 		if err := validatePubkey(result.Value.Owner); err != nil {

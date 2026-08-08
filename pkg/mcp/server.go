@@ -71,9 +71,10 @@ type toolPolicy struct {
 var toolPolicies = map[string]toolPolicy{
 	"mithril_cross_check_slot":       {exposureObservation, annReadOnlyNetwork, "Compare Cluster Slot"},
 	"mithril_diagnose":               {exposureObservation, annReadOnlyNetwork, "Diagnose Node Health"},
-	"mithril_get_account_info":       {exposureDiagnostic, annRuntimeDiagnostic, "Account Information"},
+	"mithril_get_account_info":       {exposureObservation, annReadOnlyNetwork, "Account Information"},
 	"mithril_get_bank_hash":          {exposureObservation, annReadOnlyNetwork, "Bank Hash"},
 	"mithril_get_block_height":       {exposureObservation, annReadOnlyNetwork, "Block Height"},
+	"mithril_get_genesis_hash":       {exposureObservation, annReadOnlyNetwork, "Genesis Hash"},
 	"mithril_get_latest_blockhash":   {exposureObservation, annReadOnlyNetwork, "Latest Blockhash"},
 	"mithril_get_slot_info":          {exposureObservation, annReadOnlyNetwork, "Current Slot and Epoch"},
 	"mithril_grep_log":               {exposureObservation, annReadOnlyLocal, "Search Node Logs"},
