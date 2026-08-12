@@ -1365,6 +1365,13 @@ func (bs *BlockSource) applyAlpenglowDecisionLocked() bool {
 		delete(bs.reorderBuffer, waitingSlot)
 		return false
 	}
+	if decision.Kind == alpenglow.ChainDecisionKindBlock {
+		// A decisive block identity is authoritative over soft tombstones left
+		// by an earlier speculative parent switch. Publish it even outside
+		// active near-tip mode and when no candidate is buffered yet, so the
+		// next repaired/spooled copy is admitted instead of rejected forever.
+		bs.SetKnownAlpenglowBlockID(waitingSlot, decision.Block.Hash)
+	}
 	// Buffered-candidate steering otherwise needs active near-tip Turbine.
 	if !bs.liveStreamActive.Load() || !bs.isNearTip.Load() {
 		return false
