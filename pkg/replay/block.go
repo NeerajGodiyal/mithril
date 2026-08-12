@@ -85,10 +85,15 @@ type BlockFetchOpts struct {
 	ShredSpoolDir string
 	// LocalBlocks carries fully frozen blocks produced by this validator. They
 	// enter the normal ordered block source and are re-executed by ProcessBlock.
-	LocalBlocks        <-chan *b.Block
-	LocalLeaderForSlot func(slot uint64) bool
-	GossipClient       *gossip.Client
-	PrewarmBlocks      []*b.Block
+	LocalBlocks          <-chan *b.Block
+	LocalLeaderForSlot   func(slot uint64) bool
+	GossipClient         *gossip.Client
+	PrewarmBlocks        []*b.Block
+	TurbineStakesForSlot func(slot uint64) map[solana.PublicKey]uint64
+	TurbineEpochForSlot  func(slot uint64) uint64
+	TurbineRootSlot      func() uint64
+	TurbineUseChaCha8    bool
+	TurbineDedupAddrs    bool
 }
 
 var SerializedParameterArena *arena.Arena[byte]
@@ -2127,6 +2132,11 @@ func ReplayBlocks(
 		opts.LocalBlocks = blockFetchOpts.LocalBlocks
 		opts.GossipClient = blockFetchOpts.GossipClient
 		opts.PrewarmBlocks = append(opts.PrewarmBlocks, blockFetchOpts.PrewarmBlocks...)
+		opts.TurbineStakesForSlot = blockFetchOpts.TurbineStakesForSlot
+		opts.TurbineEpochForSlot = blockFetchOpts.TurbineEpochForSlot
+		opts.TurbineRootSlot = blockFetchOpts.TurbineRootSlot
+		opts.TurbineUseChaCha8 = blockFetchOpts.TurbineUseChaCha8
+		opts.TurbineDedupAddrs = blockFetchOpts.TurbineDedupAddrs
 
 		// Mode thresholds
 		opts.NearTipThreshold = blockFetchOpts.NearTipThreshold

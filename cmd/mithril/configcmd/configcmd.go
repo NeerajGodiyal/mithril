@@ -234,6 +234,7 @@ near_tip_lookahead = 2
 [turbine]
 gossip_entrypoint = ""    # REQUIRED for turbine: a gossip entrypoint of your Alpenglow cluster (host:port)
 gossip_bind_addr = "0.0.0.0:65401"  # Local gossip UDP port (open inbound); empty = OS-assigned
+# Gossip-connected nodes automatically retransmit verified broadcast shreds to their Agave-compatible downstream Turbine peers; repair responses are never forwarded.
 # advertised_ip = ""      # Public IP peers reach you at; empty = auto-detect via the entrypoint's IP-echo
 # shred_version = 0       # 0 = auto-discover from the entrypoint (setting it wrong silently drops all shreds)
 

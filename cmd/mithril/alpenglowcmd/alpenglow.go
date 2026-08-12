@@ -170,6 +170,7 @@ func runProbe(cmd *cobra.Command, _ []string) error {
 	}
 	defer votorBroadcaster.Close()
 	turbineReceiver = turbine.NewUDPReceiver(opts.turbineBind)
+	turbineReceiver.SetShredVersion(opts.shredVersion)
 	if err := turbineReceiver.SetRepairPeerSource(gossipClient.Identity(), gossipClient.RepairPeers); err != nil {
 		return err
 	}

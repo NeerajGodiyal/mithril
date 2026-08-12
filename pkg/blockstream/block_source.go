@@ -49,6 +49,11 @@ type BlockSourceOpts struct {
 	TurbineAlpenglowBlockIDHints bool
 	TurbineIdentity              ed25519.PrivateKey
 	LeaderForSlot                func(slot uint64) (solana.PublicKey, bool)
+	TurbineStakesForSlot         func(slot uint64) map[solana.PublicKey]uint64
+	TurbineEpochForSlot          func(slot uint64) uint64
+	TurbineRootSlot              func() uint64
+	TurbineUseChaCha8            bool
+	TurbineDedupAddrs            bool
 	LocalLeaderForSlot           func(slot uint64) bool
 	GossipClient                 *gossip.Client
 	AlpenglowDecisionSource      func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
@@ -401,6 +406,11 @@ type BlockSource struct {
 	turbineAlpenglowBlockIDHints bool
 	turbineIdentity              ed25519.PrivateKey
 	leaderForSlot                func(slot uint64) (solana.PublicKey, bool)
+	turbineStakesForSlot         func(slot uint64) map[solana.PublicKey]uint64
+	turbineEpochForSlot          func(slot uint64) uint64
+	turbineRootSlot              func() uint64
+	turbineUseChaCha8            bool
+	turbineDedupAddrs            bool
 	localLeaderForSlot           func(slot uint64) bool
 	localBlocks                  <-chan *b.Block
 	gossipClient                 *gossip.Client
@@ -753,6 +763,11 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		turbineAlpenglowBlockIDHints:   opts.TurbineAlpenglowBlockIDHints,
 		turbineIdentity:                clonePrivateKey(opts.TurbineIdentity),
 		leaderForSlot:                  opts.LeaderForSlot,
+		turbineStakesForSlot:           opts.TurbineStakesForSlot,
+		turbineEpochForSlot:            opts.TurbineEpochForSlot,
+		turbineRootSlot:                opts.TurbineRootSlot,
+		turbineUseChaCha8:              opts.TurbineUseChaCha8,
+		turbineDedupAddrs:              opts.TurbineDedupAddrs,
 		localLeaderForSlot:             opts.LocalLeaderForSlot,
 		localBlocks:                    opts.LocalBlocks,
 		gossipClient:                   opts.GossipClient,

@@ -1459,6 +1459,19 @@ func runLive(c *cobra.Command, args []string) {
 			return true
 		}
 		startPrewarm := func(m *snapshot.SnapshotManifest, origin string) {
+			epochSchedule := m.Bank.EpochSchedule
+			rootSlot := m.Bank.Slot
+			stakesForSlot := func(slot uint64) map[solana.PublicKey]uint64 {
+				epoch := epochSchedule.GetEpoch(slot)
+				voteAccounts := global.EpochStakesVoteAccts(epoch)
+				return turbine.StakedNodes(global.EpochStakes(epoch), func(vote solana.PublicKey) (solana.PublicKey, bool) {
+					voteAccount, ok := voteAccounts[vote]
+					if !ok || voteAccount == nil {
+						return solana.PublicKey{}, false
+					}
+					return voteAccount.NodePubkey, true
+				})
+			}
 			pw, err := blockstream.StartTurbinePrewarm(blockstream.TurbinePrewarmConfig{
 				BindAddr:                   turbineBindAddr,
 				GossipEntrypoint:           turbineGossipEntrypoint,
@@ -1468,6 +1481,11 @@ func runLive(c *cobra.Command, args []string) {
 				AlpenglowAddr:              alpenglowObserverBindAddr,
 				Identity:                   validatorIdentity,
 				LeaderForSlot:              global.LeaderForSlot,
+				StakesForSlot:              stakesForSlot,
+				EpochForSlot:               epochSchedule.GetEpoch,
+				RootSlot:                   func() uint64 { return rootSlot },
+				UseChaCha8:                 true,
+				DedupAddrs:                 false,
 				FloorSlot:                  m.Bank.Slot + 1,
 				ShredSpoolDir:              catchupShredSpoolDir(),
 				RepairMaxRequestsPerSecond: repairMaxRequestsPerSecond,
@@ -2537,6 +2555,20 @@ postBootstrap:
 			}
 		}()
 	}
+	var turbineStakesForSlot func(slot uint64) map[solana.PublicKey]uint64
+	if alpenglowEpochSchedule != nil {
+		turbineStakesForSlot = func(slot uint64) map[solana.PublicKey]uint64 {
+			epoch := alpenglowEpochSchedule.GetEpoch(slot)
+			voteAccounts := global.EpochStakesVoteAccts(epoch)
+			return turbine.StakedNodes(global.EpochStakes(epoch), func(vote solana.PublicKey) (solana.PublicKey, bool) {
+				voteAccount, ok := voteAccounts[vote]
+				if !ok || voteAccount == nil {
+					return solana.PublicKey{}, false
+				}
+				return voteAccount.NodePubkey, true
+			})
+		}
+	}
 
 	localBlocks := make(chan *block.Block, 16)
 	var sharedGossip *gossip.Client
@@ -2632,21 +2664,10 @@ postBootstrap:
 		}); err != nil {
 			klog.Fatalf("enable Alpenglow voting: %v", err)
 		}
-		stakesForSlot := func(slot uint64) map[solana.PublicKey]uint64 {
-			epoch := epochSchedule.GetEpoch(slot)
-			voteAccounts := global.EpochStakesVoteAccts(epoch)
-			return turbine.StakedNodes(global.EpochStakes(epoch), func(vote solana.PublicKey) (solana.PublicKey, bool) {
-				voteAccount, ok := voteAccounts[vote]
-				if !ok || voteAccount == nil {
-					return solana.PublicKey{}, false
-				}
-				return voteAccount.NodePubkey, true
-			})
-		}
 		broadcaster, err := turbine.NewTurbineBroadcaster(turbine.TurbineBroadcasterConfig{
 			Self:          solana.PrivateKey(validatorIdentity).PublicKey(),
 			Peers:         sharedGossip,
-			Stakes:        stakesForSlot,
+			Stakes:        turbineStakesForSlot,
 			EpochForSlot:  epochSchedule.GetEpoch,
 			LeaderForSlot: global.LeaderForSlot,
 			UseChaCha8:    true,
@@ -2776,6 +2797,16 @@ postBootstrap:
 		PrewarmBlocks:              validatorPrewarmBlocks,
 		ShredSpoolDir:              catchupShredSpoolDir(),
 		GossipClient:               sharedGossip,
+		TurbineStakesForSlot:       turbineStakesForSlot,
+		TurbineEpochForSlot: func(slot uint64) uint64 {
+			if alpenglowEpochSchedule == nil {
+				return slot
+			}
+			return alpenglowEpochSchedule.GetEpoch(slot)
+		},
+		TurbineRootSlot:   global.ReplayFrontier,
+		TurbineUseChaCha8: true,
+		TurbineDedupAddrs: false,
 	}
 	if consensusMode == "validator" {
 		identity := solana.PrivateKey(validatorIdentity).PublicKey()
