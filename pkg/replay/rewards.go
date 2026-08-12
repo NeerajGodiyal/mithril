@@ -447,7 +447,16 @@ func capitalizingEpochRewards(votingRewards, stakerRewards uint64) uint64 {
 
 func beginPartitionedEpochRewardsDistribution(acctsDb *accountsdb.AccountsDb, slotCtx *sealevel.SlotCtx, stakeHistory *sealevel.SysvarStakeHistory, epochCtx *ReplayCtx, epochSchedule *sealevel.SysvarEpochSchedule, block *block.Block, f *features.Features, epoch uint64, slot uint64, rpcc *rpcclient.RpcClient, dbgOpts *DebugOptions, mode rewards.RewardCalculationMode, stagedEpochAccts []*accounts.Account) (*rewards.PartitionedRewardDistributionInfo, []*accounts.Account, []*accounts.Account, uint64) {
 	partitionedRewardsInfo := rewards.DeterminePartitionedStakingRewardsInfo(epochSchedule, &epochCtx.Inflation, epochCtx.Capitalization, epoch, epoch-1, slot, epochCtx.SlotsPerYear, f)
-	totalRewards := partitionedRewardsInfo.TotalStakingRewards
+	totalRewards, err := partitionedRewardsBudget(
+		slotCtx, epochSchedule, f, epoch-1, partitionedRewardsInfo.TotalStakingRewards,
+	)
+	if err != nil {
+		panic(err)
+	}
+	// Keep the distribution descriptor and PointValue/EpochRewards sysvar on
+	// the same recorded ceiling.  The calculated stake and voting payouts may
+	// be smaller, but they must never redefine the epoch's original budget.
+	partitionedRewardsInfo.TotalStakingRewards = totalRewards
 
 	newWarmupCooldownRateEpoch := newWarmupCooldownRateEpoch(epochSchedule, f)
 	voteCacheSnapshot := global.VoteCacheSnapshot()

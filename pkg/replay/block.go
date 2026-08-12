@@ -1357,6 +1357,36 @@ func buildInitialEpochStakesCache(mithrilState *state.MithrilState, currentEpoch
 	return nil
 }
 
+// LoadInitialEpochStakesCache is the single startup policy for choosing
+// manifest versus persisted post-boundary epoch stakes. It is exported so the
+// node can establish the exact replay stake view before advertising Votor.
+func LoadInitialEpochStakesCache(mithrilState *state.MithrilState, resumeState *ResumeState, startEpoch, snapshotEpoch uint64) error {
+	if resumeState != nil {
+		epochsCrossed := startEpoch > snapshotEpoch
+		if epochsCrossed && len(resumeState.ComputedEpochStakes) == 0 {
+			return fmt.Errorf("resume at epoch %d (snapshot epoch %d) but no persisted epoch stakes found - cannot use stale manifest stakes (need fresh snapshot)", startEpoch, snapshotEpoch)
+		}
+		if len(resumeState.ComputedEpochStakes) > 0 {
+			// Once replay has crossed a boundary, only its persisted effective
+			// stakes are authoritative; never fall back to the snapshot manifest.
+			for epoch, data := range resumeState.ComputedEpochStakes {
+				loadedEpoch, err := global.DeserializeAndLoadEpochStakes(data)
+				if err != nil {
+					return fmt.Errorf("failed to load persisted epoch %d stakes: %w", epoch, err)
+				}
+				mlog.Log.Debugf("loaded persisted epoch stakes for epoch %d from state file", loadedEpoch)
+			}
+			if !global.HasEpochStakes(startEpoch) {
+				return fmt.Errorf("missing required epoch stakes for current epoch %d - cannot resume (need fresh snapshot)", startEpoch)
+			}
+			return nil
+		}
+		// Same-epoch resume with no computed boundary state safely uses the
+		// original manifest stake cache.
+	}
+	return buildInitialEpochStakesCache(mithrilState, startEpoch, snapshotEpoch)
+}
+
 type persistedTracker struct {
 	mu       sync.Mutex
 	slot     uint64
@@ -1378,6 +1408,38 @@ func (t *persistedTracker) Get() (uint64, []byte) {
 	copy(out, t.bankhash)
 	t.mu.Unlock()
 	return slot, out
+}
+
+// settleInFlightFoldAtCapacity turns the async fold worker into bounded
+// backpressure only when the speculative tail crosses its hard cap. A fold
+// already in flight was admitted through every finality/verification gate, so
+// waiting for and applying it is safe. We deliberately do not enqueue work
+// here: no in-flight fold at capacity means the normal loop could not admit
+// one (or its previous fold failed), which remains a fail-closed halt.
+// It returns whether the tail is still over capacity after settlement.
+func settleInFlightFoldAtCapacity(
+	tail *unrootedTail,
+	promoter *asyncPromoter,
+	tipSlot uint64,
+	applyFoldOutcome func(*foldResult),
+) bool {
+	if tail == nil || !tail.OverCap() {
+		return false
+	}
+	// ProcessBlock publishes its delta before the replay loop constructs the
+	// resume context. Never let draining an older chunk mask a mid-slot ordering
+	// bug by dropping HeldSlots below the cap while the current tip is still
+	// unrecoverable.
+	if tail.contexts[tipSlot] == nil {
+		return true
+	}
+	if promoter != nil && promoter.inFlight {
+		res := promoter.drain()
+		if applyFoldOutcome != nil {
+			applyFoldOutcome(res)
+		}
+	}
+	return tail.OverCap()
 }
 
 func ReplayBlocks(
@@ -1559,50 +1621,13 @@ func ReplayBlocks(
 	InitChainTip(initialLtHash, replayCtx.CurrentFeatures, initialNumSignatures, initialLastBlockhash, transactionStatuses.View())
 	partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 
-	// Load epoch stakes - persisted stakes on resume, state file on fresh start
+	// Load epoch stakes - persisted stakes on resume, state file on fresh start.
+	// Node startup invokes the same helper before opening Votor so this second
+	// call is an idempotent replay-side safety check, not a separate policy.
 	snapshotEpoch := epochSchedule.GetEpoch(mithrilState.ManifestParentSlot)
-	if resumeState != nil {
-		// Resume case - check if we've crossed epoch boundaries since snapshot
-		epochsCrossed := startEpoch > snapshotEpoch
-		if epochsCrossed && len(resumeState.ComputedEpochStakes) == 0 {
-			// Crossed epoch boundary but no persisted stakes - data loss (crash before persist)
-			mlog.Log.Errorf("Resume at epoch %d (snapshot epoch %d) but no persisted epoch stakes found - cannot use stale manifest stakes (need fresh snapshot)", startEpoch, snapshotEpoch)
-			result.Error = fmt.Errorf("resume at epoch %d (snapshot epoch %d) but no persisted epoch stakes found - cannot use stale manifest stakes (need fresh snapshot)", startEpoch, snapshotEpoch)
-			return result
-		}
-		if len(resumeState.ComputedEpochStakes) > 0 {
-			// Load ONLY persisted epoch stakes from state file (NO manifest fallback)
-			// This ensures we use the exact stakes computed at prior epoch boundaries
-			for epoch, data := range resumeState.ComputedEpochStakes {
-				if loadedEpoch, err := global.DeserializeAndLoadEpochStakes(data); err != nil {
-					mlog.Log.Errorf("Failed to load persisted epoch %d stakes: %v", epoch, err)
-					result.Error = fmt.Errorf("failed to load persisted epoch %d stakes: %w", epoch, err)
-					return result
-				} else {
-					mlog.Log.Debugf("Loaded persisted epoch stakes for epoch %d from state file", loadedEpoch)
-				}
-			}
-			// Validate current epoch stakes exist (we build schedules for block.Epoch)
-			// Note: Don't validate leaderScheduleEpoch here - it can point to E+1 in second
-			// half of epoch E with non-standard slot offsets, causing false failures
-			if !global.HasEpochStakes(startEpoch) {
-				mlog.Log.Errorf("Missing required epoch stakes for current epoch %d - cannot resume (need fresh snapshot)", startEpoch)
-				result.Error = fmt.Errorf("missing required epoch stakes for current epoch %d - cannot resume (need fresh snapshot)", startEpoch)
-				return result
-			}
-		} else {
-			// Resume in same epoch as snapshot, no boundaries crossed - state file epoch stakes still valid
-			if err := buildInitialEpochStakesCache(mithrilState, startEpoch, snapshotEpoch); err != nil {
-				result.Error = err
-				return result
-			}
-		}
-	} else {
-		// Fresh start: load all epochs from state file
-		if err := buildInitialEpochStakesCache(mithrilState, startEpoch, snapshotEpoch); err != nil {
-			result.Error = err
-			return result
-		}
+	if err := LoadInitialEpochStakesCache(mithrilState, resumeState, startEpoch, snapshotEpoch); err != nil {
+		result.Error = err
+		return result
 	}
 
 	// Shreds before blocks: turbine shred signature verification needs every
@@ -1652,7 +1677,7 @@ func ReplayBlocks(
 		if lookupSink, ok := consensusEngine.(consensusengine.AlpenglowEpochLookupSink); ok {
 			lookupSink.SetAlpenglowEpochLookup(epochSchedule.GetEpoch)
 		}
-		installCachedAlpenglowValidatorSets(consensusEngine, startEpoch)
+		_, _ = InstallCachedAlpenglowValidatorSets(consensusEngine, startEpoch)
 	}
 
 	// 100-slot summary window collectors ("full" = reconstructable-from-shreds,
@@ -1697,7 +1722,7 @@ func ReplayBlocks(
 	var gateStats alpenglowGateStats
 	// Persisted gate evidence: a previously-disputed slot promotes only on an exact
 	// executed match after restart — never under delegated trust.
-	alpenglowForced := make(map[uint64]solana.Hash)
+	alpenglowForced := make(map[uint64]alpenglowFinalityExpectation)
 	for _, ev := range mithrilState.AlpenglowEvidence {
 		if !alpenglowMode {
 			break
@@ -1705,13 +1730,24 @@ func ReplayBlocks(
 		if ev.Slot <= mithrilState.LastRootedSlot {
 			continue
 		}
-		var want solana.Hash
-		if !ev.Conflict {
+		want := alpenglowFinalityExpectation{Skip: ev.Skip, Conflict: ev.Conflict}
+		if !want.Conflict {
 			raw, err := hex.DecodeString(ev.Finalized)
 			if err != nil || len(raw) != 32 {
 				mlog.Log.Warnf("alpenglow evidence for slot %d has a malformed finalized id; treating as conflict", ev.Slot)
+				want.Conflict = true
+				want.Skip = false
 			} else {
-				copy(want[:], raw)
+				copy(want.Block[:], raw)
+				// Legacy evidence had no explicit skip bit. A zero finalized
+				// identity with Conflict=false can only mean a finalized skip.
+				if want.Block.IsZero() {
+					want.Skip = true
+				} else if want.Skip {
+					mlog.Log.Warnf("alpenglow evidence for slot %d marks a skip with a nonzero finalized id; treating as conflict", ev.Slot)
+					want.Conflict = true
+					want.Skip = false
+				}
 			}
 		}
 		alpenglowForced[ev.Slot] = want
@@ -2724,27 +2760,6 @@ func ReplayBlocks(
 		}
 		metrics.GlobalBlockReplay.ChainTipUpdate.AddTimingSince(chainTipStart)
 
-		// Rooted-durable backpressure: if the unrooted tail grew past its cap (rooting
-		// stalled), halt rather than grow RAM unbounded; resume re-replays from the last rooted slot.
-		if unrootedTailState != nil && unrootedTailState.OverCap() {
-			// Diagnose WHY rooting stalled: folds gate on min(finality,
-			// verified). If finality ran ahead but the verifier watermark
-			// lags, the trailing verifier (RPC-served execution metas) is
-			// the bottleneck — common on clusters with giant blocks the RPC
-			// serializes slowly.
-			verifiedWM := uint64(0)
-			if trailingVerifier != nil {
-				verifiedWM = trailingVerifier.VerifiedWatermark()
-			}
-			diag := fmt.Sprintf("durable=%d finality=%d verified=%d replay=%d", mithrilState.LastRootedSlot, lastRootedWatermark, verifiedWM, block.Slot)
-			hint := ""
-			if trailingVerifier != nil && TrailingVerifierCfg.Required && lastRootedWatermark > verifiedWM+uint64(FoldBatchSlots) {
-				hint = " — the trailing verifier cannot keep pace with replay (finality is ahead; the verifier fetches every block's execution metas via RPC, which is slow for very large blocks). Options: verifier.required=false to gate folds on certificate finality only, a faster/archival RPC for the verifier, or wait for peer bankhash cross-checking to replace the RPC oracle"
-			}
-			result.Error = fmt.Errorf("rooted-durable: speculative state exceeded %d held slots at slot %d; rooting stalled (%s)%s; halting", unrootedTailHaltCap, block.Slot, diag, hint)
-			mlog.Log.Errorf("%v", result.Error)
-			break
-		}
 		global.SetBlockHeight(block.BlockHeight)
 		if trailingVerifier != nil {
 			trailingVerifier.Record(buildSlotDigest(block))
@@ -2879,6 +2894,38 @@ func ReplayBlocks(
 			}
 
 			break
+		}
+
+		// Rooted-durable backpressure runs only after this slot is complete and its
+		// resume context is attached. If the async writer is merely slower than
+		// replay, wait for its already-admitted fold and apply it before deciding
+		// the tail is truly stalled. No new fold is admitted here: a still-full
+		// tail remains a fail-closed error.
+		if unrootedTailState != nil && unrootedTailState.OverCap() {
+			hadInFlightFold := promoter != nil && promoter.inFlight
+			stillOverCap := settleInFlightFoldAtCapacity(unrootedTailState, promoter, block.Slot, applyFoldOutcome)
+			if stillOverCap {
+				// Diagnose WHY rooting stalled. Validator mode verifies the footer
+				// bank hash inline and has no trailing-verifier watermark; do not
+				// misreport that safe path as verified=0.
+				verifiedWM := uint64(0)
+				verifiedDiag := "n/a/not-required"
+				if trailingVerifier != nil {
+					verifiedWM = trailingVerifier.VerifiedWatermark()
+					verifiedDiag = fmt.Sprintf("%d", verifiedWM)
+				} else if TrailingVerifierCfg.ValidatorFooterHash {
+					verifiedDiag = "n/a/footer-inline"
+				}
+				diag := fmt.Sprintf("durable=%d finality=%d verified=%s replay=%d fold_in_flight=%t",
+					mithrilState.LastRootedSlot, lastRootedWatermark, verifiedDiag, block.Slot, hadInFlightFold)
+				hint := ""
+				if trailingVerifier != nil && TrailingVerifierCfg.Required && lastRootedWatermark > verifiedWM+uint64(FoldBatchSlots) {
+					hint = " — the trailing verifier cannot keep pace with replay (finality is ahead; the verifier fetches every block's execution metas via RPC, which is slow for very large blocks). Options: verifier.required=false to gate folds on certificate finality only, a faster/archival RPC for the verifier, or wait for peer bankhash cross-checking to replace the RPC oracle"
+				}
+				result.Error = fmt.Errorf("rooted-durable: speculative state exceeded %d held slots at slot %d; rooting stalled (%s)%s; halting", unrootedTailHaltCap, block.Slot, diag, hint)
+				mlog.Log.Errorf("%v", result.Error)
+				break
+			}
 		}
 
 		// Stop before per-slot logging, summary generation, and metric export so
@@ -3145,12 +3192,14 @@ func ReplayBlocks(
 	// however long the partial ran.
 	if unrootedTailState != nil {
 		preFlushRooted := mithrilState.LastRootedSlot
+		preFlushEvidence := len(mithrilState.AlpenglowEvidence)
 		foldRootedPrefix(true)
 		// The cancel-path state save ran BEFORE this flush; if the flush
-		// advanced the watermark, re-save so the state file matches the store
-		// exactly. (Without this, startup's store-ahead reconcile still adopts
-		// the manifest context — this just keeps the file authoritative.)
-		if result.StateWrittenOnCancel && onCancelWriteState != nil && mithrilState.LastRootedSlot > preFlushRooted {
+		// advanced the watermark or its finality gate recorded new evidence,
+		// re-save so the state file matches the store and a restart cannot lose
+		// a shutdown-only safety finding.
+		stateChanged := mithrilState.LastRootedSlot > preFlushRooted || len(mithrilState.AlpenglowEvidence) > preFlushEvidence
+		if result.StateWrittenOnCancel && onCancelWriteState != nil && stateChanged {
 			if err := onCancelWriteState(result); err != nil {
 				mlog.Log.Errorf("failed to re-write state after shutdown flush (recovery reconcile will cover it): %v", err)
 			}

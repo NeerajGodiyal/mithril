@@ -123,6 +123,12 @@ func (s *alpenglowSwitchSweeper) sweep(executed map[uint64]solana.Hash, lastRoot
 		if !ran {
 			continue
 		}
+		if _, finalizedSkip := s.query.FinalizedSkipAt(slot); finalizedSkip {
+			if !executedID.IsZero() {
+				return &CertifiedSwitch{Slot: slot, Executed: executedID, Skip: true}
+			}
+			continue
+		}
 		if s.query.SkipCertifiedAt(slot) {
 			// A skip certificate permits a future child to omit this slot, but it
 			// does not invalidate an already replayed block as that child's parent.

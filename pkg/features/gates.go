@@ -62,7 +62,10 @@ var EnableSbpfV3DeploymentAndExecution = FeatureGate{Name: "EnableSbpfV3Deployme
 var DisableSbpfV0Execution = FeatureGate{Name: "DisableSbpfV0Execution", Address: base58.MustDecodeFromString("TestFeature11111111111111111111111111111111")}
 var ReenableSbpfV0Execution = FeatureGate{Name: "ReenableSbpfV0Execution", Address: base58.MustDecodeFromString("TestFeature21111111111111111111111111111111")}
 var FormalizeLoadedTransactionDataSize = FeatureGate{Name: "FormalizeLoadedTransactionDataSize", Address: base58.MustDecodeFromString("DeS7sR48ZcFTUmt5FFEVDr1v1bh73aAbZiZq3SYr8Eh8")}
-var Alpenglow = FeatureGate{Name: "Alpenglow", Address: base58.MustDecodeFromString("a1penGLz8Vm2QHYB3JPefBiU4BY3Z6JkW2k3Scw5GWP")}
+
+const AlpenglowFeatureGateAddress = "A1PeNGc3D8SQmKwdYf4qj1XG7XgWVSuFQaiJSCQj775h"
+
+var Alpenglow = FeatureGate{Name: "Alpenglow", Address: base58.MustDecodeFromString(AlpenglowFeatureGateAddress)}
 var AlpenglowDevContext = FeatureGate{Name: "AlpenglowDevContext", Address: base58.MustDecodeFromString("8KpruRFrT59jQ9NfFX9DU6j8a1hW7y6xchvZNQ5rxD4P")}
 var ValidatorAdmissionTicket = FeatureGate{Name: "ValidatorAdmissionTicket", Address: base58.MustDecodeFromString("VAT9huvhPjRN9cyrPytq9rwvEJ3J4ADtjdncgZRyANJ")}
 var ReduceSlotTimeTo350ms = FeatureGate{Name: "ReduceSlotTimeTo350ms", Address: base58.MustDecodeFromString("iBRL5RuWhw4yqaAZu96RUULHckHTZAoe2b77qaV38JZ")}
@@ -81,7 +84,7 @@ var AccountDataDirectMapping = FeatureGate{Name: "AccountDataDirectMapping", Add
 var VoteStateV4 = FeatureGate{Name: "VoteStateV4", Address: base58.MustDecodeFromString("Gx4XFcrVMt4HUvPzTpTSVkdDVgcDSjKhDN1RqRS6KDuZ")}
 var BlsPubkeyManagementInVoteAccount = FeatureGate{Name: "BlsPubkeyManagementInVoteAccount", Address: base58.MustDecodeFromString("AnAP9zPV4KL7czAPQbFhpDKV2tx7g4UGNbK9wvXwjaRo")}
 var CommissionRateInBasisPoints = FeatureGate{Name: "CommissionRateInBasisPoints", Address: base58.MustDecodeFromString("Eg7tXEwMZzS98xaZ1YHUbdRHsaYZiCsSaR6sKgxreoaj")}
-var CustomCommissionCollector = FeatureGate{Name: "CustomCommissionCollector", Address: base58.MustDecodeFromString("CustomCommissionCo11ector111111111111111111")}
+var CustomCommissionCollector = FeatureGate{Name: "CustomCommissionCollector", Address: base58.MustDecodeFromString("3HcSrCTGXTUnrTueHi4DAwNuMxZSsm5xui2Ax3mgxHqf")}
 var BlockRevenueSharing = FeatureGate{Name: "BlockRevenueSharing", Address: base58.MustDecodeFromString("B1ockRevenueSharing111111111111111111111111")}
 var VoteAccountInitializeV2 = FeatureGate{Name: "VoteAccountInitializeV2", Address: base58.MustDecodeFromString("VoteAccount1nitia1izeV211111111111111111111")}
 var RelaxProgramdataAccountCheckMigration = FeatureGate{Name: "RelaxProgramdataAccountCheckMigration", Address: base58.MustDecodeFromString("rexav5eNTUSNT1K2N7cfRjnthwhcP5BC25v2tA4rW4h")}
