@@ -431,6 +431,9 @@ func updateEpochStakesAndRefreshVoteCache(leaderScheduleEpoch uint64, b *block.B
 	}
 	global.PutEpochStakes(leaderScheduleEpoch, epochStakes, epochVoteAccounts, totalEffectiveStake)
 
-	maps.Copy(b.EpochStakesPerVoteAcct, epochStakes)
+	// Epoch-stake maps are immutable bank snapshot state and are shared by every
+	// slot in an epoch (including a concurrently forged leader bank). Allocate a
+	// new map at the epoch boundary instead of mutating the parent's generation.
+	b.EpochStakesPerVoteAcct = maps.Clone(epochStakes)
 	b.TotalEpochStake = totalEffectiveStake
 }

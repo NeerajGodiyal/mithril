@@ -97,7 +97,7 @@ func TestProcessBlockRejectsDuplicateMessagesBeforeAccountAccess(t *testing.T) {
 	require.NoError(t, err)
 	block := &b.Block{Slot: 77, Transactions: []*solana.Transaction{tx, tx}}
 
-	_, err = ProcessBlock(nil, block, nil, 0, nil, nil, nil, NewTransactionStatusCache(), false)
+	_, err = ProcessBlock(nil, block, nil, 0, nil, nil, nil, NewTransactionStatusCache(), false, nil)
 	var duplicateErr *DuplicateTransactionMessagesError
 	require.Error(t, err)
 	require.True(t, errors.As(err, &duplicateErr))
