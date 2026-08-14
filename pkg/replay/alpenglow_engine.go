@@ -180,6 +180,18 @@ func applyAlpenglowFooterClockWithCache(slotCtx *sealevel.SlotCtx, block *b.Bloc
 	if err := slotCtx.SetAccount(sealevel.SysvarClockAddr, clockAcct); err != nil {
 		return fmt.Errorf("unable to write Alpenglow footer clock back to slot state: %w", err)
 	}
+	bankSysvars := slotCtx.BankSysvars()
+	if bankSysvars == nil {
+		bankSysvars, err = sealevel.NewBankSysvars(slotCtx.Slot, clockAcct)
+	} else {
+		bankSysvars, err = bankSysvars.WithAccounts(clockAcct)
+	}
+	if err != nil {
+		return fmt.Errorf("update bank-local Clock snapshot: %w", err)
+	}
+	if err := slotCtx.PublishBankSysvars(bankSysvars); err != nil {
+		return err
+	}
 	if updateCache {
 		sealevel.SysvarCache.Clock.Sysvar = &clock
 		sealevel.SysvarCache.Clock.Acct = clockAcct

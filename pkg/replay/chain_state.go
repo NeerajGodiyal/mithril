@@ -3,6 +3,7 @@ package replay
 import (
 	"sync"
 
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/lthash"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -24,8 +25,22 @@ type ChainTipSnapshot struct {
 	PrevNumSigs                   uint64
 	PrevFeeGovernor               *sealevel.FeeRateGovernor
 	LastEntryHash                 solana.Hash
+	LastBlockhash                 solana.Hash
+	BlockHeight                   uint64
+	LatestEvictedBlockhash        [32]byte
 	EpochRewardsActive            bool
+	BankSysvars                   *sealevel.BankSysvars
+	EpochStakes                   map[solana.PublicKey]uint64 // immutable for the published epoch
+	TotalEpochStake               uint64
+	NanosecondClockAccount        *accounts.Account
+	HasNanosecondClockAccount     bool
 	UnrootedRead                  sealevel.AccountReader
+}
+
+// ChainTipBankMetadata contains replay-bank scalars that are not carried by
+// SlotCtx but must be published in the same generation as its account state.
+type ChainTipBankMetadata struct {
+	BlockHeight uint64
 }
 
 // ChainTipIdentity is the Alpenglow identity committed by the same replay
@@ -54,7 +69,15 @@ var (
 	chainTipTransactionStatuses           *TransactionStatusView
 	chainTipPrevNumSigs                   uint64
 	chainTipLastEntryHash                 solana.Hash
+	chainTipLastBlockhash                 solana.Hash
+	chainTipBlockHeight                   uint64
+	chainTipLatestEvictedBlockhash        [32]byte
 	chainTipEpochRewardsActive            bool
+	chainTipBankSysvars                   *sealevel.BankSysvars
+	chainTipEpochStakes                   map[solana.PublicKey]uint64
+	chainTipTotalEpochStake               uint64
+	chainTipNanosecondClockAccount        *accounts.Account
+	chainTipHasNanosecondClockAccount     bool
 	chainTipPrevFeeGovernor               *sealevel.FeeRateGovernor
 	chainTipUnrootedRead                  sealevel.AccountReader
 )
@@ -75,7 +98,15 @@ func InitChainTip(acctsLtHash *lthash.LtHash, f *features.Features, prevNumSigs 
 	chainTipTransactionStatuses = nil
 	chainTipPrevNumSigs = 0
 	chainTipLastEntryHash = solana.Hash{}
+	chainTipLastBlockhash = solana.Hash{}
+	chainTipBlockHeight = 0
+	chainTipLatestEvictedBlockhash = [32]byte{}
 	chainTipEpochRewardsActive = false
+	chainTipBankSysvars = nil
+	chainTipEpochStakes = nil
+	chainTipTotalEpochStake = 0
+	chainTipNanosecondClockAccount = nil
+	chainTipHasNanosecondClockAccount = false
 	chainTipPrevFeeGovernor = nil
 	chainTipUnrootedRead = nil
 	if acctsLtHash != nil {
@@ -87,6 +118,7 @@ func InitChainTip(acctsLtHash *lthash.LtHash, f *features.Features, prevNumSigs 
 	chainTipPrevNumSigs = prevNumSigs
 	if lastEntryHash != (solana.Hash{}) {
 		chainTipLastEntryHash = lastEntryHash
+		chainTipLastBlockhash = lastEntryHash
 	}
 	if len(statusViews) > 0 {
 		chainTipTransactionStatuses = statusViews[0]
@@ -101,6 +133,12 @@ func ResetChainTip() {
 
 // UpdateChainTipFromSlotCtx refreshes blockprod parent context from replay progress.
 func UpdateChainTipFromSlotCtx(slotCtx *sealevel.SlotCtx, f *features.Features, statuses *TransactionStatusView, identity ChainTipIdentity, readers ...sealevel.AccountReader) {
+	UpdateChainTipFromSlotCtxWithBankMetadata(slotCtx, f, statuses, identity, ChainTipBankMetadata{}, readers...)
+}
+
+// UpdateChainTipFromSlotCtxWithBankMetadata atomically publishes a complete
+// replay-parent generation for block production.
+func UpdateChainTipFromSlotCtxWithBankMetadata(slotCtx *sealevel.SlotCtx, f *features.Features, statuses *TransactionStatusView, identity ChainTipIdentity, metadata ChainTipBankMetadata, readers ...sealevel.AccountReader) {
 	if slotCtx == nil {
 		return
 	}
@@ -120,6 +158,17 @@ func UpdateChainTipFromSlotCtx(slotCtx *sealevel.SlotCtx, f *features.Features, 
 	chainTipAcctsLtHash = nil
 	chainTipFeatures = nil
 	chainTipLastEntryHash = solana.Hash{}
+	chainTipLastBlockhash = solana.Hash{}
+	chainTipBlockHeight = metadata.BlockHeight
+	chainTipLatestEvictedBlockhash = slotCtx.LatestEvictedBlockhash
+	chainTipBankSysvars = slotCtx.BankSysvars()
+	// VoteAccts is bank-owned epoch stake state. Replay replaces the map when
+	// entering a new epoch and execution never mutates it, so sharing the
+	// immutable map avoids copying the full validator set on every slot.
+	chainTipEpochStakes = slotCtx.VoteAccts
+	chainTipTotalEpochStake = slotCtx.TotalEpochStake
+	chainTipNanosecondClockAccount = nil
+	chainTipHasNanosecondClockAccount = false
 	chainTipPrevFeeGovernor = nil
 	if len(readers) > 0 {
 		chainTipUnrootedRead = readers[0]
@@ -139,9 +188,20 @@ func UpdateChainTipFromSlotCtx(slotCtx *sealevel.SlotCtx, f *features.Features, 
 	chainTipPrevNumSigs = slotCtx.NumSignatures
 	if slotCtx.Blockhash != ([32]byte{}) {
 		chainTipLastEntryHash = solana.Hash(slotCtx.Blockhash)
+		chainTipLastBlockhash = solana.Hash(slotCtx.Blockhash)
 	}
-	if rewards := sealevel.SysvarCache.EpochRewards.Sysvar; rewards != nil {
-		chainTipEpochRewardsActive = rewards.Active
+	if slotCtx.Accounts != nil {
+		if nanoClock, err := slotCtx.GetAccount(NanosecondClockAccountAddr()); err == nil && nanoClock != nil && nanoClock.Lamports > 0 {
+			chainTipNanosecondClockAccount = nanoClock.Clone()
+			chainTipHasNanosecondClockAccount = true
+		}
+	}
+	if chainTipBankSysvars != nil {
+		if rewards, ok := chainTipBankSysvars.EpochRewards(); ok {
+			chainTipEpochRewardsActive = rewards.Active
+		} else {
+			chainTipEpochRewardsActive = false
+		}
 	} else {
 		chainTipEpochRewardsActive = false
 	}
@@ -169,7 +229,14 @@ func ChainTipParentContext() ChainTipSnapshot {
 		HasAlpenglowChainedMerkleRoot: chainTipHasAlpenglowChainedMerkleRoot,
 		PrevNumSigs:                   chainTipPrevNumSigs,
 		LastEntryHash:                 chainTipLastEntryHash,
+		LastBlockhash:                 chainTipLastBlockhash,
+		BlockHeight:                   chainTipBlockHeight,
+		LatestEvictedBlockhash:        chainTipLatestEvictedBlockhash,
 		EpochRewardsActive:            chainTipEpochRewardsActive,
+		BankSysvars:                   chainTipBankSysvars,
+		EpochStakes:                   chainTipEpochStakes,
+		TotalEpochStake:               chainTipTotalEpochStake,
+		HasNanosecondClockAccount:     chainTipHasNanosecondClockAccount,
 		UnrootedRead:                  chainTipUnrootedRead,
 		TransactionStatuses:           chainTipTransactionStatuses,
 	}
@@ -182,6 +249,9 @@ func ChainTipParentContext() ChainTipSnapshot {
 	if chainTipPrevFeeGovernor != nil {
 		gov := *chainTipPrevFeeGovernor
 		ctx.PrevFeeGovernor = &gov
+	}
+	if chainTipNanosecondClockAccount != nil {
+		ctx.NanosecondClockAccount = chainTipNanosecondClockAccount.Clone()
 	}
 	return ctx
 }

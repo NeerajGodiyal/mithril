@@ -200,6 +200,9 @@ func asyncTestTail(committer batchCommitter, slots ...uint64) *unrootedTail {
 func TestAsyncFoldBuildRunApply(t *testing.T) {
 	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
 	tail := asyncTestTail(fc, 5, 6, 7)
+	for _, slot := range []uint64{5, 6, 7} {
+		tail.SetContext(slot, tail.contexts[slot], testUnwindBankSysvars(t, slot, slot*10))
+	}
 
 	job, err := tail.buildFoldJob(7, false)
 	require.NoError(t, err)
@@ -221,6 +224,9 @@ func TestAsyncFoldBuildRunApply(t *testing.T) {
 	assert.Empty(t, tail.bankhashes[uint64(5)])
 	_, has5 := tail.contexts[5]
 	assert.False(t, has5, "contexts pruned through the fold")
+	assert.NotContains(t, tail.bankSysvars, uint64(5), "bank sysvars pruned through the fold")
+	assert.NotContains(t, tail.bankSysvars, uint64(6), "chunk-top bank sysvars pruned through the fold")
+	assert.Contains(t, tail.bankSysvars, uint64(7), "unfolded bank sysvars remain retained")
 }
 
 // A partial trailing chunk builds only under force (the shutdown flush).

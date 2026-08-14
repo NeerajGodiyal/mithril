@@ -96,23 +96,25 @@ func (sc *SysvarClock) MustMarshal() []byte {
 }
 
 func ReadClockSysvar(execCtx *ExecutionCtx) (SysvarClock, error) {
-	accts := addrObjectForLookup(execCtx)
-	var clockAccount *accounts.Account
-	if accts != nil && *accts != nil {
-		var err error
-		clockAccount, err = (*accts).GetAccount(&SysvarClockAddr)
-		if err == nil && clockAccount != nil {
-			if clockAccount.Lamports == 0 {
-				return SysvarClock{}, InstrErrUnsupportedSysvar
-			}
-
-			dec := bin.NewBinDecoder(clockAccount.Data)
-			var clock SysvarClock
-			if err := clock.UnmarshalWithDecoder(dec); err != nil {
+	if execCtx != nil && execCtx.SlotCtx != nil {
+		if bankSysvars := execCtx.SlotCtx.BankSysvars(); bankSysvars != nil {
+			clock, ok := bankSysvars.Clock()
+			if !ok {
 				return SysvarClock{}, InstrErrUnsupportedSysvar
 			}
 			return clock, nil
 		}
+	}
+
+	if clockAccount, ok := localSysvarAccount(execCtx, SysvarClockAddr); ok {
+		if clockAccount.Lamports == 0 {
+			return SysvarClock{}, InstrErrUnsupportedSysvar
+		}
+		var clock SysvarClock
+		if err := clock.UnmarshalWithDecoder(bin.NewBinDecoder(clockAccount.Data)); err != nil {
+			return SysvarClock{}, InstrErrUnsupportedSysvar
+		}
+		return clock, nil
 	}
 
 	// The global cache remains the fallback for execution contexts that do not

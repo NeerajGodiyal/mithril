@@ -142,21 +142,25 @@ func (sh *SysvarSlotHashes) Update(slot uint64, parentSlot uint64, hash [32]byte
 }
 
 func ReadSlotHashesSysvar(execCtx *ExecutionCtx) (SysvarSlotHashes, error) {
-	accts := addrObjectForLookup(execCtx)
-	if accts != nil && *accts != nil {
-		slotHashesSysvarAcct, err := (*accts).GetAccount(&SysvarSlotHashesAddr)
-		if err == nil && slotHashesSysvarAcct != nil {
-			if slotHashesSysvarAcct.Lamports == 0 {
-				return SysvarSlotHashes{}, InstrErrUnsupportedSysvar
-			}
-
-			dec := bin.NewBinDecoder(slotHashesSysvarAcct.Data)
-			var slotHashes SysvarSlotHashes
-			if err := slotHashes.UnmarshalWithDecoder(dec); err != nil {
+	if execCtx != nil && execCtx.SlotCtx != nil {
+		if bankSysvars := execCtx.SlotCtx.BankSysvars(); bankSysvars != nil {
+			slotHashes, ok := bankSysvars.SlotHashes()
+			if !ok {
 				return SysvarSlotHashes{}, InstrErrUnsupportedSysvar
 			}
 			return slotHashes, nil
 		}
+	}
+
+	if slotHashesAcct, ok := localSysvarAccount(execCtx, SysvarSlotHashesAddr); ok {
+		if slotHashesAcct.Lamports == 0 {
+			return SysvarSlotHashes{}, InstrErrUnsupportedSysvar
+		}
+		var slotHashes SysvarSlotHashes
+		if err := slotHashes.UnmarshalWithDecoder(bin.NewBinDecoder(slotHashesAcct.Data)); err != nil {
+			return SysvarSlotHashes{}, InstrErrUnsupportedSysvar
+		}
+		return slotHashes, nil
 	}
 
 	if SysvarCache.SlotHashes.Sysvar != nil {

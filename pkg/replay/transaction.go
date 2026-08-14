@@ -60,6 +60,20 @@ func (discardLogger) Log(string) {}
 
 func newExecCtx(slotCtx *sealevel.SlotCtx, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits, log sealevel.Logger) *sealevel.ExecutionCtx {
 	txCtx := sealevel.NewTransactionCtx(*transactionAccts, maxStackCapacity, maxInstrTraceCapacity)
+	if bankSysvars := slotCtx.BankSysvars(); bankSysvars != nil {
+		bankRent, ok := bankSysvars.Rent()
+		if !ok {
+			// Production bank construction validates the complete snapshot once
+			// before entering the transaction loop. Do not silently execute with a
+			// zero Rent value if an isolated caller violates that invariant.
+			panic(fmt.Sprintf("bank sysvar snapshot for slot %d is missing Rent", slotCtx.Slot))
+		}
+		txCtx.Rent = bankRent
+	} else if sealevel.SysvarCache.Rent.Sysvar != nil {
+		// Compatibility for isolated legacy test/simulation contexts. Production
+		// replay and leader banks always publish a complete bank snapshot.
+		txCtx.Rent = *sealevel.SysvarCache.Rent.Sysvar
+	}
 	execCtx := &sealevel.ExecutionCtx{Log: log, TransactionContext: txCtx, ComputeMeter: cu.NewComputeMeter(uint64(computeBudgetLimits.ComputeUnitLimit)), PrevLamportsPerSignature: slotCtx.FeeRateGovernor.PrevLamportsPerSignature}
 
 	execCtx.Features = *slotCtx.Features

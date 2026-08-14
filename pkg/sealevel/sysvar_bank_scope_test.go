@@ -7,6 +7,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type countingSysvarAccounts struct {
+	accounts.Accounts
+	getCalls int
+}
+
+func (accts *countingSysvarAccounts) GetAccount(pubkey *[32]byte) (*accounts.Account, error) {
+	accts.getCalls++
+	return accts.Accounts.GetAccount(pubkey)
+}
+
 func TestReadClockSysvarPrefersBankLocalAccount(t *testing.T) {
 	previous := SysvarCache.Clock
 	t.Cleanup(func() { SysvarCache.Clock = previous })
@@ -17,18 +27,11 @@ func TestReadClockSysvarPrefersBankLocalAccount(t *testing.T) {
 	SysvarCache.Clock.Acct = parentAccount
 
 	bankClock := SysvarClock{Slot: 42, Epoch: 2, UnixTimestamp: 1_700_000_000}
-	bankAccounts := accounts.NewMemAccounts()
-	require.NoError(t, bankAccounts.SetAccount(&SysvarClockAddr, clockSysvarTestAccount(bankClock)))
-
-	execCtx := &ExecutionCtx{
-		Accounts: accounts.NewMemAccounts(),
-		SlotCtx: &SlotCtx{
-			Accounts: bankAccounts,
-			// Leader banks are deliberately speculative and therefore do not set
-			// Replay. Their transactions must still observe their own bank sysvars.
-			Replay: false,
-		},
-	}
+	snapshot, err := NewBankSysvars(42, clockSysvarTestAccount(bankClock))
+	require.NoError(t, err)
+	slotCtx := &SlotCtx{Slot: 42, Accounts: accounts.NewMemAccounts(), Replay: false}
+	require.NoError(t, slotCtx.PublishBankSysvars(snapshot))
+	execCtx := &ExecutionCtx{Accounts: accounts.NewMemAccounts(), SlotCtx: slotCtx}
 
 	got, err := ReadClockSysvar(execCtx)
 	require.NoError(t, err)
@@ -44,13 +47,11 @@ func TestGetSysvarBytesPrefersBankLocalAccount(t *testing.T) {
 	SysvarCache.Clock.Acct = clockSysvarTestAccount(parentClock)
 
 	bankClock := SysvarClock{Slot: 42, Epoch: 2, UnixTimestamp: 1_700_000_000}
-	bankAccounts := accounts.NewMemAccounts()
-	require.NoError(t, bankAccounts.SetAccount(&SysvarClockAddr, clockSysvarTestAccount(bankClock)))
-
-	execCtx := &ExecutionCtx{
-		Accounts: accounts.NewMemAccounts(),
-		SlotCtx:  &SlotCtx{Accounts: bankAccounts, Replay: false},
-	}
+	snapshot, err := NewBankSysvars(42, clockSysvarTestAccount(bankClock))
+	require.NoError(t, err)
+	slotCtx := &SlotCtx{Slot: 42, Accounts: accounts.NewMemAccounts(), Replay: false}
+	require.NoError(t, slotCtx.PublishBankSysvars(snapshot))
+	execCtx := &ExecutionCtx{Accounts: accounts.NewMemAccounts(), SlotCtx: slotCtx}
 
 	got, err := fetchSysvarBytesForPubkey(execCtx, SysvarClockAddr)
 	require.NoError(t, err)
@@ -85,15 +86,84 @@ func TestReadSlotHashesSysvarPrefersBankLocalAccount(t *testing.T) {
 	SysvarCache.SlotHashes.Acct = slotHashesSysvarTestAccount(parentSlotHashes)
 
 	bankSlotHashes := SysvarSlotHashes{{Slot: 42, Hash: [32]byte{42}}}
-	bankAccounts := accounts.NewMemAccounts()
-	require.NoError(t, bankAccounts.SetAccount(&SysvarSlotHashesAddr, slotHashesSysvarTestAccount(bankSlotHashes)))
+	snapshot, err := NewBankSysvars(42, slotHashesSysvarTestAccount(bankSlotHashes))
+	require.NoError(t, err)
+	slotCtx := &SlotCtx{Slot: 42, Accounts: accounts.NewMemAccounts(), Replay: false}
+	require.NoError(t, slotCtx.PublishBankSysvars(snapshot))
 
-	got, err := ReadSlotHashesSysvar(&ExecutionCtx{
-		Accounts: accounts.NewMemAccounts(),
-		SlotCtx:  &SlotCtx{Accounts: bankAccounts, Replay: false},
-	})
+	got, err := ReadSlotHashesSysvar(&ExecutionCtx{Accounts: accounts.NewMemAccounts(), SlotCtx: slotCtx})
 	require.NoError(t, err)
 	require.Equal(t, bankSlotHashes, got)
+}
+
+func TestBankSysvarCacheAvoidsRepeatedAccountReads(t *testing.T) {
+	previousClock := SysvarCache.Clock
+	previousSlotHashes := SysvarCache.SlotHashes
+	t.Cleanup(func() {
+		SysvarCache.Clock = previousClock
+		SysvarCache.SlotHashes = previousSlotHashes
+	})
+
+	parentClock := SysvarClock{Slot: 41}
+	parentSlotHashes := SysvarSlotHashes{{Slot: 41, Hash: [32]byte{41}}}
+	SysvarCache.Clock.Sysvar = &parentClock
+	SysvarCache.Clock.Acct = clockSysvarTestAccount(parentClock)
+	SysvarCache.SlotHashes.Sysvar = &parentSlotHashes
+	SysvarCache.SlotHashes.Acct = slotHashesSysvarTestAccount(parentSlotHashes)
+
+	bankClock := SysvarClock{Slot: 42, Epoch: 2, UnixTimestamp: 1_700_000_000}
+	bankSlotHashes := SysvarSlotHashes{{Slot: 42, Hash: [32]byte{42}}}
+	expectedSlotHashes := append(SysvarSlotHashes(nil), bankSlotHashes...)
+	expectedSlotHashesRaw := expectedSlotHashes.MustMarshal()
+	counting := &countingSysvarAccounts{Accounts: accounts.NewMemAccounts()}
+	clockAccount := clockSysvarTestAccount(bankClock)
+	slotHashesAccount := slotHashesSysvarTestAccount(bankSlotHashes)
+	snapshot, err := NewBankSysvars(42, clockAccount, slotHashesAccount)
+	require.NoError(t, err)
+	slotCtx := &SlotCtx{Slot: 42, Accounts: counting}
+	require.NoError(t, slotCtx.PublishBankSysvars(snapshot))
+	execCtx := &ExecutionCtx{SlotCtx: slotCtx}
+
+	// Snapshot construction owns defensive copies; later caller mutation cannot change the
+	// bank's immutable view.
+	clockAccount.Data[0]++
+	slotHashesAccount.Data[0]++
+	bankSlotHashes[0].Slot++
+
+	for range 10 {
+		gotClock, err := ReadClockSysvar(execCtx)
+		require.NoError(t, err)
+		require.Equal(t, bankClock, gotClock)
+
+		gotSlotHashes, err := ReadSlotHashesSysvar(execCtx)
+		require.NoError(t, err)
+		require.Equal(t, expectedSlotHashes, gotSlotHashes)
+
+		gotClockRaw, err := fetchSysvarBytesForPubkey(execCtx, SysvarClockAddr)
+		require.NoError(t, err)
+		require.Equal(t, bankClock.MustMarshal(), gotClockRaw)
+
+		gotSlotHashesRaw, err := fetchSysvarBytesForPubkey(execCtx, SysvarSlotHashesAddr)
+		require.NoError(t, err)
+		require.Equal(t, expectedSlotHashesRaw, gotSlotHashesRaw)
+	}
+	require.Zero(t, counting.getCalls)
+
+	allocs := testing.AllocsPerRun(1_000, func() {
+		if _, err := ReadClockSysvar(execCtx); err != nil {
+			panic(err)
+		}
+		if _, err := ReadSlotHashesSysvar(execCtx); err != nil {
+			panic(err)
+		}
+		if _, err := fetchSysvarBytesForPubkey(execCtx, SysvarClockAddr); err != nil {
+			panic(err)
+		}
+		if _, err := fetchSysvarBytesForPubkey(execCtx, SysvarSlotHashesAddr); err != nil {
+			panic(err)
+		}
+	})
+	require.Zero(t, allocs)
 }
 
 func clockSysvarTestAccount(clock SysvarClock) *accounts.Account {
