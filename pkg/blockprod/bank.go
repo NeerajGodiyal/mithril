@@ -171,9 +171,6 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 	if tx == nil {
 		return ForgeDroppedParse, costmodel.ExceedNone
 	}
-	if tx.IsVote() {
-		return ForgeDroppedVote, costmodel.ExceedNone
-	}
 	messageHash, err := replay.TransactionMessageHash(tx)
 	if err != nil {
 		return ForgeDroppedParse, costmodel.ExceedNone
@@ -250,6 +247,34 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 		b.sink.OnEntryBatch(flushed, batchBytes)
 	}
 	return ForgeAccepted, costmodel.ExceedNone
+}
+
+// BufferedDropReason classifies why a buffered transaction should be discarded.
+type BufferedDropReason int
+
+const (
+	BufferedKeep BufferedDropReason = iota
+	BufferedExpired
+	BufferedAlreadyProcessed
+)
+
+// ClassifyBuffered reports whether a buffered transaction is expired or already
+// processed relative to this bank.
+func (b *WorkingBank) ClassifyBuffered(blockhash solana.Hash, messageHash [32]byte) BufferedDropReason {
+	if rbh := sealevel.SysvarCache.RecentBlockHashes.Sysvar; rbh == nil || !rbh.IsBlockhashAgeValid(blockhash) {
+		return BufferedExpired
+	}
+	if b.ancestorStatuses != nil {
+		if ok, err := b.ancestorStatuses.ContainsMessage(blockhash, messageHash); err == nil && ok {
+			return BufferedAlreadyProcessed
+		}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, seen := b.seenMessages[messageHash]; seen {
+		return BufferedAlreadyProcessed
+	}
+	return BufferedKeep
 }
 
 // FlushEntries emits any pending transactions as an entry batch.

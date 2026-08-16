@@ -72,6 +72,16 @@ func (txFeeAccumulator *TxFeeInfoAccumulator) Add(txFeeInfo *TxFeeInfo) {
 	}
 }
 
+// LeaderReward is the lamports credited to the slot leader for a transaction:
+// full priority fee plus the unburned half of the signature (execution) fee.
+func LeaderReward(feeInfo *TxFeeInfo) uint64 {
+	if feeInfo == nil {
+		return 0
+	}
+	unburnedSigFee := feeInfo.ExecutionFee - feeInfo.ExecutionFee/2
+	return safemath.SaturatingAddU64(feeInfo.PriorityFee, unburnedSigFee)
+}
+
 func CalculateTxFees(tx *solana.Transaction, instrs []sealevel.Instruction, computeBudgetLimits *sealevel.ComputeBudgetLimits, f *features.Features) *TxFeeInfo {
 	numSignatures := uint64(tx.Message.Header.NumRequiredSignatures)
 	secp256r1PrecompiledEnabled := f.IsActive(features.EnableSecp256r1Precompile)

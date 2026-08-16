@@ -29,10 +29,10 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/arena"
 	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/blockprod"
+	"github.com/Overclock-Validator/mithril/pkg/blockprod/scheduler"
 	"github.com/Overclock-Validator/mithril/pkg/blockstream"
 	"github.com/Overclock-Validator/mithril/pkg/config"
 	consensusengine "github.com/Overclock-Validator/mithril/pkg/consensus"
-	"github.com/Overclock-Validator/mithril/pkg/forge"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/gossip"
 	"github.com/Overclock-Validator/mithril/pkg/lightbringer"
@@ -2681,7 +2681,9 @@ postBootstrap:
 		defer broadcaster.Close()
 
 		controller := blockprod.NewController()
-		topicSink := forge.NewSink(controller)
+		topicSink := scheduler.New(controller)
+		topicSink.Start(ctx)
+		defer topicSink.Stop()
 		tpuCfg := tpu.DefaultConfig()
 		tpuCfg.Identity = validatorIdentity
 		tpuCfg.ListenAddr = validatorTPUQUICBind
