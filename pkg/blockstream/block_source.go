@@ -101,7 +101,8 @@ type BlockSourceOpts struct {
 	PrewarmBlocks []*b.Block
 	// LocalBlocks carries fully frozen blocks from this node's producer. The
 	// source owns the consumer for exactly its own lifetime, avoiding stale
-	// consumers across a replay/fork-recovery restart.
+	// consumers across a replay/fork-recovery restart. Replay adopts the
+	// producer SlotCtx for these slots and does not re-execute them.
 	LocalBlocks <-chan *b.Block
 	// DisableRPCBlockFetch (config block.rpc_fallback=false): a live-shred
 	// source NEVER fetches blocks over RPC — shreds via turbine + repair are
@@ -2995,8 +2996,8 @@ func (bs *BlockSource) emitOrderedBlocks() {
 							}
 						}
 					} else if blk.FromLocalProduction {
-						// Local production is an authoritative input to replay, not a
-						// source handoff away from the turbine stream.
+						// Local production is sequenced into replay so it can adopt
+						// the producer SlotCtx; it is not a source handoff.
 					} else if repairingSlot {
 						bs.clearLiveRepairSlot(blk.Slot)
 						mlog.Log.Infof("BLOCK SOURCE STATUS: missing streamed slot recovered via RPC at slot %d; staying on %s stream", blk.Slot, bs.liveShredStreamName())
@@ -3502,8 +3503,8 @@ func (bs *BlockSource) DownloadInitialBlocks() {
 }
 
 // InjectLocalBlock queues a fully frozen locally produced block through the
-// same ordered emitter used by network blocks. Replay and forkchoice remain the
-// only path that can accept its state.
+// same ordered emitter used by network blocks so replay can adopt the
+// already-mutated producer SlotCtx in slot order.
 func (bs *BlockSource) InjectLocalBlock(blk *b.Block) bool {
 	if bs == nil || blk == nil {
 		return false

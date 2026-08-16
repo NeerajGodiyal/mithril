@@ -128,6 +128,7 @@ func InitChainTip(acctsLtHash *lthash.LtHash, f *features.Features, prevNumSigs 
 // ResetChainTip invalidates producer parent state while replay is rewinding or
 // restarting. The next successfully replayed block installs a fresh snapshot.
 func ResetChainTip() {
+	ResetLocalLeaderCommits()
 	InitChainTip(nil, nil, 0, solana.Hash{})
 }
 
