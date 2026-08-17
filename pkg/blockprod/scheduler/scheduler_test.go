@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/blockprod"
+	"github.com/Overclock-Validator/mithril/pkg/costmodel"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/packet"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
@@ -212,6 +213,30 @@ func TestSchedulerDrainsHighestRewardFirst(t *testing.T) {
 	highTx, err := solana.TransactionFromBytes(high)
 	require.NoError(t, err)
 	require.Equal(t, highTx.Signatures[0], forged[0].Signatures[0])
+}
+
+func TestSchedulerSkipsWhenSlotEntryBytesExceeded(t *testing.T) {
+	envLimits := costmodel.DefaultLimits()
+	envLimits.MaxEntryBytes = 80
+	env := blockprod.NewTestEnv(blockprod.TestEnvConfig{Limits: envLimits})
+	defer env.Close()
+
+	sched := New(env.Controller)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sched.Start(ctx)
+	defer sched.Stop()
+
+	sched.Receive(packet.Owned(txfixture.MustSignedTransferWire(0)))
+	deadline := time.Now().Add(2 * time.Second)
+	for sched.Stats().DroppedCost == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.Equal(t, uint64(1), sched.Stats().DroppedCost)
+	require.Equal(t, uint64(1), sched.Stats().DroppedBatchBytes)
+	require.Equal(t, uint64(0), sched.Stats().Accepted)
+	require.Equal(t, 1, sched.Buffered())
+	require.Empty(t, env.Bank.ForgedTransactions())
 }
 
 func TestMaxBufferedTxnsConstant(t *testing.T) {

@@ -61,6 +61,12 @@ func NewWorkingBank(cfg BankConfig) *WorkingBank {
 	if limits.BlockCost == 0 {
 		limits = costmodel.DefaultLimits()
 	}
+	if limits.MaxBatchBytes == 0 {
+		limits.MaxBatchBytes = costmodel.DefaultTargetBatchBytes
+	}
+	if limits.MaxEntryBytes == 0 {
+		limits.MaxEntryBytes = costmodel.DefaultPackEntryBytes()
+	}
 	sink := cfg.Sink
 	if sink == nil {
 		sink = NopBatchSink{}
@@ -161,6 +167,7 @@ func (r ForgeResult) String() string {
 func (b *WorkingBank) Forge(wire []byte) (ForgeResult, costmodel.ExceedReason) {
 	tx, err := solana.TransactionFromBytes(wire)
 	if err != nil {
+		b.RebateSchedule(len(wire))
 		return ForgeDroppedParse, costmodel.ExceedNone
 	}
 	return b.ForgeTransaction(tx, len(wire))
@@ -169,10 +176,12 @@ func (b *WorkingBank) Forge(wire []byte) (ForgeResult, costmodel.ExceedReason) {
 // ForgeTransaction executes and commits a parsed transaction.
 func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (ForgeResult, costmodel.ExceedReason) {
 	if tx == nil {
+		b.RebateSchedule(wireSize)
 		return ForgeDroppedParse, costmodel.ExceedNone
 	}
 	messageHash, err := replay.TransactionMessageHash(tx)
 	if err != nil {
+		b.RebateSchedule(wireSize)
 		return ForgeDroppedParse, costmodel.ExceedNone
 	}
 	ancestorAlreadyProcessed := false
@@ -194,6 +203,7 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 		}
 		cost, err = costmodel.EstimateTransactionCost(tx, feats)
 		if err != nil {
+			b.RebateSchedule(wireSize)
 			return ForgeDroppedParse, costmodel.ExceedNone
 		}
 		cost.WireSize = wireSize
@@ -201,6 +211,12 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	included := false
+	defer func() {
+		if !included {
+			b.entries.rebateReserved(wireSize)
+		}
+	}()
 	if !b.accepting {
 		return ForgeDroppedNoLeader, costmodel.ExceedNone
 	}
@@ -217,6 +233,9 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 	}
 
 	if reason := b.costs.WouldExceed(cost); reason != costmodel.ExceedNone {
+		return ForgeDroppedCost, reason
+	}
+	if reason := b.reserveEntryBytesLocked(wireSize); reason != costmodel.ExceedNone {
 		return ForgeDroppedCost, reason
 	}
 
@@ -248,6 +267,7 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 		b.entryHash = b.entries.CurrentEntryHash()
 		b.sink.OnEntryBatch(flushed, batchBytes)
 	}
+	included = true
 	return ForgeAccepted, costmodel.ExceedNone
 }
 
@@ -298,6 +318,47 @@ func (b *WorkingBank) ClassifyBuffered(blockhash solana.Hash, messageHash [32]by
 	return BufferedKeep
 }
 
+// PrepareSchedule reserves entry bytes at schedule time. If the next
+// transaction would not fit in the current FEC set, the batch is
+// closed and shredded first. If the tx would then exceed the remaining
+// slot entry-byte budget, it is not reserved. A failed/unincludable
+// forge rebates the reservation.
+func (b *WorkingBank) PrepareSchedule(wireSize int) costmodel.ExceedReason {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.accepting {
+		return costmodel.ExceedNone
+	}
+	return b.reserveEntryBytesLocked(wireSize)
+}
+
+// RebateSchedule releases a schedule-time entry-byte reservation.
+func (b *WorkingBank) RebateSchedule(wireSize int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.entries.rebateReserved(wireSize)
+}
+
+func (b *WorkingBank) reserveEntryBytesLocked(wireSize int) costmodel.ExceedReason {
+	if b.entries.ReservedBytes() > 0 {
+		return costmodel.ExceedNone
+	}
+	if b.entries.wouldOverflowBatch(wireSize) {
+		b.flushEntriesLocked()
+	}
+	if !b.entries.reserve(wireSize) {
+		return costmodel.ExceedBatchBytes
+	}
+	return costmodel.ExceedNone
+}
+
+// EntryBytes is flushed plus pending plus reserved serialized entry bytes.
+func (b *WorkingBank) EntryBytes() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.entries.SlotBytes()
+}
+
 // FlushEntries emits any pending transactions as an entry batch.
 func (b *WorkingBank) FlushEntries() {
 	b.mu.Lock()
@@ -305,13 +366,15 @@ func (b *WorkingBank) FlushEntries() {
 	b.flushEntriesLocked()
 }
 
-// Freeze stops transaction admission and emits the final pending entry batch.
-// It waits for any forge already holding the bank lock, so every accepted
-// transaction is included before the footer bank hash is computed.
+// Freeze stops transaction admission and emits the leftover entry batch even
+// if it does not fill a FEC set. It waits for any forge already holding the
+// bank lock, so every accepted transaction is included before the footer
+// bank hash is computed. Last-in-slot is marked on the ending tick, not here.
 func (b *WorkingBank) Freeze() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.accepting = false
+	b.entries.dropReservation()
 	b.flushEntriesLocked()
 }
 
@@ -320,6 +383,7 @@ func (b *WorkingBank) Freeze() {
 func (b *WorkingBank) Close() {
 	b.mu.Lock()
 	b.accepting = false
+	b.entries.dropReservation()
 	b.mu.Unlock()
 }
 

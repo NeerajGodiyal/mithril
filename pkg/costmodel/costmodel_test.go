@@ -144,6 +144,17 @@ func TestCostTrackerRebateAllowsManySamePayerDefaultLoadedTxs(t *testing.T) {
 	assert.Less(t, tracker.WritableAccountCost(payer), uint64(MaxWritableAccountUnits))
 }
 
+func TestPackEntryBytesMaxProtocolBindsAtDefaultShreds(t *testing.T) {
+	shredSafe := PackEntryBytesMax(DefaultMaxDataShredsPerSlot, EntryHeaderBytes+PacketDataSize)
+	require.Greater(t, shredSafe, uint64(DefaultMaxEntryBytesPerSlot))
+	require.Equal(t, uint64(DefaultMaxEntryBytesPerSlot-EntryHeaderBytes), DefaultPackEntryBytes())
+}
+
+func TestPackEntryBytesMaxRejectsMicroblockLargerThanWatermark(t *testing.T) {
+	wmark := uint64(FECSetsPerBatch)*uint64(TypicalFECSetPayloadBytes) - 8
+	assert.Zero(t, PackEntryBytesMax(DefaultMaxDataShredsPerSlot, wmark))
+}
+
 func TestCostTrackerAcceptsUnderLimits(t *testing.T) {
 	tracker := NewCostTracker(DefaultLimits())
 	tx := mustParseTransferTx(t, 1)

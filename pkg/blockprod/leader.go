@@ -79,41 +79,6 @@ type leaderSlotFailure struct {
 	detail string
 }
 
-// ShredSink shreds forged entry batches and broadcasts them via turbine.
-type ShredSink struct {
-	session *turbine.BroadcastSession
-	mu      sync.Mutex
-	err     error
-}
-
-func NewShredSink(session *turbine.BroadcastSession) *ShredSink {
-	return &ShredSink{session: session}
-}
-
-func (s *ShredSink) OnEntryBatch(entries []turbine.Entry, _ int) {
-	if s.session == nil || len(entries) == 0 {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.err != nil {
-		return
-	}
-	if err := s.session.BroadcastEntryBatch(entries); err != nil {
-		s.err = err
-		mlog.Log.Warnf("blockprod shred broadcast entry batch failed: %v", err)
-	}
-}
-
-func (s *ShredSink) Err() error {
-	if s == nil {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.err
-}
-
 // LeaderLoop activates forge when this validator is the scheduled leader.
 // RewardCertBuilder produces skip/notar reward certificates for block footers.
 type RewardCertBuilder interface {
@@ -752,6 +717,9 @@ func (l *LeaderLoop) abortActiveSlotLocked() {
 	if l.activeBank != nil {
 		l.activeBank.Close()
 	}
+	if l.activeSink != nil {
+		l.activeSink.Discard()
+	}
 	l.activeBank = nil
 	l.activeSess = nil
 	l.activeSink = nil
@@ -983,6 +951,7 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 		l.abortActiveSlotLocked()
 		return
 	}
+	l.activeSink.Wait()
 	if err := l.activeSink.Err(); err != nil {
 		l.failProductionWindowLocked(slot, leaderReasonEntryBroadcastFailed, err.Error())
 		l.abortActiveSlotLocked()
@@ -1060,6 +1029,8 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 		l.abortActiveSlotLocked()
 		return
 	}
+	// Ending tick is the last-in-slot shred. Mid-slot entry batches are only
+	// emitted when they fill a FEC set; Freeze already flushed any leftover.
 	if err := l.activeSess.BroadcastEndingTickLast(tickHash); err != nil {
 		l.failProductionWindowLocked(slot, leaderReasonEndingTickBroadcastFailed, err.Error())
 		l.abortActiveSlotLocked()

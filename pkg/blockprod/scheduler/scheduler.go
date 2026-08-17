@@ -249,6 +249,15 @@ func (s *Scheduler) drainLoop(ctx context.Context) {
 			continue
 		}
 
+		// Close a full FEC set, or refuse, before execute. Slot entry bytes are
+		// a schedule-time budget (shred-safe / SIMD-0525), like Firedancer pack.
+		if reason := bank.PrepareSchedule(e.wireSize); reason != costmodel.ExceedNone {
+			e.skipGen = s.bankGen
+			s.rebuffer(e)
+			s.recordForge(blockprod.ForgeDroppedCost, reason)
+			continue
+		}
+
 		// Prefer the owned wire so forge reparses from stable bytes even if the
 		// retained tx view was somehow mutated after buffering.
 		var result blockprod.ForgeResult

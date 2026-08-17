@@ -441,6 +441,64 @@ func TestWorkingBankDropsWhenBlockCostExceeded(t *testing.T) {
 	assert.Equal(t, costmodel.ExceedBlockCost, reason)
 }
 
+func TestPrepareScheduleClosesFullFECBatch(t *testing.T) {
+	sink := &captureSink{}
+	limits := costmodel.DefaultLimits()
+	limits.MaxBatchBytes = 300
+	env := NewTestEnv(TestEnvConfig{Limits: limits, Sink: sink})
+	defer env.Close()
+
+	wire := txfixture.MustSignedTransferWire(0)
+	result, reason := env.Bank.Forge(wire)
+	require.Equal(t, ForgeAccepted, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+	require.Empty(t, sink.batches)
+	require.Equal(t, 1, env.Bank.EntryBuilder().PendingCount())
+
+	require.Equal(t, costmodel.ExceedNone, env.Bank.PrepareSchedule(200))
+	require.Len(t, sink.batches, 1)
+	require.Zero(t, env.Bank.EntryBuilder().PendingCount())
+}
+
+func TestPrepareScheduleReservesAndRebatesWhenNotIncluded(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{})
+	defer env.Close()
+
+	wire := txfixture.MustSignedTransferWire(0)
+	result, reason := env.Bank.Forge(wire)
+	require.Equal(t, ForgeAccepted, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+	included := env.Bank.EntryBytes()
+	require.Greater(t, included, 0)
+	require.Zero(t, env.Bank.EntryBuilder().ReservedBytes())
+
+	require.Equal(t, costmodel.ExceedNone, env.Bank.PrepareSchedule(len(wire)))
+	require.Greater(t, env.Bank.EntryBytes(), included)
+	require.Greater(t, env.Bank.EntryBuilder().ReservedBytes(), 0)
+
+	result, reason = env.Bank.Forge(wire)
+	require.Equal(t, ForgeDroppedAlreadyProcessed, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+	require.Equal(t, included, env.Bank.EntryBytes())
+	require.Zero(t, env.Bank.EntryBuilder().ReservedBytes())
+	require.Len(t, env.Bank.ForgedTransactions(), 1)
+}
+
+func TestPrepareScheduleRejectsSlotEntryBudget(t *testing.T) {
+	limits := costmodel.DefaultLimits()
+	limits.MaxEntryBytes = 80
+	env := NewTestEnv(TestEnvConfig{Limits: limits})
+	defer env.Close()
+
+	wire := txfixture.MustSignedTransferWire(0)
+	require.Equal(t, costmodel.ExceedBatchBytes, env.Bank.PrepareSchedule(len(wire)))
+	require.Zero(t, env.Bank.EntryBytes())
+	result, reason := env.Bank.Forge(wire)
+	assert.Equal(t, ForgeDroppedCost, result)
+	assert.Equal(t, costmodel.ExceedBatchBytes, reason)
+	assert.Empty(t, env.Bank.ForgedTransactions())
+}
+
 func TestWorkingBankFlushesOnBatchLimit(t *testing.T) {
 	sink := &captureSink{}
 	limits := costmodel.DefaultLimits()
