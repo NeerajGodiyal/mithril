@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
@@ -62,6 +63,35 @@ func TestCostTrackerWritableAccountLimit(t *testing.T) {
 	}
 
 	assert.Equal(t, ExceedWritableAccountCost, tracker.WouldExceed(cost))
+}
+
+func TestLoadedAccountsDataSizeCostProtocolPages(t *testing.T) {
+	assert.Equal(t, uint64(0), loadedAccountsDataSizeCost(0))
+	assert.Equal(t, uint64(HeapCost), loadedAccountsDataSizeCost(1))
+	assert.Equal(t, uint64(HeapCost), loadedAccountsDataSizeCost(AccountDataCostPageSize))
+	assert.Equal(t, uint64(2*HeapCost), loadedAccountsDataSizeCost(AccountDataCostPageSize+1))
+
+	defaultLimitPages := uint64(sealevel.MaxLoadedAccountsDataSizeBytes) / AccountDataCostPageSize
+	assert.Equal(t, defaultLimitPages*HeapCost, loadedAccountsDataSizeCost(sealevel.MaxLoadedAccountsDataSizeBytes))
+	assert.Equal(t, uint64(16_384), loadedAccountsDataSizeCost(sealevel.MaxLoadedAccountsDataSizeBytes))
+}
+
+func TestWritableAccountLimitAllowsManyDefaultLoadedSizeTxs(t *testing.T) {
+	tracker := NewCostTracker(DefaultLimits())
+	payer := txfixture.PayerPubkey()
+	cost := TransactionCost{
+		SignatureCost:              SignatureCost,
+		WriteLockCost:              WriteLockUnits,
+		ProgramsExecutionCost:      450,
+		LoadedAccountsDataSizeCost: loadedAccountsDataSizeCost(sealevel.MaxLoadedAccountsDataSizeBytes),
+		WritableAccounts:           []solana.PublicKey{payer},
+	}
+
+	for i := 0; i < 6; i++ {
+		require.Equal(t, ExceedNone, tracker.WouldExceed(cost), "tx %d should fit under the 24M writable-account cap", i+1)
+		tracker.Record(cost)
+	}
+	assert.LessOrEqual(t, tracker.WritableAccountCost(payer), uint64(MaxWritableAccountUnits))
 }
 
 func TestCostTrackerAcceptsUnderLimits(t *testing.T) {

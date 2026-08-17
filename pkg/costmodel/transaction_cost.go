@@ -26,7 +26,7 @@ func (c TransactionCost) Sum() uint64 {
 		c.LoadedAccountsDataSizeCost
 }
 
-// EstimateTransactionCost approximates agave CostModel::calculate_cost for a parsed tx.
+// EstimateTransactionCost applies the protocol cost model to a parsed transaction.
 func EstimateTransactionCost(tx *solana.Transaction, feats *features.Features) (TransactionCost, error) {
 	if tx == nil {
 		return TransactionCost{}, nil
@@ -39,7 +39,7 @@ func EstimateTransactionCost(tx *solana.Transaction, feats *features.Features) (
 
 	limits, err := sealevel.ComputeBudgetExecuteInstructions(instrs, feats)
 	if err != nil {
-		// Agave treats compute-budget parse failure as zero execution cost (tx won't execute).
+		// A compute-budget parse failure yields zero execution cost; the transaction will not execute.
 		return TransactionCost{
 			SignatureCost: signatureCost(tx),
 			WriteLockCost: writeLockCost(countWriteLocks(tx)),
@@ -80,9 +80,8 @@ func instructionDataCost(tx *solana.Transaction) uint64 {
 }
 
 func loadedAccountsDataSizeCost(bytes uint32) uint64 {
-	const pageSize = 32 * 1024
-	pages := (uint64(bytes) + pageSize - 1) / pageSize
-	return pages * sealevel.DefaultInstructionComputeUnitLimit / 100 // coarse page cost
+	pages := (uint64(bytes) + AccountDataCostPageSize - 1) / AccountDataCostPageSize
+	return pages * HeapCost
 }
 
 func countWriteLocks(tx *solana.Transaction) uint64 {

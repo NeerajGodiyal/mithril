@@ -11,6 +11,10 @@ const (
 	WriteLockUnits           = ComputeUnitToUSRatio * 10 // 300
 	InstructionDataBytesCost = 140 / ComputeUnitToUSRatio  // ~4 CU per byte
 
+	// Loaded-accounts data size is charged in 32KiB pages at the protocol heap cost (8 CU/page).
+	AccountDataCostPageSize = 32 * 1024
+	HeapCost                = 8
+
 	MaxBlockUnitsSIMD0256 = 60_000_000
 	MaxBlockUnitsSIMD0286 = 100_000_000
 
