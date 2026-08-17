@@ -84,6 +84,11 @@ func loadedAccountsDataSizeCost(bytes uint32) uint64 {
 	return pages * HeapCost
 }
 
+// LoadedAccountsDataSizeCost is the protocol page charge for loaded account bytes.
+func LoadedAccountsDataSizeCost(bytes uint32) uint64 {
+	return loadedAccountsDataSizeCost(bytes)
+}
+
 func countWriteLocks(tx *solana.Transaction) uint64 {
 	return uint64(len(writableAccounts(tx)))
 }

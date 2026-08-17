@@ -287,7 +287,8 @@ func TestWorkingBankConcurrentDuplicateMessageCommitsOnce(t *testing.T) {
 	payerAfter, err := env.SlotCtx.GetAccount(txfixture.PayerPubkey())
 	require.NoError(t, err)
 	assert.Equal(t, payerLamportsBefore-5_001, payerAfter.Lamports)
-	assert.Equal(t, expectedCost.Sum(), env.Bank.CostTracker().BlockCost())
+	assert.Less(t, env.Bank.CostTracker().BlockCost(), expectedCost.Sum())
+	assert.Greater(t, env.Bank.CostTracker().BlockCost(), expectedCost.SignatureCost)
 	feeInfo := env.Bank.TxFeeAccumulator()
 	assert.Equal(t, uint64(5_000), feeInfo.ExecutionFees)
 	assert.Zero(t, feeInfo.PriorityFees)
@@ -405,6 +406,27 @@ func TestWorkingBankRejectsStalePacketAfterFreeze(t *testing.T) {
 	assert.Equal(t, ForgeDroppedNoLeader, result)
 	assert.Equal(t, costmodel.ExceedNone, reason)
 	assert.Empty(t, env.Bank.ForgedTransactions())
+}
+
+func TestWorkingBankRebatesUnusedLoadedAccountsCost(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{})
+	defer env.Close()
+
+	wire := txfixture.MustSignedTransferWire(0)
+	tx, err := solana.TransactionFromBytes(wire)
+	require.NoError(t, err)
+	estimated, err := costmodel.EstimateTransactionCost(tx, env.SlotCtx.Features)
+	require.NoError(t, err)
+	require.Equal(t, uint64(16_384), estimated.LoadedAccountsDataSizeCost)
+
+	result, reason := env.Bank.Forge(wire)
+	require.Equal(t, ForgeAccepted, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+
+	got := env.Bank.CostTracker().BlockCost()
+	assert.Less(t, got, estimated.Sum())
+	assert.Less(t, got, estimated.LoadedAccountsDataSizeCost)
+	assert.Greater(t, got, estimated.SignatureCost)
 }
 
 func TestWorkingBankDropsWhenBlockCostExceeded(t *testing.T) {

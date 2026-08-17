@@ -94,6 +94,56 @@ func TestWritableAccountLimitAllowsManyDefaultLoadedSizeTxs(t *testing.T) {
 	assert.LessOrEqual(t, tracker.WritableAccountCost(payer), uint64(MaxWritableAccountUnits))
 }
 
+func TestCostTrackerRebateDropsUnusedLoadedAndExec(t *testing.T) {
+	tracker := NewCostTracker(DefaultLimits())
+	payer := txfixture.PayerPubkey()
+	estimated := TransactionCost{
+		SignatureCost:              SignatureCost,
+		WriteLockCost:              WriteLockUnits,
+		DataBytesCost:              7,
+		ProgramsExecutionCost:      450,
+		LoadedAccountsDataSizeCost: loadedAccountsDataSizeCost(sealevel.MaxLoadedAccountsDataSizeBytes),
+		WritableAccounts:           []solana.PublicKey{payer},
+	}
+	actualExec := uint64(150)
+	actualLoaded := loadedAccountsDataSizeCost(200)
+
+	require.Equal(t, ExceedNone, tracker.WouldExceed(estimated))
+	tracker.Record(estimated)
+	assert.Equal(t, estimated.Sum(), tracker.BlockCost())
+	tracker.Rebate(estimated, actualExec, actualLoaded)
+
+	want := estimated.SignatureCost + estimated.WriteLockCost + estimated.DataBytesCost + actualExec + actualLoaded
+	assert.Equal(t, want, tracker.BlockCost())
+	assert.Equal(t, want, tracker.WritableAccountCost(payer))
+	assert.Less(t, tracker.BlockCost(), estimated.Sum())
+}
+
+func TestCostTrackerRebateAllowsManySamePayerDefaultLoadedTxs(t *testing.T) {
+	tracker := NewCostTracker(DefaultLimits())
+	payer := txfixture.PayerPubkey()
+	estimated := TransactionCost{
+		SignatureCost:              SignatureCost,
+		WriteLockCost:              WriteLockUnits,
+		DataBytesCost:              7,
+		ProgramsExecutionCost:      450,
+		LoadedAccountsDataSizeCost: loadedAccountsDataSizeCost(sealevel.MaxLoadedAccountsDataSizeBytes),
+		WritableAccounts:           []solana.PublicKey{payer},
+	}
+	actualExec := uint64(150)
+	actualLoaded := loadedAccountsDataSizeCost(200)
+	actualSum := estimated.SignatureCost + estimated.WriteLockCost + estimated.DataBytesCost + actualExec + actualLoaded
+
+	const n = 2000
+	for i := 0; i < n; i++ {
+		require.Equal(t, ExceedNone, tracker.WouldExceed(estimated), "tx %d should fit after rebates", i+1)
+		tracker.Record(estimated)
+		tracker.Rebate(estimated, actualExec, actualLoaded)
+	}
+	assert.Equal(t, actualSum*n, tracker.BlockCost())
+	assert.Less(t, tracker.WritableAccountCost(payer), uint64(MaxWritableAccountUnits))
+}
+
 func TestCostTrackerAcceptsUnderLimits(t *testing.T) {
 	tracker := NewCostTracker(DefaultLimits())
 	tx := mustParseTransferTx(t, 1)

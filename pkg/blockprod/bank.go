@@ -242,11 +242,32 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 	b.numSigs += uint64(tx.Message.Header.NumRequiredSignatures)
 
 	b.costs.Record(cost)
+	execCU, loadedCost := actualExecutionUsage(output)
+	b.costs.Rebate(cost, execCU, loadedCost)
 	if flushed, batchBytes, didFlush := b.entries.Append(*tx, wireSize); didFlush {
 		b.entryHash = b.entries.CurrentEntryHash()
 		b.sink.OnEntryBatch(flushed, batchBytes)
 	}
 	return ForgeAccepted, costmodel.ExceedNone
+}
+
+func actualExecutionUsage(output replay.LoadAndExecuteTransactionOutput) (execCU, loadedCost uint64) {
+	execCtx := output.ExecCtx
+	if execCtx == nil {
+		return 0, 0
+	}
+	execCU = execCtx.ComputeMeter.Used()
+	if execCtx.TransactionContext == nil {
+		return execCU, 0
+	}
+	var loadedBytes uint32
+	for _, acct := range execCtx.TransactionContext.Accounts.Accounts {
+		if acct == nil || acct.IsDummy {
+			continue
+		}
+		loadedBytes += uint32(len(acct.Data))
+	}
+	return execCU, costmodel.LoadedAccountsDataSizeCost(loadedBytes)
 }
 
 // BufferedDropReason classifies why a buffered transaction should be discarded.
