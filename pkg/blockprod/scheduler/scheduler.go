@@ -62,6 +62,11 @@ type Scheduler struct {
 	stopOnce  sync.Once
 	cancel    context.CancelFunc
 	done      chan struct{}
+
+	// insertsSinceCleanup counts accepted Receive inserts. Cleanup walks the
+	// whole heap, so the drain loop does it once per capacity/5 inserts
+	// instead of before every pop.
+	insertsSinceCleanup atomic.Uint64
 }
 
 func New(banks BankSource) *Scheduler {
@@ -155,6 +160,9 @@ func (s *Scheduler) Receive(pkt packet.Packet) {
 		s.stats.DroppedCapacity++
 	}
 	s.mu.Unlock()
+	if result == InsertAccepted {
+		s.insertsSinceCleanup.Add(1)
+	}
 }
 
 // Cleanup drops expired / already-processed buffered txs using bank state.
@@ -184,6 +192,27 @@ func (s *Scheduler) Cleanup(bank *blockprod.WorkingBank) int {
 	return dropped
 }
 
+func cleanupInsertInterval(capacity int) uint64 {
+	n := uint64(capacity / 5)
+	if n == 0 {
+		n = 1
+	}
+	return n
+}
+
+// maybeCleanup walks the heap when enough new inserts have arrived.
+func (s *Scheduler) maybeCleanup(bank *blockprod.WorkingBank) int {
+	if bank == nil {
+		return 0
+	}
+	if s.insertsSinceCleanup.Load() < cleanupInsertInterval(s.buffer.Capacity()) {
+		return 0
+	}
+	dropped := s.Cleanup(bank)
+	s.insertsSinceCleanup.Store(0)
+	return dropped
+}
+
 func (s *Scheduler) drainLoop(ctx context.Context) {
 	defer close(s.done)
 	for {
@@ -199,7 +228,7 @@ func (s *Scheduler) drainLoop(ctx context.Context) {
 			continue
 		}
 
-		s.Cleanup(bank)
+		s.maybeCleanup(bank)
 
 		e, skipped := s.popSchedulable(s.bankGen)
 		for _, sk := range skipped {

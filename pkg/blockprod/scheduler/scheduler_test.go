@@ -107,6 +107,43 @@ func TestSchedulerCleanupDropsExpired(t *testing.T) {
 	assert.Equal(t, uint64(1), sched.Stats().DroppedExpired)
 }
 
+func TestSchedulerMaybeCleanupAfterInsertInterval(t *testing.T) {
+	env := blockprod.NewTestEnv(blockprod.TestEnvConfig{})
+	defer env.Close()
+
+	sched := New(env.Controller)
+	wire := txfixture.MustSignedTransferWire(4)
+	tx, err := solana.TransactionFromBytes(wire)
+	require.NoError(t, err)
+	reward, mh, err := scoreTransaction(tx, sched.feats)
+	require.NoError(t, err)
+
+	res, _ := sched.buffer.Insert(&entry{
+		tx:          tx,
+		wireSize:    len(wire),
+		messageHash: mh,
+		blockhash:   solana.Hash{0xee},
+		reward:      reward,
+		seq:         1,
+	})
+	require.Equal(t, InsertAccepted, res)
+	require.Equal(t, 1, sched.Buffered())
+
+	interval := cleanupInsertInterval(sched.buffer.Capacity())
+	require.Equal(t, uint64(MaxBufferedTxns/5), interval)
+
+	sched.insertsSinceCleanup.Store(interval - 1)
+	require.Equal(t, 0, sched.maybeCleanup(env.Bank))
+	require.Equal(t, 1, sched.Buffered())
+	require.Equal(t, interval-1, sched.insertsSinceCleanup.Load())
+
+	sched.insertsSinceCleanup.Store(interval)
+	require.Equal(t, 1, sched.maybeCleanup(env.Bank))
+	require.Equal(t, 0, sched.Buffered())
+	require.Equal(t, uint64(0), sched.insertsSinceCleanup.Load())
+	assert.Equal(t, uint64(1), sched.Stats().DroppedExpired)
+}
+
 func TestSchedulerDropsUnparseable(t *testing.T) {
 	sched := New(blockprod.NewController())
 	sched.Receive(packet.Owned([]byte{0x00, 0x01}))

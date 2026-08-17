@@ -115,6 +115,13 @@ func (b *Buffer) Len() int {
 	return b.alive
 }
 
+func (b *Buffer) Capacity() int {
+	if b == nil || b.capacity <= 0 {
+		return MaxBufferedTxns
+	}
+	return b.capacity
+}
+
 // InsertResult reports how an Insert attempt resolved.
 type InsertResult int
 
