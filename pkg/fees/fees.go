@@ -110,7 +110,7 @@ func CalculateTxFees(tx *solana.Transaction, instrs []sealevel.Instruction, comp
 }
 
 // TODO: implement new fee model
-func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits, f *features.Features, isSimulation bool) (*TxFeeInfo, uint64, error) {
+func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMeta, instrs []sealevel.Instruction, transactionAccts *sealevel.TransactionAccounts, computeBudgetLimits *sealevel.ComputeBudgetLimits, f *features.Features, rent sealevel.SysvarRent, isSimulation bool) (*TxFeeInfo, uint64, error) {
 	feePayerAcct, err := transactionAccts.GetAccount(feePayerIdx)
 	if err != nil {
 		if isSimulation {
@@ -152,8 +152,8 @@ func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMet
 	totalTxFee := safemath.SaturatingAddU64(baseTxFee, priorityFee)
 	feeInfo := &TxFeeInfo{ExecutionFee: baseTxFee, PriorityFee: priorityFee, TotalFee: totalTxFee}
 
-	if feePayerAcct.Lamports < totalTxFee {
-		return feeInfo, 0, sealevel.InstrErrInsufficientFunds
+	if err := ValidateFeePayer(feePayerAcct, totalTxFee, rent); err != nil {
+		return feeInfo, 0, err
 	}
 	////mlog.Log.Debugf("feePayerAcct.Lamports=%d totalTxFee=%d", feePayerAcct.Lamports, totalTxFee)
 

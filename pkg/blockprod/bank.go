@@ -238,6 +238,9 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 	if reason := b.reserveEntryBytesLocked(wireSize); reason != costmodel.ExceedNone {
 		return ForgeDroppedCost, reason
 	}
+	if err := fees.PayerCanFund(b.slotCtx, tx); err != nil {
+		return ForgeDroppedExecution, costmodel.ExceedNone
+	}
 
 	output := replay.LoadAndExecuteTransaction(replay.LoadAndExecuteTransactionInput{
 		SlotCtx:     b.slotCtx,
