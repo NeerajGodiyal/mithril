@@ -83,8 +83,8 @@ type BlockFetchOpts struct {
 	// ShredSpoolDir: on-disk verified-shred spool shared by prewarm and the
 	// block source (empty = disabled).
 	ShredSpoolDir string
-	// LocalBlocks carries fully frozen blocks produced by this validator. They
-	// enter the normal ordered block source and are re-executed by ProcessBlock.
+	// LocalBlocks carries fully frozen blocks produced by this validator. Replay
+	// adopts the already-mutated leader SlotCtx and does not re-execute.
 	LocalBlocks          <-chan *b.Block
 	LocalLeaderForSlot   func(slot uint64) bool
 	GossipClient         *gossip.Client
@@ -116,6 +116,17 @@ func GenerateRunID() string {
 		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
 	}
 	return hex.EncodeToString(b)
+}
+
+func identityFromTurbineKey(priv ed25519.PrivateKey) solana.PublicKey {
+	if len(priv) != ed25519.PrivateKeySize {
+		return solana.PublicKey{}
+	}
+	pub, ok := priv.Public().(ed25519.PublicKey)
+	if !ok {
+		return solana.PublicKey{}
+	}
+	return solana.PublicKeyFromBytes(pub)
 }
 
 // IsCommitInProgress returns true if we're in the critical commit window.
@@ -1668,6 +1679,7 @@ func ReplayBlocks(
 	}
 	// Fresh vote/stake dirty watermark for this run (gates the in-loop unwind).
 	resetVoteStakeDirty()
+	nextLeader := newNextLeaderCursor(identityFromTurbineKey(turbineIdentity))
 	// Create bankhash log file
 	bankhashLogPath := fmt.Sprintf("%s/bankhash.log", acctsDbPath)
 	bankhashLogFile, bankhashLogErr := os.OpenFile(bankhashLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -2713,7 +2725,7 @@ func ReplayBlocks(
 			// arrivals (leader sent something but the slot never became full).
 			// Full detail (wait) stays in logs.
 			partialShreds, repairedShreds, _, _ := blockStream.TurbineShredObservation(block.Slot)
-			mlog.Log.InfofPrecise("%s", buildSkippedStatsLine(block.Slot, leaderStr, partialShreds, repairedShreds))
+			mlog.Log.InfofPrecise("%s", appendNextLeaderHint(buildSkippedStatsLine(block.Slot, leaderStr, partialShreds, repairedShreds), nextLeader.hint(block.Slot)))
 			if partialShreds > 0 {
 				windowSkippedWithShreds++
 			}
@@ -2916,7 +2928,11 @@ func ReplayBlocks(
 		if lastSlotCtx != nil {
 			parentBankSysvars = lastSlotCtx.BankSysvars()
 		}
-		lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, persistedHashes, unrootedTailState, transactionStatuses, alpenglowClock, parentBankSysvars)
+		if block.FromLocalProduction {
+			lastSlotCtx, err = adoptLocalLeaderBlock(block, unrootedTailState, transactionStatuses, persistedHashes)
+		} else {
+			lastSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, persistedHashes, unrootedTailState, transactionStatuses, alpenglowClock, parentBankSysvars)
+		}
 		processBlockEnd := time.Now()
 		metrics.GlobalBlockReplay.ProcessBlock.AddTiming(processBlockEnd.Sub(processBlockStart))
 		if err != nil {
@@ -3171,7 +3187,7 @@ func ReplayBlocks(
 			readySecsLine = float64(block.ShredFullNanos-neededAt.UnixNano()) / 1e9
 			asmSecsLine = float64(block.ShredFullNanos-block.ShredFirstNanos) / 1e9
 		}
-		mlog.Log.InfofPrecise("%s", buildSlotStatsLine(block.Slot, leaderStr, txnCount, totalCU, execMsLine, hasShreds, readySecsLine, asmSecsLine, block.RepairedShreds))
+		mlog.Log.InfofPrecise("%s", appendNextLeaderHint(buildSlotStatsLine(block.Slot, leaderStr, txnCount, totalCU, execMsLine, hasShreds, readySecsLine, asmSecsLine, block.RepairedShreds), nextLeader.hint(block.Slot)))
 		// Full detail (wait, vote split) stays in file logs for debugging.
 		var voteTxCount int
 		for _, tx := range block.Transactions {

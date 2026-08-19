@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"errors"
 	"math"
 	"time"
 
@@ -226,15 +227,29 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 		}
 	}
 
-	// Calculate and deduct fees
+	// Calculate and deduct fees. RentForSlot supplies the exemption
+	// minimum so a rent-exempt payer is rejected before instructions run.
 	start = time.Now()
-	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, input.TxMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits, slotCtx.Features, input.IsSimulation)
+	txFeeInfo, _, err := fees.CalculateAndDeductTxFees(tx, input.TxMeta, instrs, &execCtx.TransactionContext.Accounts, computeBudgetLimits, slotCtx.Features, fees.RentForSlot(slotCtx), input.IsSimulation)
 	if err != nil {
+		errType := TransactionErrorInsufficientFundsForFee
+		var accountIndex *uint8
+		switch {
+		case errors.Is(err, fees.ErrFeePayerNotFound):
+			errType = TransactionErrorAccountNotFound
+		case errors.Is(err, fees.ErrInvalidAccountForFee):
+			errType = TransactionErrorInvalidAccountForFee
+		case errors.Is(err, fees.ErrInsufficientFundsForRent):
+			errType = TransactionErrorInsufficientFundsForRent
+			zero := uint8(0)
+			accountIndex = &zero
+		}
 		out := LoadAndExecuteTransactionOutput{
 			ProcessingResult: TransactionProcessingResult{
 				TransactionError: &TransactionError{
-					ErrorType:        TransactionErrorInsufficientFundsForFee,
+					ErrorType:        errType,
 					InstructionError: err,
+					AccountIndex:     accountIndex,
 				},
 			},
 			ExecCtx:             execCtx,

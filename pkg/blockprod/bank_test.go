@@ -7,9 +7,11 @@ import (
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/costmodel"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
+	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
 	"github.com/Overclock-Validator/mithril/pkg/turbine"
 	"github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/programs/system"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,6 +24,126 @@ type captureSink struct {
 func (s *captureSink) OnEntryBatch(entries []turbine.Entry, batchBytes int) {
 	s.batches = append(s.batches, append([]turbine.Entry(nil), entries...))
 	s.bytes = append(s.bytes, batchBytes)
+}
+
+func setPayerLamports(t *testing.T, env *TestEnv, lamports uint64) {
+	t.Helper()
+	acct, err := env.SlotCtx.GetAccount(txfixture.PayerPubkey())
+	require.NoError(t, err)
+	acct.Lamports = lamports
+	require.NoError(t, env.SlotCtx.SetAccount(txfixture.PayerPubkey(), acct))
+}
+
+func TestWorkingBankDropsPayerThatCannotRemainRentExempt(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{})
+	defer env.Close()
+
+	rent := sealevel.NewDefaultRentSysvar()
+	rentMin := rent.MinimumBalance(0)
+	require.Equal(t, uint64(890880), rentMin)
+	setPayerLamports(t, env, rentMin+5000-1)
+
+	destBefore, err := env.SlotCtx.GetAccount(txfixture.DestPubkey())
+	require.NoError(t, err)
+	result, reason := env.Bank.Forge(txfixture.MustSignedTransferWire(0))
+	require.Equal(t, ForgeDroppedExecution, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+
+	destAfter, err := env.SlotCtx.GetAccount(txfixture.DestPubkey())
+	require.NoError(t, err)
+	assert.Equal(t, destBefore.Lamports, destAfter.Lamports)
+	assert.Empty(t, env.Bank.ForgedTransactions())
+	assert.Zero(t, env.Bank.CostTracker().BlockCost())
+	assert.Zero(t, env.Bank.EntryBuilder().PendingCount())
+}
+
+func TestWorkingBankStopsWhenPayerWouldFallBelowRent(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{})
+	defer env.Close()
+
+	rent := sealevel.NewDefaultRentSysvar()
+	rentMin := rent.MinimumBalance(0)
+	// One 1-lamport transfer plus its 5000-lamport fee, leaving exactly rent-exempt.
+	setPayerLamports(t, env, rentMin+5000+1)
+
+	destBefore, err := env.SlotCtx.GetAccount(txfixture.DestPubkey())
+	require.NoError(t, err)
+	result, reason := env.Bank.Forge(txfixture.MustSignedTransferWire(0))
+	require.Equal(t, ForgeAccepted, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+
+	result, reason = env.Bank.Forge(txfixture.MustSignedTransferWire(1))
+	require.Equal(t, ForgeDroppedExecution, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+
+	destAfter, err := env.SlotCtx.GetAccount(txfixture.DestPubkey())
+	require.NoError(t, err)
+	assert.Equal(t, destBefore.Lamports+1, destAfter.Lamports)
+	assert.Len(t, env.Bank.ForgedTransactions(), 1)
+}
+
+func mustSignedTransfer(t *testing.T, lamports uint64) *solana.Transaction {
+	t.Helper()
+	tx, err := solana.NewTransaction(
+		[]solana.Instruction{
+			system.NewTransferInstruction(lamports, txfixture.PayerPubkey(), txfixture.DestPubkey()).Build(),
+		},
+		txfixture.TestBlockhash(),
+		solana.TransactionPayer(txfixture.PayerPubkey()),
+	)
+	require.NoError(t, err)
+	payerKey := txfixture.PayerPrivateKey()
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key.Equals(txfixture.PayerPubkey()) {
+			return &payerKey
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	return tx
+}
+
+func TestWorkingBankAcceptsTransferThatDrainsPayerToZero(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{})
+	defer env.Close()
+
+	const transfer = uint64(1_000_000)
+	setPayerLamports(t, env, 5000+transfer)
+
+	destBefore, err := env.SlotCtx.GetAccount(txfixture.DestPubkey())
+	require.NoError(t, err)
+	tx := mustSignedTransfer(t, transfer)
+	result, reason := env.Bank.ForgeTransaction(tx, 200)
+	require.Equal(t, ForgeAccepted, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+
+	payerAfter, err := env.SlotCtx.GetAccount(txfixture.PayerPubkey())
+	require.NoError(t, err)
+	destAfter, err := env.SlotCtx.GetAccount(txfixture.DestPubkey())
+	require.NoError(t, err)
+	assert.Zero(t, payerAfter.Lamports)
+	assert.Equal(t, destBefore.Lamports+transfer, destAfter.Lamports)
+}
+
+func TestWorkingBankDropsTransferThatLeavesPayerBelowRent(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{})
+	defer env.Close()
+
+	const leftover = uint64(100)
+	const transfer = uint64(1_000_000)
+	setPayerLamports(t, env, 5000+transfer+leftover)
+
+	destBefore, err := env.SlotCtx.GetAccount(txfixture.DestPubkey())
+	require.NoError(t, err)
+	tx := mustSignedTransfer(t, transfer)
+	result, reason := env.Bank.ForgeTransaction(tx, 200)
+	require.Equal(t, ForgeDroppedExecution, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+
+	destAfter, err := env.SlotCtx.GetAccount(txfixture.DestPubkey())
+	require.NoError(t, err)
+	assert.Equal(t, destBefore.Lamports, destAfter.Lamports)
+	assert.Empty(t, env.Bank.ForgedTransactions())
 }
 
 func TestWorkingBankForgesTransfer(t *testing.T) {
@@ -287,7 +409,8 @@ func TestWorkingBankConcurrentDuplicateMessageCommitsOnce(t *testing.T) {
 	payerAfter, err := env.SlotCtx.GetAccount(txfixture.PayerPubkey())
 	require.NoError(t, err)
 	assert.Equal(t, payerLamportsBefore-5_001, payerAfter.Lamports)
-	assert.Equal(t, expectedCost.Sum(), env.Bank.CostTracker().BlockCost())
+	assert.Less(t, env.Bank.CostTracker().BlockCost(), expectedCost.Sum())
+	assert.Greater(t, env.Bank.CostTracker().BlockCost(), expectedCost.SignatureCost)
 	feeInfo := env.Bank.TxFeeAccumulator()
 	assert.Equal(t, uint64(5_000), feeInfo.ExecutionFees)
 	assert.Zero(t, feeInfo.PriorityFees)
@@ -407,6 +530,27 @@ func TestWorkingBankRejectsStalePacketAfterFreeze(t *testing.T) {
 	assert.Empty(t, env.Bank.ForgedTransactions())
 }
 
+func TestWorkingBankRebatesUnusedLoadedAccountsCost(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{})
+	defer env.Close()
+
+	wire := txfixture.MustSignedTransferWire(0)
+	tx, err := solana.TransactionFromBytes(wire)
+	require.NoError(t, err)
+	estimated, err := costmodel.EstimateTransactionCost(tx, env.SlotCtx.Features)
+	require.NoError(t, err)
+	require.Equal(t, uint64(16_384), estimated.LoadedAccountsDataSizeCost)
+
+	result, reason := env.Bank.Forge(wire)
+	require.Equal(t, ForgeAccepted, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+
+	got := env.Bank.CostTracker().BlockCost()
+	assert.Less(t, got, estimated.Sum())
+	assert.Less(t, got, estimated.LoadedAccountsDataSizeCost)
+	assert.Greater(t, got, estimated.SignatureCost)
+}
+
 func TestWorkingBankDropsWhenBlockCostExceeded(t *testing.T) {
 	limits := costmodel.DefaultLimits()
 	limits.BlockCost = 1
@@ -417,6 +561,64 @@ func TestWorkingBankDropsWhenBlockCostExceeded(t *testing.T) {
 	result, reason := env.Bank.Forge(wire)
 	assert.Equal(t, ForgeDroppedCost, result)
 	assert.Equal(t, costmodel.ExceedBlockCost, reason)
+}
+
+func TestPrepareScheduleClosesFullFECBatch(t *testing.T) {
+	sink := &captureSink{}
+	limits := costmodel.DefaultLimits()
+	limits.MaxBatchBytes = 300
+	env := NewTestEnv(TestEnvConfig{Limits: limits, Sink: sink})
+	defer env.Close()
+
+	wire := txfixture.MustSignedTransferWire(0)
+	result, reason := env.Bank.Forge(wire)
+	require.Equal(t, ForgeAccepted, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+	require.Empty(t, sink.batches)
+	require.Equal(t, 1, env.Bank.EntryBuilder().PendingCount())
+
+	require.Equal(t, costmodel.ExceedNone, env.Bank.PrepareSchedule(200))
+	require.Len(t, sink.batches, 1)
+	require.Zero(t, env.Bank.EntryBuilder().PendingCount())
+}
+
+func TestPrepareScheduleReservesAndRebatesWhenNotIncluded(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{})
+	defer env.Close()
+
+	wire := txfixture.MustSignedTransferWire(0)
+	result, reason := env.Bank.Forge(wire)
+	require.Equal(t, ForgeAccepted, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+	included := env.Bank.EntryBytes()
+	require.Greater(t, included, 0)
+	require.Zero(t, env.Bank.EntryBuilder().ReservedBytes())
+
+	require.Equal(t, costmodel.ExceedNone, env.Bank.PrepareSchedule(len(wire)))
+	require.Greater(t, env.Bank.EntryBytes(), included)
+	require.Greater(t, env.Bank.EntryBuilder().ReservedBytes(), 0)
+
+	result, reason = env.Bank.Forge(wire)
+	require.Equal(t, ForgeDroppedAlreadyProcessed, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+	require.Equal(t, included, env.Bank.EntryBytes())
+	require.Zero(t, env.Bank.EntryBuilder().ReservedBytes())
+	require.Len(t, env.Bank.ForgedTransactions(), 1)
+}
+
+func TestPrepareScheduleRejectsSlotEntryBudget(t *testing.T) {
+	limits := costmodel.DefaultLimits()
+	limits.MaxEntryBytes = 80
+	env := NewTestEnv(TestEnvConfig{Limits: limits})
+	defer env.Close()
+
+	wire := txfixture.MustSignedTransferWire(0)
+	require.Equal(t, costmodel.ExceedBatchBytes, env.Bank.PrepareSchedule(len(wire)))
+	require.Zero(t, env.Bank.EntryBytes())
+	result, reason := env.Bank.Forge(wire)
+	assert.Equal(t, ForgeDroppedCost, result)
+	assert.Equal(t, costmodel.ExceedBatchBytes, reason)
+	assert.Empty(t, env.Bank.ForgedTransactions())
 }
 
 func TestWorkingBankFlushesOnBatchLimit(t *testing.T) {
