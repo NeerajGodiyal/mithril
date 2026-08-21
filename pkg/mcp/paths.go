@@ -15,6 +15,13 @@ type contextReader struct {
 	reader io.Reader
 }
 
+func requireConfiguredPath(value, errMsg string) (string, error) {
+	if value != "" {
+		return value, nil
+	}
+	return "", errors.New(errMsg)
+}
+
 func (r *contextReader) Read(p []byte) (int, error) {
 	if err := r.ctx.Err(); err != nil {
 		return 0, err

@@ -355,6 +355,10 @@ func isCleanShutdown(err error) bool {
 // registerTools registers the tools available in this build.
 func registerTools(server *mcpsdk.Server, cfg Config) {
 	registerInfoTool(server, cfg)
+	registerMetricsTools(server, cfg)
+	registerRPCTools(server, cfg)
+	registerPprofTools(server, cfg)
+	registerCrossCheckTool(server, cfg)
 }
 
 type infoInput struct{}
