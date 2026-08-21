@@ -173,6 +173,9 @@ func TestComputeReplayStatsP99KeepsSingleTailSample(t *testing.T) {
 	if stats.P99Ms != 1000 {
 		t.Fatalf("p99 = %v, want 1000", stats.P99Ms)
 	}
+	if status, _ := diagnoseReplayEvidence(stats, ReplayMeta{}, 400); status != checkDegraded {
+		t.Fatalf("replay status = %q, want %q", status, checkDegraded)
+	}
 }
 
 func TestComputeReplayStatsBlockTotal(t *testing.T) {
