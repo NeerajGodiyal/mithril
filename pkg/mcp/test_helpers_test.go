@@ -3,6 +3,7 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"io"
 	"strings"
 	"testing"
 
@@ -42,4 +43,19 @@ func toolResultText(result *mcpsdk.CallToolResult) string {
 		}
 	}
 	return text.String()
+}
+
+func startInMemorySession(t *testing.T, cfg Config) *mcpsdk.ClientSession {
+	t.Helper()
+	cfg.Profile = ProfileDiagnostic
+	return connectServerForTest(t, newServerWithTelemetry(cfg, newTelemetryWriter(io.Discard)), "test")
+}
+
+func callToolText(t *testing.T, session *mcpsdk.ClientSession, name string, args map[string]any) (string, bool) {
+	t.Helper()
+	result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("CallTool(%s): %v", name, err)
+	}
+	return toolResultText(result), result.IsError
 }
