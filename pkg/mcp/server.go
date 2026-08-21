@@ -357,13 +357,15 @@ func registerTools(server *mcpsdk.Server, cfg Config) {
 	registerInfoTool(server, cfg)
 	registerMetricsTools(server, cfg)
 	registerRPCTools(server, cfg)
-	registerPprofTools(server, cfg)
-	registerCrossCheckTool(server, cfg)
 	registerLogTools(server, cfg)
 	registerStateTools(server, cfg)
 	registerReplayTools(server, cfg)
+	registerPprofTools(server, cfg)
+	registerCrossCheckTool(server, cfg)
 	registerDivergenceTool(server, cfg)
 	registerRewardsTool(server, cfg)
+	registerDiagnoseTool(server, cfg)
+	registerHostTools(server, cfg)
 }
 
 type infoInput struct{}
