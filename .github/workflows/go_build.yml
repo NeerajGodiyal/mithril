@@ -1,19 +1,42 @@
 name: CI
+permissions:
+  contents: read
 on:
   pull_request:
   push:
     branches:
+      - alpenglow-dev
       - dev
 jobs:
   go-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
 
       - name: Setup Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v7
         with:
-          go-version: 1.26.4
+          go-version-file: go.mod
+
+      - name: Test MCP
+        run: go test -race ./pkg/mcp ./cmd/mithril/mcpcmd ./internal/safedisplay
+
+      - name: Vet MCP
+        run: go vet ./pkg/mcp ./cmd/mithril/mcpcmd ./internal/safedisplay
+
+      - name: Scan MCP dependencies
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./pkg/mcp ./cmd/mithril/mcpcmd ./internal/safedisplay
 
       - name: Build
         run: go build -v ./cmd/mithril
+
+  nix-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@21a544727d0c62386e78b4befe52d19ad12692e3 # v17
+
+      - name: Build Mithril
+        run: nix build .#mithril
