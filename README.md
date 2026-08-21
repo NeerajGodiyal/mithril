@@ -123,7 +123,10 @@ go version
 make build
 ```
 
-This builds the `mithril` binary with version, commit, and branch information embedded. Alternatively, you can use `make release` for a smaller binary with debug symbols stripped.
+This builds the `mithril` binary with version, commit, and branch information
+embedded. Alternatively, use `make release` for a smaller binary with debug
+symbols stripped. See the [Mithril MCP quick start](docs/mcp.md) to connect an
+MCP client such as Codex, Claude Code, Cursor, or VS Code.
 
 ### Configuration
 
