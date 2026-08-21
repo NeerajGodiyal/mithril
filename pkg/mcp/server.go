@@ -359,6 +359,7 @@ func registerTools(server *mcpsdk.Server, cfg Config) {
 	registerRPCTools(server, cfg)
 	registerPprofTools(server, cfg)
 	registerCrossCheckTool(server, cfg)
+	registerLogTools(server, cfg)
 }
 
 type infoInput struct{}
