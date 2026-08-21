@@ -360,6 +360,10 @@ func registerTools(server *mcpsdk.Server, cfg Config) {
 	registerPprofTools(server, cfg)
 	registerCrossCheckTool(server, cfg)
 	registerLogTools(server, cfg)
+	registerStateTools(server, cfg)
+	registerReplayTools(server, cfg)
+	registerDivergenceTool(server, cfg)
+	registerRewardsTool(server, cfg)
 }
 
 type infoInput struct{}
