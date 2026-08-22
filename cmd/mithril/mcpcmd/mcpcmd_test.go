@@ -495,7 +495,7 @@ func TestCLIExplainsClientOwnedStdioAndRemoteCommand(t *testing.T) {
 			t.Errorf("CLI help is missing trust-boundary text %q:\n%s", want, text)
 		}
 	}
-	for _, want := range []string{"mithril mcp setup codex", "Any stdio-capable MCP client", "command-and-arguments entry", "mithril mcp config", "File paths must be absolute"} {
+	for _, want := range []string{"mithril mcp setup codex", "mithril mcp setup claude", "mithril mcp setup vscode", "Any stdio-capable MCP client", "command-and-arguments entry", "mithril mcp config", "File paths must be absolute"} {
 		if !strings.Contains(normalized, want) {
 			t.Errorf("CLI help is missing client-neutral guidance %q:\n%s", want, text)
 		}
@@ -603,17 +603,19 @@ func TestConfigCommandPrintsPortableStdioEntry(t *testing.T) {
 
 func TestSetupCommandAddsPortableCodexServer(t *testing.T) {
 	originalExecutable := currentExecutable
-	originalRun := runCodexMCPAdd
+	originalRun := runMCPClient
 	t.Cleanup(func() {
 		currentExecutable = originalExecutable
-		runCodexMCPAdd = originalRun
+		runMCPClient = originalRun
 	})
 	currentExecutable = func() (string, error) { return "/opt/mithril", nil }
 	setConfigFileForTest(t, "")
 	setRemoteConfigFlagsForTest(t, "", "", "")
 
+	var gotExecutable string
 	var got []string
-	runCodexMCPAdd = func(_ *cobra.Command, args []string) error {
+	runMCPClient = func(_ *cobra.Command, executable string, args []string) error {
+		gotExecutable = executable
 		got = append([]string(nil), args...)
 		return nil
 	}
@@ -622,11 +624,87 @@ func TestSetupCommandAddsPortableCodexServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"mcp", "add", "mithril", "--", "/opt/mithril", "mcp"}
-	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+	if gotExecutable != "codex" || strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("codex arguments = %#v, want %#v", got, want)
 	}
-	if err := cmd.RunE(&cmd, []string{"cursor"}); err == nil || !strings.Contains(err.Error(), "supported client: codex") {
+	if err := cmd.RunE(&cmd, []string{"cursor"}); err == nil || !strings.Contains(err.Error(), "supported clients: codex, claude, or vscode") {
 		t.Fatalf("unsupported client error = %v", err)
+	}
+}
+
+func TestSetupCommandAddsPortableClaudeServer(t *testing.T) {
+	originalExecutable := currentExecutable
+	originalRun := runMCPClient
+	t.Cleanup(func() {
+		currentExecutable = originalExecutable
+		runMCPClient = originalRun
+	})
+	currentExecutable = func() (string, error) { return "/opt/mithril", nil }
+	setConfigFileForTest(t, "")
+	setRemoteConfigFlagsForTest(t, "", "", "")
+
+	var gotExecutable string
+	var got []string
+	runMCPClient = func(_ *cobra.Command, executable string, args []string) error {
+		gotExecutable = executable
+		got = append([]string(nil), args...)
+		return nil
+	}
+	cmd := setupCmd
+	if err := cmd.RunE(&cmd, []string{"claude"}); err != nil {
+		t.Fatal(err)
+	}
+	if gotExecutable != "claude" || len(got) != 6 {
+		t.Fatalf("claude arguments = %#v", got)
+	}
+	wantPrefix := []string{"mcp", "add-json", "--scope", "user", "mithril"}
+	if strings.Join(got[:5], "\x00") != strings.Join(wantPrefix, "\x00") {
+		t.Fatalf("claude arguments = %#v, want prefix %#v", got, wantPrefix)
+	}
+	var entry stdioConfigEntry
+	if err := json.Unmarshal([]byte(got[5]), &entry); err != nil {
+		t.Fatalf("decode Claude config: %v", err)
+	}
+	if entry.Type != "stdio" || entry.Command != "/opt/mithril" || strings.Join(entry.Args, " ") != "mcp" {
+		t.Fatalf("Claude config = %#v", entry)
+	}
+}
+
+func TestSetupCommandAddsPortableVSCodeServer(t *testing.T) {
+	originalExecutable := currentExecutable
+	originalRun := runMCPClient
+	t.Cleanup(func() {
+		currentExecutable = originalExecutable
+		runMCPClient = originalRun
+	})
+	currentExecutable = func() (string, error) { return "/opt/mithril", nil }
+	setConfigFileForTest(t, "")
+	setRemoteConfigFlagsForTest(t, "", "", "")
+
+	var gotExecutable string
+	var got []string
+	runMCPClient = func(_ *cobra.Command, executable string, args []string) error {
+		gotExecutable = executable
+		got = append([]string(nil), args...)
+		return nil
+	}
+	cmd := setupCmd
+	if err := cmd.RunE(&cmd, []string{"vscode"}); err != nil {
+		t.Fatal(err)
+	}
+	if gotExecutable != "code" || len(got) != 2 || got[0] != "--add-mcp" {
+		t.Fatalf("VS Code arguments = %#v", got)
+	}
+	var entry struct {
+		Name    string   `json:"name"`
+		Command string   `json:"command"`
+		Args    []string `json:"args"`
+	}
+	if err := json.Unmarshal([]byte(got[1]), &entry); err != nil {
+		t.Fatalf("decode VS Code config: %v", err)
+	}
+	if entry.Name != "mithril" || entry.Command != "/opt/mithril" || strings.Join(entry.Args, " ") != "mcp" {
+		t.Fatalf("VS Code config = %#v", entry)
 	}
 }
 
