@@ -21,6 +21,9 @@ jobs:
       - name: Test MCP
         run: go test -race ./pkg/mcp ./cmd/mithril/mcpcmd ./internal/safedisplay
 
+      - name: Test MCP integrations
+        run: go test ./cmd/mithril/configcmd ./cmd/mithril/node ./pkg/blockstream ./pkg/replay ./pkg/rpcclient ./pkg/statsd ./pkg/turbine
+
       - name: Vet MCP
         run: go vet ./pkg/mcp ./cmd/mithril/mcpcmd ./internal/safedisplay
 

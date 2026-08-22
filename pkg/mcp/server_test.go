@@ -224,8 +224,12 @@ func TestServerAdvertisesOnlyImplementedCapabilitiesAndInstructions(t *testing.T
 }
 
 func TestServerInstructionsMatchProfileCapabilities(t *testing.T) {
-	if !strings.Contains(serverInstructions(ProfileDiagnostic), "may profile") {
+	diagnostic := serverInstructions(ProfileDiagnostic)
+	if !strings.Contains(diagnostic, "may profile") {
 		t.Fatal("diagnostic instructions omit diagnostic side effects")
+	}
+	if strings.Contains(diagnostic, "No tool changes node process state") {
+		t.Fatal("diagnostic instructions contradict profiling side effects")
 	}
 	if strings.Contains(serverInstructions(ProfileMonitor), "may profile") {
 		t.Error("monitor instructions claim hidden diagnostic capabilities")

@@ -332,7 +332,7 @@ func serverInstructions(profile Profile) string {
 	if profile == ProfileDiagnostic {
 		instructions += " Diagnostic tools may profile, simulate, or add node log entries; check their annotations."
 	}
-	return instructions + " No tool changes node process state, ledger state, or account state."
+	return instructions + " No tool starts, stops, or restarts the node or writes ledger or account state."
 }
 
 // isCleanShutdown reports whether err is a normal end-of-session condition
