@@ -37,10 +37,11 @@ client's SSH remote command.
 The default monitor profile is read-only. Diagnostic adds profiling and
 simulation tools.
 
-Run "mithril mcp setup codex" to add the server to Codex in one command. Any
-stdio-capable MCP client can use "mithril mcp config" to print a client-neutral
-command-and-arguments entry. File paths must be absolute because clients may
-launch the server from another directory.
+Run "mithril mcp setup codex", "mithril mcp setup claude", or "mithril mcp
+setup vscode" to add the server in one command. Any stdio-capable MCP client
+can use "mithril mcp config" to print a client-neutral command-and-arguments
+entry. File paths must be absolute because clients may launch the server from
+another directory.
 
 MCP stdio has no authentication of its own, so local process access or SSH
 identity is the authorization boundary.`,
@@ -133,34 +134,51 @@ with "ssh NODE true"; MCP cannot answer password or host-key prompts.`,
 	},
 }
 
-var runCodexMCPAdd = func(cmd *cobra.Command, args []string) error {
-	client := exec.CommandContext(cmd.Context(), "codex", args...)
+var runMCPClient = func(cmd *cobra.Command, executable string, args []string) error {
+	client := exec.CommandContext(cmd.Context(), executable, args...)
 	client.Stdin = cmd.InOrStdin()
 	client.Stdout = cmd.OutOrStdout()
 	client.Stderr = cmd.ErrOrStderr()
 	if err := client.Run(); err != nil {
-		return fmt.Errorf("run codex mcp add: %w", err)
+		return fmt.Errorf("run %s: %w", executable, err)
 	}
 	return nil
 }
 
 var setupCmd = cobra.Command{
-	Use:           "setup codex",
-	Short:         "Add Mithril MCP to Codex",
+	Use:           "setup CLIENT",
+	Short:         "Add Mithril MCP to Codex, Claude Code, or VS Code",
 	Args:          cobra.ExactArgs(1),
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if args[0] != "codex" {
-			return fmt.Errorf("unsupported MCP client %q; supported client: codex", args[0])
+		if args[0] != "codex" && args[0] != "claude" && args[0] != "vscode" {
+			return fmt.Errorf("unsupported MCP client %q; supported clients: codex, claude, or vscode", args[0])
 		}
 		entry, err := generatedStdioConfig(cmd)
 		if err != nil {
 			return err
 		}
-		codexArgs := []string{"mcp", "add", "mithril", "--", entry.Command}
-		codexArgs = append(codexArgs, entry.Args...)
-		return runCodexMCPAdd(cmd, codexArgs)
+		if args[0] == "codex" {
+			clientArgs := []string{"mcp", "add", "mithril", "--", entry.Command}
+			return runMCPClient(cmd, "codex", append(clientArgs, entry.Args...))
+		}
+		if args[0] == "claude" {
+			configJSON, err := json.Marshal(entry)
+			if err != nil {
+				return fmt.Errorf("encode Claude MCP config: %w", err)
+			}
+			return runMCPClient(cmd, "claude", []string{"mcp", "add-json", "--scope", "user", "mithril", string(configJSON)})
+		}
+		configJSON, err := json.Marshal(struct {
+			Name    string   `json:"name"`
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+		}{Name: "mithril", Command: entry.Command, Args: entry.Args})
+		if err != nil {
+			return fmt.Errorf("encode VS Code MCP config: %w", err)
+		}
+		return runMCPClient(cmd, "code", []string{"--add-mcp", string(configJSON)})
 	},
 }
 

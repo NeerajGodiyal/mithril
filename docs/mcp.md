@@ -29,9 +29,12 @@ from any directory.
 ### Claude Code
 
 ```bash
-claude mcp add-json --scope user mithril "$(./mithril mcp config)"
+./mithril mcp setup claude
 claude mcp get mithril
 ```
+
+The Codex and Claude Code setup commands register Mithril for the current user
+and record the binary's absolute path.
 
 ### Cursor
 
@@ -52,8 +55,12 @@ Run `./mithril mcp config`, then put its output under `mcpServers.mithril` in
 
 ### VS Code
 
-Run `./mithril mcp config`, then put its output under `servers.mithril` in
-`.vscode/mcp.json` or your user MCP configuration:
+```bash
+./mithril mcp setup vscode
+```
+
+For a workspace-specific setup, run `./mithril mcp config`, then put its output
+under `servers.mithril` in `.vscode/mcp.json`:
 
 ```json
 {
