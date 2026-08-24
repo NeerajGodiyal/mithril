@@ -346,6 +346,9 @@ func TestProfileToolCatalogsAndMetadata(t *testing.T) {
 						t.Errorf("metric tool must advertise its dynamic value through a permissive object schema, got %#v", tool.OutputSchema)
 					}
 				}
+				if tool.Name == "mithril_read_divergence" && !strings.Contains(tool.Description, divergenceRecoveryGuidance) {
+					t.Errorf("divergence tool description = %q, want recovery guidance %q", tool.Description, divergenceRecoveryGuidance)
+				}
 				if tool.Name == "mithril_read_divergence" || tool.Name == "mithril_diagnose" {
 					output, ok := tool.OutputSchema.(map[string]any)
 					properties, propertiesOK := output["properties"].(map[string]any)

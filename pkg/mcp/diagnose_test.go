@@ -373,8 +373,12 @@ func TestRunDiagnosisDivergenceIsCritical(t *testing.T) {
 	if out.Status != diagnosticCritical {
 		t.Fatalf("status = %q, want critical; checks=%+v", out.Status, out.Checks)
 	}
-	if got := diagnoseCheck(t, out, "divergence_artifacts").Status; got != checkCritical {
+	check := diagnoseCheck(t, out, "divergence_artifacts")
+	if got := check.Status; got != checkCritical {
 		t.Fatalf("divergence artifact status = %q, want critical", got)
+	}
+	if !strings.Contains(check.Evidence, divergenceRecoveryGuidance) {
+		t.Fatalf("divergence recovery guidance = %q, want %q", check.Evidence, divergenceRecoveryGuidance)
 	}
 	if len(out.DivergenceArtifacts) != 1 || out.DivergenceArtifacts[0].CheckedSlot == nil || *out.DivergenceArtifacts[0].CheckedSlot != 100 {
 		t.Fatalf("divergence artifacts = %+v", out.DivergenceArtifacts)

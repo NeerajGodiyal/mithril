@@ -408,7 +408,7 @@ func runDiagnosisWithHostCollector(ctx context.Context, cfg Config, in diagnoseI
 			if len(slots) > 0 {
 				slotText = strings.Join(slots, ", ")
 			}
-			addCheck("divergence_artifacts", checkCritical, fmt.Sprintf("%d bank-hash divergence artifact(s) present (slots: %s); halt and re-bootstrap", len(artifacts), slotText))
+			addCheck("divergence_artifacts", checkCritical, fmt.Sprintf("%d bank-hash divergence artifact(s) present (slots: %s); %s", len(artifacts), slotText, divergenceRecoveryGuidance))
 		}
 	}
 

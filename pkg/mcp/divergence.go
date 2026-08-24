@@ -23,6 +23,8 @@ const (
 	maxDivergenceStringBytes    = 1024
 	maxDivergenceExtraNames     = 16
 	maxDivergenceExtraNameBytes = 128
+	divergenceRecoveryGuidance  = "stop the node, preserve the existing AccountsDB for review, " +
+		"and rebuild from a snapshot into a distinct empty AccountsDB root"
 )
 
 // DivergenceArtifact is a parsed bank-hash divergence artifact. Key fields are
@@ -301,7 +303,7 @@ func registerDivergenceTool(server *mcpsdk.Server, cfg Config) {
 	addTool(server, cfg, &mcpsdk.Tool{
 		Name:        "mithril_read_divergence",
 		Annotations: annReadOnlyLocal,
-		Description: "Read bank-hash mismatch artifacts. Any valid artifact requires a halt and re-bootstrap. At most 10,000 directory entries are scanned; scan_truncated means returned artifacts are newest only within that partial scan. An empty result does not prove verification ran.",
+		Description: "Read bank-hash mismatch artifacts. If a valid artifact is present, " + divergenceRecoveryGuidance + ". At most 10,000 directory entries are scanned; scan_truncated means returned artifacts are newest only within that partial scan. An empty result does not prove verification ran.",
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, _ divergenceInput) (*mcpsdk.CallToolResult, divergenceOutput, error) {
 		logDir, err := requireConfiguredPath(cfg.LogDir, "MITHRIL_LOG_DIR is not configured")
 		if err != nil {
