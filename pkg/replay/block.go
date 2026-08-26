@@ -4454,7 +4454,7 @@ func ProcessBlock(
 		return nil, fmt.Errorf("bank-local EpochSchedule sysvar unavailable at slot %d", block.Slot)
 	}
 	bankEpochSchedule := &bankEpochScheduleValue
-	if requireAlpenglowBlockFooter(block, slotCtx, alpenglowClock) {
+	if requireAlpenglowBlockFooter(block, alpenglowClock) {
 		if err := validateAlpenglowFooterNanosecondClock(slotCtx, block); err != nil {
 			return nil, err
 		}

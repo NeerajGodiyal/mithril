@@ -190,6 +190,10 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 		input.Arena.Reset()
 	}
 
+	if tx != nil && tx.Message.GetVersion() == solana.MessageVersionV1 &&
+		(slotCtx.Features == nil || !slotCtx.Features.IsActive(features.EnableTransactionV1)) {
+		return transactionFailureOutput(TransactionErrorUnsupportedVersion)
+	}
 	if err := ValidateTransactionShape(tx, slotCtx.Features); err != nil {
 		return sanitizeFailureOutput()
 	}

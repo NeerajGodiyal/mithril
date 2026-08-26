@@ -125,6 +125,7 @@ func (s *slotState) noteError(err error) {
 
 type slotCompletionWork struct {
 	state              *slotState
+	alpenglowMode      bool
 	queuedAt           time.Time
 	observeCollection  bool
 	reportNonCanonical bool
@@ -374,6 +375,7 @@ func (a *SlotAssembler) claimCompletionLocked(state *slotState, reportNonCanonic
 	}
 	return &slotCompletionWork{
 		state:              state,
+		alpenglowMode:      a.alpenglowMode,
 		queuedAt:           now,
 		observeCollection:  observeCollection,
 		reportNonCanonical: reportNonCanonical,
@@ -417,7 +419,7 @@ func (a *SlotAssembler) processCompletion(ctx context.Context, work *slotComplet
 
 	decodeStartedAt := time.Now()
 	var decodeTimings entryDecodeTimings
-	blk, parentInfo, roots, err := work.state.decodeBlock(&decodeTimings)
+	blk, parentInfo, roots, err := work.state.decodeBlock(work.alpenglowMode, &decodeTimings)
 	decodeTotal := time.Since(decodeStartedAt)
 	decodeOnly := decodeTotal - decodeTimings.transactionParse
 	if decodeOnly < 0 {
@@ -1583,10 +1585,16 @@ func (s *slotState) orderedShreds() []*Shred {
 // decodeBlock performs every immutable, CPU-heavy completion step except
 // transaction signature verification. Parent/child identity hints are applied
 // later under the assembler lock so hints learned while this runs still win.
-func (s *slotState) decodeBlock(timings *entryDecodeTimings) (*block.Block, *AlpenglowParentInfo, []solana.Hash, error) {
+func (s *slotState) decodeBlock(alpenglowMode bool, timings *entryDecodeTimings) (*block.Block, *AlpenglowParentInfo, []solana.Hash, error) {
 	entries, parentInfo, footer, err := decodeEntriesAndAlpenglowMarkersFromDataShreds(s.orderedShreds(), timings)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	if !alpenglowMode && (parentInfo != nil || footer != nil) {
+		return nil, nil, nil, fmt.Errorf("slot %d contains an Alpenglow block marker in Classic mode", s.slot)
+	}
+	if alpenglowMode && footer == nil {
+		return nil, nil, nil, fmt.Errorf("slot %d Alpenglow block is missing its footer", s.slot)
 	}
 	effectiveParentSlot := s.parentSlot
 	if parentInfo != nil {
@@ -1624,7 +1632,7 @@ func (s *slotState) decodeBlock(timings *entryDecodeTimings) (*block.Block, *Alp
 // generator tests. Production assembly uses decodeBlock plus final-time hint
 // resolution in finalizeCompletion.
 func (s *slotState) block(parentBlockID solana.Hash, parentKnown bool) (*block.Block, error) {
-	blk, parentInfo, roots, err := s.decodeBlock(nil)
+	blk, parentInfo, roots, err := s.decodeBlock(true, nil)
 	if err != nil {
 		return nil, err
 	}
