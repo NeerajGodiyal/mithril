@@ -5,6 +5,7 @@ import (
 	"math"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -187,13 +188,15 @@ func TestInjectLocalBlockReplacesProvisionalSkip(t *testing.T) {
 		StartSlot:  20,
 		EndSlot:    22,
 	})
+	bs.confirmedTip.Store(21 + rpcSkipConfirmDepth)
+	bs.confirmSlotAbsent = func(uint64) bool { return true }
 	emitterDone := make(chan struct{})
 	go func() {
 		bs.emitOrderedBlocks()
 		close(emitterDone)
 	}()
 
-	bs.resultQueue <- fetchResult{slot: 21, skipped: true}
+	bs.resultQueue <- fetchResult{slot: 21, err: rpcclient.SlotSkipped, skipped: true, rpcIdx: 0}
 	waitForBlockSourceCondition(t, func() bool {
 		bs.reorderMu.Lock()
 		defer bs.reorderMu.Unlock()
@@ -255,7 +258,6 @@ func TestRPCDiagnosticsSanitizeEndpointAndErrors(t *testing.T) {
 		t.Fatalf("negative active RPC index exposed endpoint %q", got)
 	}
 }
-
 func TestLightbringerBlockConnectsLocked(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType: BlockSourceLightbringer,
@@ -2358,6 +2360,56 @@ func TestShouldFinalizeSkippedSlotAcceptsConfirmedSlotNotAvailable(t *testing.T)
 	}
 }
 
+func TestOrderedRPCSkipWaitsForFinalizedOmissionProof(t *testing.T) {
+	slot := uint64(150)
+	bs := NewBlockSource(&BlockSourceOpts{
+		SourceType: BlockSourceRpc,
+		StartSlot:  slot,
+		EndSlot:    slot,
+	})
+	bs.finalizedOnly = true
+	bs.confirmedTip.Store(slot + rpcSkipConfirmDepth)
+	var confirmedAbsent atomic.Bool
+	var badProbe atomic.Bool
+	bs.confirmSlotAbsent = func(got uint64) bool {
+		if got != slot {
+			badProbe.Store(true)
+			return false
+		}
+		return confirmedAbsent.Load()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		bs.emitOrderedBlocks()
+		close(done)
+	}()
+	defer func() {
+		close(bs.resultQueue)
+		<-done
+	}()
+
+	bs.resultQueue <- fetchResult{slot: slot, err: rpcclient.SlotSkipped, skipped: true, rpcIdx: 0}
+	select {
+	case block := <-bs.streamChan:
+		t.Fatalf("provisional getBlock skip emitted without finalized omission proof: %+v", block)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if badProbe.Load() {
+		t.Fatal("omission probe used the wrong slot")
+	}
+
+	confirmedAbsent.Store(true)
+	bs.resultQueue <- fetchResult{slot: slot, err: rpcclient.SlotSkipped, skipped: true, rpcIdx: 0}
+	select {
+	case block := <-bs.streamChan:
+		if block == nil || !block.IsSkipped || block.Slot != slot {
+			t.Fatalf("finalized omission emitted wrong block: %+v", block)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("finalized omission proof did not emit skipped slot")
+	}
+}
 func TestRescueStaleWaitingSlotRequeuesHungSlot(t *testing.T) {
 	bs := NewBlockSource(&BlockSourceOpts{
 		SourceType: BlockSourceRpc,

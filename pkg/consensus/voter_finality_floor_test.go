@@ -109,8 +109,11 @@ func TestAlpenglowVoterFinalityRaceAfterPersistenceIsBenign(t *testing.T) {
 	require.True(t, hookCalled)
 	require.True(t, voter.history.HasSkipped(40), "retain the signed record conservatively for anti-equivocation")
 	require.Zero(t, engine.ensurePool().Snapshot().VerifiedVotes)
-	require.Zero(t, voter.snapshot().VotesCastThisRun)
-	require.Zero(t, voter.snapshot().BroadcastMessagesQueued)
+	stats := voter.snapshot()
+	require.Zero(t, stats.VotesCastThisRun)
+	require.Zero(t, stats.BroadcastMessagesQueued)
+	require.EqualValues(t, 1, stats.HistoryPersistCount)
+	require.EqualValues(t, 1, stats.LocalVoteInjectCount)
 	require.NoError(t, engine.AlpenglowSafetyError())
 
 	persisted, err := alpenglow.LoadVoteHistory(voter.historyDir, voter.node)
@@ -148,8 +151,22 @@ func TestAlpenglowVoterPersistenceFailurePublishesNothing(t *testing.T) {
 	snapshot := engine.ensurePool().Snapshot()
 	require.Zero(t, snapshot.VerifiedVotes)
 	require.Zero(t, snapshot.Certificates)
-	require.Zero(t, voter.snapshot().BroadcastMessagesQueued)
+	stats := voter.snapshot()
+	require.Zero(t, stats.BroadcastMessagesQueued)
+	require.EqualValues(t, 1, stats.HistoryPersistCount)
+	require.Zero(t, stats.LocalVoteInjectCount)
 	require.NoError(t, engine.AlpenglowSafetyError())
+}
+
+func TestVotingSnapshotIncludesBroadcasterDiagnostics(t *testing.T) {
+	_, voter := newStoppedFloorTestVoter(t, alpenglow.BlockID{Slot: 39, Hash: solana.Hash{0x39}})
+	require.NoError(t, voter.broadcaster.Enqueue(alpenglow.NewVoteMessage(alpenglow.NewSkipVote(40), make([]byte, alpenglow.BLSSignatureSize), 0)))
+	require.Eventually(t, func() bool {
+		stats := voter.snapshot()
+		return stats.BroadcastMessagesNoConnections == 1 &&
+			stats.BroadcastMessageQueueWaitCount == 1 &&
+			stats.BroadcastMessagesQueued == 1
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestAlpenglowVoterRestoresAndRebroadcastsSlotVoteOnce(t *testing.T) {

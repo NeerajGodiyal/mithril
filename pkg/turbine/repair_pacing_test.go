@@ -134,7 +134,8 @@ func TestLateResponseWrongSlotRejected(t *testing.T) {
 // request. A WindowIndex answer must carry the EXACT requested data index; a
 // coding shred, a wrong index, or (for HWI) an index below the requested floor
 // is non-conforming and earns the peer NOTHING — the request stays outstanding
-// for a deserved timeout and keeps its in-flight retry slot. Without this a
+// for a deserved timeout and keeps its in-flight retry slot. A lower terminal
+// shred is the HWI exception and is covered separately below. Without this a
 // peer could echo a valid nonce with a signed-but-wrong shred to farm responder
 // credit, poison ranking, and prematurely free the still-missing shred.
 func TestNonConformingResponseRejected(t *testing.T) {
@@ -184,6 +185,46 @@ func TestNonConformingResponseRejected(t *testing.T) {
 				t.Fatalf("inflight = %v, want concurrent 1 (bad answer must not free the retry slot)", inf)
 			}
 		})
+	}
+}
+
+func TestHighestWindowIndexAcceptsLowerTerminalShred(t *testing.T) {
+	from := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 22), Port: 8022}
+	addrKey, _ := repairAddressKeyFromUDP(from)
+	key := repairRequestKey{kind: repairRequestHighestWindowIndex, slot: 80, index: 40}
+	c := newPacingTestClient(t)
+	c.outstanding[key] = outstandingRepairRequest{
+		key: key, nonce: 222, addr: addrKey,
+		sentAt: time.Now(), accountAt: time.Now().Add(time.Second),
+	}
+	c.byResponse[repairResponseKey{addr: addrKey, nonce: 222}] = key
+	c.mu.Lock()
+	c.addInflightLocked(key.shred(), time.Now())
+	c.mu.Unlock()
+	c.peerCache = []gossip.RepairPeer{{Addr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9000}}}
+	c.peerCacheAt = time.Now()
+
+	terminal := &Shred{
+		Slot: 80, Index: 30, Type: ShredTypeData,
+		Flags: shredFlagLastShredInSlot,
+	}
+	if !c.observeShredResponse(nil, nonceTrailer(222), from, terminal) {
+		t.Fatal("lower terminal shred must satisfy HighestWindowIndex")
+	}
+	if got := c.responses.Load(); got != 1 {
+		t.Fatalf("responses = %d, want 1", got)
+	}
+	if len(c.outstanding) != 0 {
+		t.Fatalf("outstanding = %d, want 0", len(c.outstanding))
+	}
+	c.mu.Lock()
+	inflight := c.inflight[key.shred()]
+	c.mu.Unlock()
+	if inflight != nil {
+		t.Fatalf("inflight = %v, want nil", inflight)
+	}
+	if got := c.requests.Load(); got != 0 {
+		t.Fatalf("lower terminal response sent %d follow-up requests, want 0", got)
 	}
 }
 

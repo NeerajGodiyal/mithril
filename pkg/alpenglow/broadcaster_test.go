@@ -83,6 +83,74 @@ func TestVotorBroadcasterPreconnectsBeforeFirstMessageAndDeliversDatagram(t *tes
 	require.EqualValues(t, 1, receiver.Stats().DatagramsReceived)
 }
 
+func TestVotorBroadcasterFailedConnectDoesNotBlockEstablishedPeerSend(t *testing.T) {
+	serverIdentity := ed25519.NewKeyFromSeed(bytesOf(33, ed25519.SeedSize))
+	clientIdentity := ed25519.NewKeyFromSeed(bytesOf(34, ed25519.SeedSize))
+	received := make(chan struct{}, 1)
+	receiver, err := NewReceiver(ReceiverConfig{
+		BindAddr:     "127.0.0.1:0",
+		Identity:     serverIdentity,
+		ShredVersion: 0x1234,
+		LogInterval:  -1,
+		AdmitPeer:    func(solana.PublicKey) bool { return true },
+		AdmitMessage: func(solana.PublicKey, Message) (Message, bool) {
+			received <- struct{}{}
+			return Message{}, false
+		},
+	}, NewObserver())
+	require.NoError(t, err)
+	runVotorReceiver(t, receiver)
+
+	blackhole, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, blackhole.Close()) })
+	healthy := VotorPeer{Identity: testVotorPubkey(serverIdentity), Addr: cloneUDPAddr(receiver.Addr().(*net.UDPAddr))}
+	source := newMutableVotorPeers([]VotorPeer{healthy})
+	broadcaster, err := NewVotorBroadcaster(VotorBroadcasterConfig{
+		Identity:     clientIdentity,
+		ShredVersion: 0x1234,
+		Peers:        source.Snapshot,
+		Workers:      1,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, broadcaster.Close()) })
+	require.Eventually(t, func() bool { return broadcaster.Stats().Connections == 1 }, 3*time.Second, 10*time.Millisecond)
+
+	deadIdentity := ed25519.NewKeyFromSeed(bytesOf(35, ed25519.SeedSize))
+	source.Set([]VotorPeer{healthy, {
+		Identity: testVotorPubkey(deadIdentity),
+		Addr:     cloneUDPAddr(blackhole.LocalAddr().(*net.UDPAddr)),
+	}})
+	broadcaster.reconcilePeers()
+	require.Eventually(t, func() bool { return broadcaster.Stats().ConnectionAttempts >= 2 }, time.Second, 10*time.Millisecond)
+
+	require.NoError(t, broadcaster.Enqueue(NewVoteMessage(NewSkipVote(78), testSignatureSeq(0x42), 3)))
+	select {
+	case <-received:
+	case <-time.After(time.Second):
+		t.Fatal("established peer send was blocked behind a failed connection attempt")
+	}
+	require.Eventually(t, func() bool {
+		stats := broadcaster.Stats()
+		return stats.MessageQueueWaitCount == 1 && stats.PeerSendWaitCount == 1 && stats.SendDatagramCount == 1
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestVotorBroadcasterCountsMessagesWithNoConnectedPeers(t *testing.T) {
+	broadcaster, err := NewVotorBroadcaster(VotorBroadcasterConfig{
+		Identity: ed25519.NewKeyFromSeed(bytesOf(36, ed25519.SeedSize)),
+		Peers:    func() []VotorPeer { return nil },
+		Workers:  1,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, broadcaster.Close()) })
+	require.NoError(t, broadcaster.Enqueue(NewVoteMessage(NewSkipVote(79), testSignatureSeq(0x43), 3)))
+	require.Eventually(t, func() bool {
+		stats := broadcaster.Stats()
+		return stats.MessagesNoConnections == 1 && stats.MessageQueueWaitCount == 1
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestVotorBroadcasterRejectsUnexpectedServerIdentity(t *testing.T) {
 	serverIdentity := ed25519.NewKeyFromSeed(bytesOf(41, ed25519.SeedSize))
 	serverPubkey := testVotorPubkey(serverIdentity)
@@ -401,19 +469,19 @@ func TestVotorBroadcasterReconcileDoesNotQueueDuplicateConnects(t *testing.T) {
 	broadcaster.connMu.Lock()
 	desired := len(broadcaster.desired)
 	pending := len(broadcaster.connectQueued)
-	queuedJobs := len(broadcaster.jobs)
+	queuedJobs := len(broadcaster.connectJobs)
 	broadcaster.connMu.Unlock()
 	require.Equal(t, peerCount, desired)
 	require.LessOrEqual(t, pending, peerCount)
 	require.LessOrEqual(t, queuedJobs, peerCount)
-	require.LessOrEqual(t, queuedJobs, cap(broadcaster.jobs))
+	require.LessOrEqual(t, queuedJobs, cap(broadcaster.connectJobs))
 	require.Zero(t, broadcaster.Stats().ConnectionJobsDropped)
 }
 
 func TestVotorBroadcasterConnectionJobQueueIsBounded(t *testing.T) {
 	const queueCapacity = 2
 	broadcaster := &VotorBroadcaster{
-		jobs:          make(chan votorPeerJob, queueCapacity),
+		connectJobs:   make(chan VotorPeer, queueCapacity),
 		done:          make(chan struct{}),
 		desired:       make(map[solana.PublicKey]VotorPeer),
 		conns:         make(map[solana.PublicKey]votorConnection),
@@ -440,12 +508,26 @@ func TestVotorBroadcasterConnectionJobQueueIsBounded(t *testing.T) {
 		broadcaster.queueConnectLocked(identities[1])
 	}
 	pending := len(broadcaster.connectQueued)
-	queuedJobs := len(broadcaster.jobs)
+	queuedJobs := len(broadcaster.connectJobs)
 	broadcaster.connMu.Unlock()
 
 	require.Equal(t, queueCapacity, queuedJobs)
 	require.Equal(t, queueCapacity, pending)
 	require.EqualValues(t, len(identities)-queueCapacity, broadcaster.connectionJobsDropped.Load())
+}
+
+func TestVotorBroadcasterPeerSendQueueIsBoundedAndClassified(t *testing.T) {
+	broadcaster := &VotorBroadcaster{
+		sendJobs: make(chan votorPeerJob, 2),
+		done:     make(chan struct{}),
+	}
+	require.True(t, broadcaster.queuePeerSend(votorPeerJob{}))
+	require.True(t, broadcaster.queuePeerSend(votorPeerJob{}))
+	require.False(t, broadcaster.queuePeerSend(votorPeerJob{}))
+	stats := broadcaster.Stats()
+	require.Equal(t, 2, stats.PeerSendQueueDepth)
+	require.EqualValues(t, 1, stats.PeerSendJobsDropped)
+	require.EqualValues(t, 1, stats.MessagesDropped)
 }
 
 func TestValidVotorPeerRequiresIPv4UnicastAndIdentity(t *testing.T) {

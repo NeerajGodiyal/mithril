@@ -23,8 +23,8 @@ func TestCertifiedBlockAtDecisiveNotarize(t *testing.T) {
 	}
 }
 
-// Fallback certs are ambiguous (up to 7 can legally coexist) — never a switch
-// signal. Codex item: "fallback-only = ambiguous, do not choose".
+// Fallback certs are ambiguous because up to seven can legally coexist, so
+// they are never a switch signal.
 func TestCertifiedBlockAtIgnoresFallbackOnly(t *testing.T) {
 	tracker := NewChainTracker()
 	specObserve(t, tracker, Certificate{Type: CertificateNotarizeFallback, Slot: 41, BlockHash: chainTestHash(1)})
@@ -145,8 +145,7 @@ func TestCertifiedBlockAtFinalizedByAncestry(t *testing.T) {
 
 // Two decisive blocks in one slot is Byzantine evidence: CertifiedBlockAt
 // reports NO decisive block (the conflict machinery owns the halt) rather
-// than arbitrarily picking one. Codex item: "multiple decisive blocks =
-// conflict/evidence, fail closed".
+// than arbitrarily picking one.
 func TestCertifiedBlockAtTwoDecisiveIsNoDecision(t *testing.T) {
 	tracker := NewChainTracker()
 	a := BlockID{Slot: 44, Hash: chainTestHash(1)}

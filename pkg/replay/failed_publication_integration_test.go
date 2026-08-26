@@ -8,6 +8,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
@@ -132,4 +133,88 @@ func TestProcessTransactionFailedDurableNoncePublicationMetrics(t *testing.T) {
 		got.TxFailedPayerPublication.SumNanoseconds +
 		got.TxFailedNoncePublication.SumNanoseconds
 	assert.LessOrEqual(t, children, got.TxFailedUpdateAccounts.SumNanoseconds)
+}
+
+func TestProcessTransactionMalformedComputeBudgetDoesNotChargeFee(t *testing.T) {
+	slotCtx, cleanup := newCommitTestSlotCtx()
+	defer cleanup()
+
+	payer := txfixture.PayerPubkey()
+	malformed := solana.NewInstruction(
+		addresses.ComputeBudgetProgramAddr,
+		nil,
+		[]byte{sealevel.ComputeBudgetInstrTypeSetComputeUnitLimit},
+	)
+	tx, err := solana.NewTransaction(
+		[]solana.Instruction{malformed},
+		txfixture.TestBlockhash(),
+		solana.TransactionPayer(payer),
+	)
+	require.NoError(t, err)
+	privateKey := txfixture.PayerPrivateKey()
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key == payer {
+			return &privateKey
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	payerBefore, err := slotCtx.GetAccount(payer)
+	require.NoError(t, err)
+	var sigverify sync.WaitGroup
+	feeInfo, _, processErr := ProcessTransaction(slotCtx, &sigverify, tx, nil, nil, nil, false)
+	sigverify.Wait()
+	require.ErrorIs(t, processErr, sealevel.InstrErrInvalidInstructionData)
+	assert.Nil(t, feeInfo)
+	payerAfter, err := slotCtx.GetAccount(payer)
+	require.NoError(t, err)
+	assert.Equal(t, payerBefore.Lamports, payerAfter.Lamports)
+	assert.NotContains(t, slotCtx.ModifiedAccts, payer)
+}
+
+func TestProcessTransactionFeePayerFailuresDoNotChargeFee(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		lamports func(*sealevel.SlotCtx) uint64
+		wantType TransactionErrorType
+	}{
+		{
+			name:     "insufficient fee",
+			lamports: func(*sealevel.SlotCtx) uint64 { return 1 },
+			wantType: TransactionErrorInsufficientFundsForFee,
+		},
+		{
+			name: "rent reserve",
+			lamports: func(slotCtx *sealevel.SlotCtx) uint64 {
+				rent := fees.RentForSlot(slotCtx)
+				return rent.MinimumBalance(0) + 5000 - 1
+			},
+			wantType: TransactionErrorInsufficientFundsForRent,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slotCtx, cleanup := newCommitTestSlotCtx()
+			defer cleanup()
+			tx, err := solana.TransactionFromBytes(txfixture.MustSignedTransferWire(0))
+			require.NoError(t, err)
+			payer, err := slotCtx.GetAccount(txfixture.PayerPubkey())
+			require.NoError(t, err)
+			payer.Lamports = tc.lamports(slotCtx)
+			require.NoError(t, slotCtx.SetAccount(txfixture.PayerPubkey(), payer))
+			before := payer.Lamports
+
+			var sigverify sync.WaitGroup
+			feeInfo, _, processErr := ProcessTransaction(slotCtx, &sigverify, tx, nil, nil, nil, false)
+			sigverify.Wait()
+			require.Nil(t, feeInfo)
+			var txErr *TransactionError
+			require.ErrorAs(t, processErr, &txErr)
+			require.Equal(t, tc.wantType, txErr.ErrorType)
+			after, err := slotCtx.GetAccount(txfixture.PayerPubkey())
+			require.NoError(t, err)
+			require.Equal(t, before, after.Lamports)
+			require.NotContains(t, slotCtx.ModifiedAccts, txfixture.PayerPubkey())
+		})
+	}
 }

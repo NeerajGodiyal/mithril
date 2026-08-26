@@ -35,6 +35,21 @@ func TestRepairCatchupPendingArmsAtConstruction(t *testing.T) {
 	}
 }
 
+func TestRepairCatchupReadyWithoutLiveEpochSchedule(t *testing.T) {
+	if !repairCatchupReady(0, 94_146, 103) {
+		t.Fatal("confirmed tip and repair peers must bootstrap catchup before live-epoch shreds can be verified")
+	}
+	if !repairCatchupReady(94_146, 0, 1) {
+		t.Fatal("verified shreds and a repair peer must remain ready")
+	}
+	if repairCatchupReady(0, 94_146, 0) {
+		t.Fatal("a tip without repair peers cannot fill the gap")
+	}
+	if repairCatchupReady(0, 0, 103) {
+		t.Fatal("repair peers without a shred or confirmed tip have no horizon")
+	}
+}
+
 // The gap baseline is the RESUME FRONTIER (startSlot = snapshot/durable slot),
 // not lastExecutedSlot — which is 0 on a fresh bootstrap because replay has
 // not executed its first block. This is the regression guard for that bug: a

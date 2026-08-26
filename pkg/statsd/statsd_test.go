@@ -398,6 +398,49 @@ func TestBlockProductionMetricLabelsStayBounded(t *testing.T) {
 	assert.Equal(t, []string{"result"}, MetricToLabels[BlockProductionStartAttempt])
 }
 
+func TestMithrilProgressAndVotingMetricContract(t *testing.T) {
+	tests := []struct {
+		metric Metric
+		name   string
+		labels []string
+	}{
+		{MithrilReplaySlot, "mithril_replay_slot", []string{}},
+		{MithrilRootedSlot, "mithril_rooted_slot", []string{}},
+		{MithrilFinalitySlot, "mithril_finality_slot", []string{}},
+		{MithrilVoterStageObservations, "mithril_voter_stage_observations", []string{"stage"}},
+		{MithrilVoterStageLatencyUS, "mithril_voter_stage_latency_us", []string{"stage", "statistic"}},
+		{MithrilVoterPeerConnections, "mithril_voter_peer_connections", []string{"state"}},
+		{MithrilVoterPeerEvents, "mithril_voter_peer_events", []string{"event"}},
+		{MithrilVoterPeerQueueDepth, "mithril_voter_peer_queue_depth", []string{"queue"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.name, test.metric.String())
+			assert.Equal(t, GaugeT, MetricToType[test.metric])
+			assert.Equal(t, test.labels, MetricToLabels[test.metric])
+			assert.Contains(t, metricsCollection.gauges, test.metric)
+		})
+	}
+
+	assert.NoError(t, Gauge(MithrilReplaySlot, 1, nil))
+	assert.NoError(t, Gauge(MithrilRootedSlot, 1, nil))
+	assert.NoError(t, Gauge(MithrilFinalitySlot, 1, nil))
+	assert.NoError(t, Gauge(MithrilVoterStageObservations, 1, []string{"replay_to_voter_event"}))
+	assert.NoError(t, Gauge(MithrilVoterStageLatencyUS, 1, []string{"replay_to_voter_event", "max"}))
+	assert.NoError(t, Gauge(MithrilVoterPeerConnections, 1, []string{"active"}))
+	assert.NoError(t, Gauge(MithrilVoterPeerEvents, 1, []string{"sends"}))
+	assert.NoError(t, Gauge(MithrilVoterPeerQueueDepth, 1, []string{"send"}))
+	families, err := prometheus.DefaultGatherer.Gather()
+	assert.NoError(t, err)
+	gathered := make(map[string]bool, len(families))
+	for _, family := range families {
+		gathered[family.GetName()] = true
+	}
+	for _, test := range tests {
+		assert.True(t, gathered[test.name], "gathered Prometheus output missing %s", test.name)
+	}
+}
+
 func TestBlockReplayMetrics(t *testing.T) {
 
 	// Instantiate mithrilmetrics.BlockReplay

@@ -12,6 +12,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type recordingSlotCtxSetter struct {
+	contexts []*sealevel.SlotCtx
+}
+
+func (s *recordingSlotCtxSetter) SetSlotCtx(slotCtx *sealevel.SlotCtx) {
+	s.contexts = append(s.contexts, slotCtx)
+}
+
 func TestChainTipTracksReplayedSlot(t *testing.T) {
 	t.Cleanup(ResetChainTip)
 	parentLtHash := new(lthash.LtHash).InitWithHash(make([]byte, 2048))
@@ -82,6 +90,42 @@ func TestChainTipTracksReplayedSlot(t *testing.T) {
 	require.True(t, tip.AcctsLtHash.Equals(updated))
 	require.True(t, tip.Features.IsActive(features.AccountsLtHash))
 	require.Same(t, statuses, tip.TransactionStatuses)
+}
+
+func TestChainTipPublishesCapturedBankReader(t *testing.T) {
+	t.Cleanup(ResetChainTip)
+	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 512, 1, "")
+	key := testKey(1)
+	tail.Add(5, []*accounts.Account{{Key: key, Lamports: 500}}, testHashBytes(5))
+	reader := tail.captureBank(5)
+	slotCtx := &sealevel.SlotCtx{
+		Slot:         5,
+		Accounts:     accounts.NewMemAccounts(),
+		UnrootedRead: reader,
+	}
+
+	UpdateChainTipFromSlotCtx(slotCtx, nil, nil, ChainTipIdentity{})
+	tip := ChainTipParentContext()
+	require.Same(t, reader, tip.UnrootedRead)
+	tail.unwind(5)
+
+	acct, err := tip.UnrootedRead.GetAccount(5, key)
+	require.NoError(t, err)
+	require.Equal(t, uint64(500), acct.Lamports)
+}
+
+func TestResetPublishedReplayStateClearsProducerAndRPCBanks(t *testing.T) {
+	t.Cleanup(ResetChainTip)
+	UpdateChainTipFromSlotCtx(&sealevel.SlotCtx{Slot: 5}, nil, nil, ChainTipIdentity{})
+	before := ChainTipParentContext()
+	setter := new(recordingSlotCtxSetter)
+
+	resetPublishedReplayState(setter)
+
+	after := ChainTipParentContext()
+	require.Greater(t, after.Generation, before.Generation)
+	require.Zero(t, after.Slot)
+	require.Equal(t, []*sealevel.SlotCtx{nil}, setter.contexts)
 }
 
 func TestResetChainTipClearsTransactionStatuses(t *testing.T) {

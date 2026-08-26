@@ -3,6 +3,7 @@ package replay
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,11 +12,19 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/base58"
+	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/rewards"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/require"
 )
+
+type staleRewardAccountReader struct{}
+
+func (staleRewardAccountReader) GetAccount(uint64, solana.PublicKey) (*accounts.Account, error) {
+	return nil, errCapturedBankStale
+}
 
 func TestDecodeEncodeEpochInflationAccountStateAgaveFixture(t *testing.T) {
 	// Observed on Alpenglow RPC after the epoch 114 -> 115 boundary.
@@ -156,6 +165,58 @@ func TestPartitionedRewardsBudgetIncludesMigrationEpochAndFailsClosed(t *testing
 	slotCtx.UnrootedRead = rewardAccountReader{}
 	_, err = partitionedRewardsBudget(slotCtx, schedule, f, migrationEpoch, 1234)
 	require.ErrorContains(t, err, "load recorded inflation budget")
+}
+
+func TestSettledEpochBoundaryParentReadsRecordedInflationFromDurableStore(t *testing.T) {
+	const (
+		parentSlot     = uint64(10)
+		rewardedEpoch  = uint64(6)
+		recordedBudget = uint64(9876)
+	)
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "accounts"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "largest_file_id"), make([]byte, 8), 0o644))
+	db, err := accountsdb.OpenDb(dir)
+	require.NoError(t, err)
+	db.InitCaches()
+	t.Cleanup(db.CloseDb)
+
+	key := VoteRewardAccountAddr()
+	acct := &accounts.Account{Key: key, Data: encodeEpochInflationAccountState(EpochInflationAccountState{
+		Current: EpochInflationState{
+			MaxPossibleValidatorReward: recordedBudget,
+			SlotsPerEpoch:              54_000,
+			Epoch:                      rewardedEpoch,
+		},
+	})}
+	stored := make(chan struct{})
+	require.NoError(t, db.StoreAccounts([]*accounts.Account{acct}, parentSlot, func() { close(stored) }))
+	<-stored
+
+	parent := &sealevel.SlotCtx{
+		Accounts:     accounts.NewMemAccounts(),
+		AccountsDb:   db,
+		Slot:         parentSlot,
+		ParentSlot:   parentSlot - 1,
+		UnrootedRead: staleRewardAccountReader{},
+	}
+	schedule := &sealevel.SysvarEpochSchedule{SlotsPerEpoch: 54_000}
+	f := features.NewFeaturesDefault()
+	f.EnableFeature(features.Alpenglow, rewardedEpoch*schedule.SlotsPerEpoch)
+
+	_, err = partitionedRewardsBudget(parent, schedule, f, rewardedEpoch, 1)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, errCapturedBankStale))
+
+	settled := epochBoundaryParentCtx(db, &block.Block{ParentSlot: parentSlot}, rewardedEpoch, f)
+	require.NotNil(t, parent.UnrootedRead, "the published parent must remain fail-closed")
+	require.Nil(t, settled.UnrootedRead)
+	require.Same(t, db, settled.AccountsDb)
+	require.Equal(t, parentSlot, settled.Slot)
+
+	got, err := partitionedRewardsBudget(settled, schedule, f, rewardedEpoch, 1)
+	require.NoError(t, err)
+	require.Equal(t, recordedBudget, got)
 }
 
 func TestStageEpochInflationAccountRollsStateAndCapitalization(t *testing.T) {

@@ -224,3 +224,88 @@ func TestVerifierRespectsLag(t *testing.T) {
 	assert.Equal(t, 1, src.calls)
 	assert.Equal(t, uint64(100), v.VerifiedWatermark())
 }
+
+func TestVerifierPublishesStalledAfterConfiguredWindow(t *testing.T) {
+	ResetVerificationStatus(true, 0)
+	defer ResetVerificationStatus(false, 0)
+
+	now := time.Unix(1_700_000_000, 0)
+	src := &fakeVerificationSource{
+		blocks:  map[uint64]*verifiedBlock{},
+		skipped: map[uint64]bool{},
+		errs:    map[uint64]error{},
+	}
+	v := newTrailingVerifier(src, VerifierConfig{
+		Enabled:     true,
+		LagSlots:    4,
+		MaxRPS:      1000,
+		StallWindow: time.Second,
+		Required:    true,
+	})
+	v.now = func() time.Time { return now }
+
+	d, vb := digestFor(100, vhash(1), vsig(1), 5000, false, []uint64{1}, []uint64{2}, []byte{0})
+	vb.Blockhash = vhash(2)
+	v.Record(d)
+	src.blocks[100] = vb
+	v.SetExecutedTip(104)
+	v.verifyNext()
+
+	state, _, _, _ := VerificationSnapshot()
+	require.Equal(t, VerificationIncomplete, state)
+
+	now = now.Add(time.Second)
+	v.verifyNext()
+	require.Equal(t, 1, src.calls, "backoff must prevent another RPC request")
+	state, _, _, _ = VerificationSnapshot()
+	require.Equal(t, VerificationStalled, state)
+
+	src.blocks[100].Blockhash = d.Blockhash
+	v.mu.Lock()
+	v.pending[100].nextTry = time.Time{}
+	v.mu.Unlock()
+	v.verifyNext()
+	state, _, _, _ = VerificationSnapshot()
+	require.Equal(t, VerificationComplete, state)
+}
+
+func TestVerifierOutageTimeDoesNotBecomeStallTime(t *testing.T) {
+	ResetVerificationStatus(true, 0)
+	defer ResetVerificationStatus(false, 0)
+
+	now := time.Unix(1_700_000_000, 0)
+	src := &fakeVerificationSource{
+		blocks:  map[uint64]*verifiedBlock{},
+		skipped: map[uint64]bool{},
+		errs:    map[uint64]error{100: errors.New("rpc unavailable")},
+	}
+	v := newTrailingVerifier(src, VerifierConfig{
+		Enabled:     true,
+		LagSlots:    4,
+		MaxRPS:      1000,
+		StallWindow: time.Minute,
+		Required:    true,
+	})
+	v.now = func() time.Time { return now }
+
+	d, vb := digestFor(100, vhash(1), vsig(1), 5000, false, []uint64{1}, []uint64{2}, []byte{0})
+	v.Record(d)
+	v.SetExecutedTip(104)
+	v.verifyNext()
+
+	now = now.Add(10 * time.Minute)
+	v.mu.Lock()
+	v.publishStatusLocked()
+	v.mu.Unlock()
+	state, _, _, _ := VerificationSnapshot()
+	require.Equal(t, VerificationUnavailable, state)
+
+	delete(src.errs, 100)
+	src.blocks[100] = vb
+	v.mu.Lock()
+	v.pending[100].nextTry = time.Time{}
+	v.mu.Unlock()
+	v.verifyNext()
+	state, _, _, _ = VerificationSnapshot()
+	require.Equal(t, VerificationComplete, state)
+}

@@ -298,6 +298,37 @@ func TestTransactionStatusCacheAgaveSeedRejectsStaleRoot(t *testing.T) {
 	require.ErrorContains(t, err, "latest root 10 does not match replay parent 11")
 }
 
+func TestTransactionStatusCacheAgaveSeedBindsSnapshotParentBlockID(t *testing.T) {
+	cache, err := NewTransactionStatusCacheFromAgaveSnapshot([]txstatus.SnapshotSlotDelta{
+		{Slot: 0, IsRoot: true},
+		{Slot: 12, IsRoot: true},
+	}, 12)
+	require.NoError(t, err)
+
+	parentID := solana.Hash{0xaa}
+	require.NoError(t, validateRestoredTransactionStatusCache(cache, 12, parentID, true))
+
+	missing := statusCacheTestBlock(13)
+	missing.ParentSlot = 12
+	var lineageErr *TransactionStatusLineageError
+	require.ErrorAs(t, cache.ValidateBlock(missing), &lineageErr)
+	require.True(t, lineageErr.ParentBlockIDMissing)
+
+	wrong := statusCacheTestBlock(13)
+	wrong.ParentSlot = 12
+	wrong.HasAlpenglowParentBlockID = true
+	wrong.AlpenglowParentBlockID = solana.Hash{0xbb}
+	lineageErr = nil
+	require.ErrorAs(t, cache.ValidateBlock(wrong), &lineageErr)
+	require.True(t, lineageErr.BlockIDMismatch)
+
+	exact := statusCacheTestBlock(13)
+	exact.ParentSlot = 12
+	exact.HasAlpenglowParentBlockID = true
+	exact.AlpenglowParentBlockID = parentID
+	require.NoError(t, cache.ValidateBlock(exact))
+}
+
 func TestTransactionStatusCacheAgaveSeedRejectsInconsistentKeyIndex(t *testing.T) {
 	tx := statusCacheTestTransaction(1, 2, 3)
 	status0 := snapshotStatusCacheStatusForTx(t, tx, 0)

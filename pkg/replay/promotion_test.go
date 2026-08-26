@@ -3,12 +3,14 @@ package replay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"runtime"
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/rootedevents"
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
@@ -30,6 +32,12 @@ type sharedAccountDurable struct {
 	acct *accounts.Account
 }
 
+type blockingAccountDurable struct {
+	started chan struct{}
+	release chan struct{}
+	acct    *accounts.Account
+}
+
 func (d *sharedAccountDurable) GetAccount(uint64, solana.PublicKey) (*accounts.Account, error) {
 	return d.acct, nil
 }
@@ -44,6 +52,16 @@ func (d *sharedAccountDurable) GetAccountsBatch(_ context.Context, _ uint64, pks
 
 func (d *sharedAccountDurable) GetAccountsBatchShared(ctx context.Context, slot uint64, pks []solana.PublicKey) ([]*accounts.Account, error) {
 	return d.GetAccountsBatch(ctx, slot, pks)
+}
+
+func (d *blockingAccountDurable) GetAccount(uint64, solana.PublicKey) (*accounts.Account, error) {
+	close(d.started)
+	<-d.release
+	return d.acct, nil
+}
+
+func (d *blockingAccountDurable) GetAccountsBatch(context.Context, uint64, []solana.PublicKey) ([]*accounts.Account, error) {
+	return nil, errors.New("unexpected batch read")
 }
 
 func (d *fakeDurable) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
@@ -136,6 +154,40 @@ func TestPromoteRootedHappyPath(t *testing.T) {
 	assert.True(t, has9, "unrooted bankhash retained")
 }
 
+func TestRootedEventObservationsOwnDataAndRespectForkTailBudget(t *testing.T) {
+	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 512, 2, "")
+	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
+		Install: func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
+			return nil, nil
+		},
+	}))
+	observation := []rootedevents.TransactionObservation{{Message: make([]byte, 200)}}
+
+	require.ErrorContains(t, tail.recordRootedEventSlotWithLimit(5, 4, observation, 100), "fork-tail limit")
+	require.Empty(t, tail.transactions)
+	require.Zero(t, tail.transactionBytes)
+
+	require.NoError(t, tail.recordRootedEventSlotWithLimit(5, 4, observation, 1024))
+	require.NotZero(t, tail.transactionBytes)
+	observation[0].Message[0] = 9
+	require.Zero(t, tail.transactions[5][0].Message[0], "tail retained caller-owned observation bytes")
+
+	tail.Add(5, nil, testHashBytes(5))
+	tail.SetContext(5, &state.ResumeContext{Slot: 5}, testUnwindBankSysvars(t, 5, 50))
+	tail.Add(7, nil, testHashBytes(7))
+	tail.SetContext(7, &state.ResumeContext{Slot: 7}, testUnwindBankSysvars(t, 7, 70))
+	require.NoError(t, tail.recordRootedEventSlotWithLimit(7, 5, nil, 1024))
+
+	ctx, bankSysvars := tail.unwind(7)
+	require.NotNil(t, ctx)
+	require.NotNil(t, bankSysvars)
+	require.Equal(t, uint64(5), ctx.Slot)
+	require.Contains(t, tail.transactions, uint64(5))
+	require.NotContains(t, tail.transactions, uint64(7))
+	require.Contains(t, tail.bankSysvars, uint64(5))
+	require.NotContains(t, tail.bankSysvars, uint64(7))
+}
+
 // Partial failure: a mid-batch commit error must promote ONLY through the last
 // durably-committed slot. The failed slot and all later held slots remain in the
 // overlay so no fall-through read can see a gap.
@@ -179,9 +231,8 @@ func TestPromoteRootedEmptyDeltaSlot(t *testing.T) {
 	assert.Equal(t, 0, overlay.HeldSlots())
 }
 
-// The dual-watermark target: finality clamped by verification (when required)
-// and the divergence floor. The key property (Codex review) is that verified
-// progress advances the target even when finality is flat.
+// The dual-watermark target is finality clamped by required verification and
+// the divergence floor. Verified progress must advance it even when finality is flat.
 func TestSafePromoteTarget(t *testing.T) {
 	// Verifier not required: target follows finality regardless of verified.
 	assert.Equal(t, uint64(100), safePromoteTarget(100, false, 0, 0))
@@ -284,6 +335,69 @@ func TestUnrootedTailReadsDoNotMutateHeldState(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(51), again.Lamports)
 	assert.Equal(t, []byte{1, 2, 3}, again.Data)
+}
+
+func TestUnrootedTailCapturedSlotDoesNotReadFutureWrite(t *testing.T) {
+	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 512, 1, "")
+	key := testKey(1)
+	tail.Add(5, []*accounts.Account{{Key: key, Lamports: 500}}, testHashBytes(5))
+	tail.Add(7, []*accounts.Account{{Key: key, Lamports: 700}}, testHashBytes(7))
+
+	acct, err := tail.GetAccount(6, key)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(500), acct.Lamports)
+
+	batch, err := tail.GetAccountsBatch(context.Background(), 6, []solana.PublicKey{key})
+	require.NoError(t, err)
+	require.Len(t, batch, 1)
+	assert.Equal(t, uint64(500), batch[0].Lamports)
+}
+
+func TestCapturedUnrootedBankSurvivesForkUnwind(t *testing.T) {
+	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 512, 1, "")
+	key := testKey(1)
+	tail.Add(5, []*accounts.Account{{Key: key, Lamports: 500}}, testHashBytes(5))
+	reader := tail.captureBank(5)
+	tail.unwind(5)
+
+	acct, err := reader.GetAccount(5, key)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(500), acct.Lamports)
+	current, err := tail.GetAccount(5, key)
+	require.NoError(t, err)
+	assert.Zero(t, current.Lamports, "mutable tail already discarded the old fork")
+}
+
+func TestCapturedUnrootedBankRejectsLaterDurableGeneration(t *testing.T) {
+	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 512, 1, "")
+	key := testKey(1)
+	tail.Add(5, []*accounts.Account{{Key: key, Lamports: 500}}, testHashBytes(5))
+	reader := tail.captureBank(5)
+
+	_, err := tail.committer.CommitBatch(nil, 5, nil, nil)
+	require.NoError(t, err)
+	_, err = reader.GetAccount(5, key)
+	require.ErrorIs(t, err, errCapturedBankStale)
+}
+
+func TestCapturedUnrootedBankRejectsDurableGenerationChangeDuringRead(t *testing.T) {
+	durable := &blockingAccountDurable{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		acct:    testAccount(1, 100),
+	}
+	tail := newUnrootedTail(durable, &fakeCommitter{}, 512, 1, "")
+	reader := tail.captureBank(5)
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := reader.GetAccount(5, durable.acct.Key)
+		errCh <- err
+	}()
+	<-durable.started
+	_, err := tail.committer.CommitBatch(nil, 5, nil, nil)
+	require.NoError(t, err)
+	close(durable.release)
+	require.ErrorIs(t, <-errCh, errCapturedBankStale)
 }
 
 func TestUnrootedTailReadsDoNotMutateDurableCache(t *testing.T) {

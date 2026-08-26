@@ -259,6 +259,132 @@ func TestSlotAssemblerResetSlotClearsCompletedSlotForRepair(t *testing.T) {
 	}
 }
 
+func TestPerfectEquivocationMarksSlotDeadUntilConsensusReset(t *testing.T) {
+	const slot = uint64(80)
+	assembler := NewSlotAssembler()
+	assembler.SetAlpenglowMode(true)
+	assembler.PrioritizeRepairSlot(slot)
+
+	withoutTerminal := &Shred{
+		Variant: legacyDataVariant, Type: ShredTypeData,
+		Slot: slot, Index: 30, Version: 1, ParentOffset: 1,
+		Payload: []byte{1},
+	}
+	if _, err := assembler.AddShred(withoutTerminal); err != nil {
+		t.Fatalf("add first variant: %v", err)
+	}
+	if _, err := assembler.AddShred(&Shred{
+		Variant: legacyDataVariant, Type: ShredTypeData,
+		Slot: slot, Index: 30, Version: 1, ParentOffset: 1,
+		Payload: []byte{1},
+	}); err != nil {
+		t.Fatalf("exact repeat must remain harmless: %v", err)
+	}
+	if assembler.SlotDead(slot) {
+		t.Fatal("exact repeat marked slot dead")
+	}
+
+	conflictingTerminal := &Shred{
+		Variant: legacyDataVariant, Type: ShredTypeData,
+		Slot: slot, Index: 30, Version: 1, ParentOffset: 1,
+		Flags: shredFlagLastShredInSlot, Payload: []byte{2},
+	}
+	if _, err := assembler.AddShred(conflictingTerminal); !errors.Is(err, ErrConflictingShred) {
+		t.Fatalf("conflicting terminal error = %v, want ErrConflictingShred", err)
+	}
+	if !assembler.SlotDead(slot) {
+		t.Fatal("conflicting terminal shred did not mark slot dead")
+	}
+	priority, edge := assembler.RepairRequestsTiered(8, 8)
+	for _, req := range append(priority, edge...) {
+		if req.Slot == slot {
+			t.Fatalf("dead slot still generated repair: %+v", req)
+		}
+	}
+
+	// A decisive block or skip takes this reset path. The slot becomes
+	// repairable again only after consensus has selected the outcome.
+	assembler.ResetSlot(slot)
+	assembler.PrioritizeRepairSlot(slot)
+	if assembler.SlotDead(slot) {
+		t.Fatal("consensus reset left slot dead")
+	}
+	priority, _ = assembler.RepairRequestsTiered(8, 8)
+	if len(priority) != 1 || priority[0].Slot != slot || !priority[0].NeedHighestDataShred {
+		t.Fatalf("consensus reset did not reopen repair: %+v", priority)
+	}
+}
+
+func TestClassicConflictingShredKeepsDuplicateBehavior(t *testing.T) {
+	const slot = uint64(81)
+	assembler := NewSlotAssembler()
+	first := &Shred{
+		Variant: legacyDataVariant, Type: ShredTypeData,
+		Slot: slot, Index: 4, Version: 1, ParentOffset: 1,
+		Payload: []byte{1},
+	}
+	if _, err := assembler.AddShred(first); err != nil {
+		t.Fatalf("add first shred: %v", err)
+	}
+	conflict := *first
+	conflict.Payload = []byte{2}
+	conflict.Flags = shredFlagLastShredInSlot
+	if _, err := assembler.AddShred(&conflict); err != nil {
+		t.Fatalf("classic conflicting shred changed prior duplicate behavior: %v", err)
+	}
+	if assembler.SlotDead(slot) {
+		t.Fatal("classic conflicting shred marked slot dead without a consensus reopen path")
+	}
+}
+
+func TestRecoveredConflictingShredMarksAlpenglowSlotDead(t *testing.T) {
+	dataShreds := localnetMerkleShreds(t, "d")
+	codingShreds := localnetMerkleShreds(t, "c")
+	if len(dataShreds) < 2 || len(codingShreds) == 0 {
+		t.Fatal("fixture needs data and coding shreds")
+	}
+	target, err := ParseShred(dataShreds[1])
+	if err != nil {
+		t.Fatalf("parse target data shred: %v", err)
+	}
+	assembler := NewSlotAssembler()
+	assembler.SetAlpenglowMode(true)
+	// A different, already-held shred at the target index is deliberately
+	// legacy so it does not populate the Merkle FEC set. Coding recovery can
+	// then reconstruct the leader's other packet at that same index.
+	divergent := &Shred{
+		Variant: legacyDataVariant, Type: ShredTypeData,
+		Slot: target.Slot, Index: target.Index, Version: target.Version,
+		FECSetIndex: target.FECSetIndex, ParentOffset: target.ParentOffset,
+		Payload: []byte{0xff},
+	}
+	if _, err := assembler.AddShred(divergent); err != nil {
+		t.Fatalf("add divergent data shred: %v", err)
+	}
+
+	foundSet := false
+	for _, raw := range codingShreds {
+		coding, err := ParseShred(raw)
+		if err != nil {
+			t.Fatalf("parse coding shred: %v", err)
+		}
+		if coding.FECSetIndex != target.FECSetIndex {
+			continue
+		}
+		foundSet = true
+		if _, err := assembler.AddShred(coding); !errors.Is(err, ErrConflictingShred) {
+			t.Fatalf("recovered conflict error = %v, want ErrConflictingShred", err)
+		}
+		break
+	}
+	if !foundSet {
+		t.Fatalf("no coding shred for FEC set %d", target.FECSetIndex)
+	}
+	if !assembler.SlotDead(target.Slot) {
+		t.Fatal("recovered conflicting shred did not mark slot dead")
+	}
+}
+
 func TestSlotAssemblerRecordsCompleteSlotDecodeFailure(t *testing.T) {
 	rawShreds := fixtures.DataShreds(t, "mainnet", 102815960)
 	if len(rawShreds) == 0 {

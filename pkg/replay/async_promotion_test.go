@@ -9,7 +9,9 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/rootedevents"
 	"github.com/Overclock-Validator/mithril/pkg/state"
+	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,6 +22,16 @@ type slowCommitter struct {
 	fakeCommitter
 	mu    sync.Mutex
 	delay time.Duration
+}
+
+type orderedCommitter struct {
+	fakeCommitter
+	order *[]string
+}
+
+func (c *orderedCommitter) CommitBatch(deltas []accounts.SlotDelta, throughSlot uint64, bankhashes map[uint64][32]byte, resumeCtx []byte) (accountsdb.BatchCommitResult, error) {
+	*c.order = append(*c.order, "account-commit")
+	return c.fakeCommitter.CommitBatch(deltas, throughSlot, bankhashes, resumeCtx)
 }
 
 func TestFoldJobSnapshotsStatusOnLoopAndReferenceRidesManifest(t *testing.T) {
@@ -76,6 +88,162 @@ func TestFoldJobSnapshotsStatusOnLoopAndReferenceRidesManifest(t *testing.T) {
 	payload, err := ReadTransactionStatusCheckpoint(rootDir, manifestCtx.TransactionStatusCheckpoint)
 	require.NoError(t, err)
 	require.Equal(t, []byte("immutable-status-at-six"), payload)
+}
+
+func TestFoldJobRootedEventsRideManifest(t *testing.T) {
+	rootDir := t.TempDir()
+	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
+	tail := asyncTestTail(fc, 5, 6)
+	afterCommitCalled := false
+	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
+		Install: func(deltas []accounts.SlotDelta, metadata map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
+			return rootedevents.PrepareSidecar(rootDir, deltas, metadata)
+		},
+		AfterCommit: func(selected *state.RootedEventBatchRef) error {
+			require.Equal(t, []uint64{5, 6}, fc.committed, "retention ran before CommitBatch completed")
+			require.NotNil(t, selected)
+			afterCommitCalled = true
+			return nil
+		},
+	}))
+	require.NoError(t, tail.RecordRootedEventSlot(5, 4, []rootedevents.TransactionObservation{{
+		Index: 0, Signature: solana.Signature{1}.String(), Message: []byte{1},
+		AccountKeys: []string{solana.PublicKey{1}.String()}, Succeeded: true,
+	}}))
+	require.NoError(t, tail.RecordRootedEventSlot(6, 5, nil))
+
+	job, err := tail.buildFoldJob(6, false)
+	require.NoError(t, err)
+	require.NoError(t, runFoldJob(fc, job))
+	require.True(t, afterCommitCalled)
+
+	var manifestCtx state.ResumeContext
+	require.NoError(t, json.Unmarshal(fc.ctxs[6], &manifestCtx))
+	require.NotNil(t, manifestCtx.RootedEventBatch)
+	require.Equal(t, uint64(5), manifestCtx.RootedEventBatch.FromSlot)
+	require.Equal(t, uint64(6), manifestCtx.RootedEventBatch.ThroughSlot)
+	var events []rootedevents.Event
+	require.NoError(t, rootedevents.ReadSidecar(rootDir, manifestCtx.RootedEventBatch, func(event rootedevents.Event) error {
+		events = append(events, event)
+		return nil
+	}))
+	require.Len(t, events, 5)
+	require.Equal(t, rootedevents.TransactionExecuted, events[0].Kind)
+	require.Equal(t, rootedevents.SlotRooted, events[len(events)-1].Kind)
+
+	tail.applyFoldJob(job)
+	require.Empty(t, tail.parentSlots)
+	require.Empty(t, tail.transactions)
+	require.Zero(t, tail.transactionBytes)
+}
+
+func TestFoldJobRootedEventsRequireEverySlotCapture(t *testing.T) {
+	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
+	tail := asyncTestTail(fc, 5, 6)
+	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
+		Install: func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
+			t.Fatal("install must not run when a slot was never captured")
+			return nil, nil
+		},
+	}))
+	require.NoError(t, tail.RecordRootedEventSlot(5, 4, nil))
+	tail.parentSlots[6] = 5 // isolate the missing-capture guard from lineage validation
+
+	job, err := tail.buildFoldJob(6, false)
+	require.ErrorContains(t, err, "no transaction capture recorded for slot 6")
+	require.Nil(t, job)
+	require.Empty(t, fc.committed)
+}
+
+func TestForcedFoldSelectsRootedEvents(t *testing.T) {
+	rootDir := t.TempDir()
+	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
+	tail := newUnrootedTail(&fakeDurable{}, fc, 512, 2, "")
+	tail.Add(5, []*accounts.Account{testAccount(1, 5)}, testHashBytes(5))
+	tail.SetContext(5, &state.ResumeContext{Slot: 5})
+	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
+		Install: func(deltas []accounts.SlotDelta, metadata map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
+			return rootedevents.PrepareSidecar(rootDir, deltas, metadata)
+		},
+	}))
+	require.NoError(t, tail.RecordRootedEventSlot(5, 4, []rootedevents.TransactionObservation{{
+		Index: 0, Signature: solana.Signature{2}.String(), Message: []byte{2},
+		AccountKeys: []string{solana.PublicKey{2}.String()}, Succeeded: true,
+	}}))
+
+	promoted, ctx, err := tail.flush(5)
+	require.NoError(t, err)
+	require.Equal(t, uint64(5), promoted)
+	require.NotNil(t, ctx.RootedEventBatch)
+	var manifestCtx state.ResumeContext
+	require.NoError(t, json.Unmarshal(fc.ctxs[5], &manifestCtx))
+	require.Equal(t, ctx.RootedEventBatch, manifestCtx.RootedEventBatch)
+}
+
+func TestFoldJobSidecarOrderAndReferences(t *testing.T) {
+	rootDir := t.TempDir()
+	var order []string
+	committer := &orderedCommitter{
+		fakeCommitter: fakeCommitter{durable: accounts.NewMemAccounts()},
+		order:         &order,
+	}
+	tail := asyncTestTail(committer, 5, 6)
+	require.NoError(t, tail.SetTransactionStatusCheckpointHooks(TransactionStatusCheckpointHooks{
+		Snapshot: func(uint64) ([]byte, error) {
+			order = append(order, "status-snapshot")
+			return []byte("status"), nil
+		},
+		Install: func(through uint64, payload []byte) (*state.TransactionStatusCheckpointRef, error) {
+			order = append(order, "status-install")
+			return PrepareTransactionStatusCheckpoint(rootDir, through, payload)
+		},
+		AfterCommit: func(*state.TransactionStatusCheckpointRef) error {
+			order = append(order, "status-after")
+			return nil
+		},
+	}))
+	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
+		Install: func(deltas []accounts.SlotDelta, metadata map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
+			order = append(order, "events-install")
+			return rootedevents.PrepareSidecar(rootDir, deltas, metadata)
+		},
+		AfterCommit: func(*state.RootedEventBatchRef) error {
+			order = append(order, "events-after")
+			return errors.New("advisory cleanup failure")
+		},
+	}))
+	require.NoError(t, tail.RecordRootedEventSlot(5, 4, nil))
+	require.NoError(t, tail.RecordRootedEventSlot(6, 5, nil))
+
+	job, err := tail.buildFoldJob(6, false)
+	require.NoError(t, err)
+	require.Equal(t, []string{"status-snapshot"}, order)
+	require.NoError(t, runFoldJob(committer, job), "advisory cleanup must not fail a durable fold")
+	require.Equal(t, []string{
+		"status-snapshot", "status-install", "events-install", "account-commit", "status-after", "events-after",
+	}, order)
+	require.NotNil(t, job.ctx.TransactionStatusCheckpoint)
+	require.NotNil(t, job.ctx.RootedEventBatch)
+}
+
+func TestFoldJobRootedEventInstallFailureCannotCommitOrPrune(t *testing.T) {
+	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
+	tail := asyncTestTail(fc, 5, 6)
+	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
+		Install: func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
+			return nil, errors.New("sidecar fsync failed")
+		},
+	}))
+	require.NoError(t, tail.RecordRootedEventSlot(5, 4, nil))
+	require.NoError(t, tail.RecordRootedEventSlot(6, 5, nil))
+
+	job, err := tail.buildFoldJob(6, false)
+	require.NoError(t, err)
+	require.ErrorContains(t, runFoldJob(fc, job), "sidecar fsync failed")
+	require.Empty(t, fc.committed)
+	require.Equal(t, 2, tail.overlay.HeldSlots())
+	require.Contains(t, tail.transactions, uint64(5))
+	require.Contains(t, tail.transactions, uint64(6))
 }
 
 func TestFoldJobCheckpointFailuresCannotReachCommitBatch(t *testing.T) {
@@ -264,7 +432,7 @@ func TestBuildFoldJobRefusesMissingContext(t *testing.T) {
 func TestAsyncPromoterOffLoopAndDrain(t *testing.T) {
 	sc := &slowCommitter{fakeCommitter: fakeCommitter{durable: accounts.NewMemAccounts()}, delay: 60 * time.Millisecond}
 	tail := asyncTestTail(sc, 5, 6, 7)
-	p := newAsyncPromoter(sc)
+	p := newAsyncPromoter(sc, nil)
 	defer p.stop()
 
 	job, err := tail.buildFoldJob(7, false)
@@ -292,6 +460,29 @@ func TestAsyncPromoterOffLoopAndDrain(t *testing.T) {
 	assert.Equal(t, 1, tail.overlay.HeldSlots())
 }
 
+func TestAsyncPromoterOrdersTailDurableGenerationAtAdmission(t *testing.T) {
+	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
+	tail := asyncTestTail(fc, 5, 6, 7)
+	beforeAdmission := tail.captureBank(7)
+	job, err := tail.buildFoldJob(7, false)
+	require.NoError(t, err)
+
+	p := newAsyncPromoter(tail.asyncCommitter, &tail.durableGeneration)
+	defer p.stop()
+	p.enqueue(job)
+	_, err = beforeAdmission.GetAccount(7, testKey(3))
+	require.ErrorIs(t, err, errCapturedBankStale)
+
+	afterAdmission := tail.captureBank(7)
+	res := p.drain()
+	require.NotNil(t, res)
+	require.NoError(t, res.err)
+	tail.applyFoldJob(res.job)
+
+	_, err = afterAdmission.GetAccount(7, testKey(3))
+	require.NoError(t, err)
+}
+
 func TestFoldCapacityBackpressureDrainsOneAdmittedFold(t *testing.T) {
 	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
 	tail := newUnrootedTail(&fakeDurable{}, fc, 2, 2, "")
@@ -302,7 +493,7 @@ func TestFoldCapacityBackpressureDrainsOneAdmittedFold(t *testing.T) {
 	job, err := tail.buildFoldJob(2, false)
 	require.NoError(t, err)
 	require.NotNil(t, job)
-	p := newAsyncPromoter(fc)
+	p := newAsyncPromoter(fc, nil)
 	defer p.stop()
 	p.enqueue(job)
 
@@ -340,7 +531,7 @@ func TestFoldCapacityBackpressureFailsClosed(t *testing.T) {
 		}
 		job, err := tail.buildFoldJob(3, false)
 		require.NoError(t, err)
-		p := newAsyncPromoter(fc)
+		p := newAsyncPromoter(fc, nil)
 		defer p.stop()
 		p.enqueue(job)
 
@@ -362,7 +553,7 @@ func TestFoldCapacityBackpressureFailsClosed(t *testing.T) {
 			tail.Add(slot, nil, testHashBytes(byte(slot)))
 			tail.SetContext(slot, &state.ResumeContext{Slot: slot})
 		}
-		p := newAsyncPromoter(fc)
+		p := newAsyncPromoter(fc, nil)
 		defer p.stop()
 
 		require.True(t, settleInFlightFoldAtCapacity(tail, p, 3, nil))
@@ -378,7 +569,7 @@ func TestFoldCapacityBackpressureFailsClosed(t *testing.T) {
 		}
 		job, err := tail.buildFoldJob(2, false)
 		require.NoError(t, err)
-		p := newAsyncPromoter(fc)
+		p := newAsyncPromoter(fc, nil)
 		defer p.stop()
 		p.enqueue(job)
 		tail.Add(3, nil, testHashBytes(3)) // deliberately omit SetContext(3)
@@ -398,7 +589,7 @@ func TestFoldCapacityBackpressureFailsClosed(t *testing.T) {
 func TestAsyncPromoterFailedFoldRetries(t *testing.T) {
 	fc := &fakeCommitter{durable: accounts.NewMemAccounts(), failOn: 5}
 	tail := asyncTestTail(fc, 5, 6, 7)
-	p := newAsyncPromoter(fc)
+	p := newAsyncPromoter(fc, nil)
 	defer p.stop()
 
 	job, err := tail.buildFoldJob(7, false)
@@ -421,9 +612,8 @@ func TestAsyncPromoterFailedFoldRetries(t *testing.T) {
 	assert.Equal(t, 1, tail.overlay.HeldSlots())
 }
 
-// Codex item 5 — the shutdown gate proof: the flush path folds THROUGH THE
-// GATE-DERIVED TARGET AND NO FURTHER, even under force. Slots above
-// min(finality, verified) stay in RAM no matter how the process exits.
+// The shutdown flush uses the same gate-derived target as normal promotion.
+// Slots above min(finality, verified) stay in RAM even under a forced flush.
 func TestShutdownFlushCannotFoldPastGateTarget(t *testing.T) {
 	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
 	tail := asyncTestTail(fc, 5, 6, 7, 8, 9)

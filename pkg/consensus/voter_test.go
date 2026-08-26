@@ -11,6 +11,8 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/gagliardetto/solana-go"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -44,6 +46,148 @@ func TestAlpenglowVoterLoopFailureClosesAdmission(t *testing.T) {
 		require.ErrorContains(t, voter.enqueue(voterEvent{kind: voterEventFirstShred, slot: 43}), "closed")
 	}
 	require.Empty(t, voter.events, "closed voter retained events without a consumer")
+}
+
+func TestAlpenglowVoterRecordsBlockEventLatency(t *testing.T) {
+	engine, err := NewEngine(Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, engine.Close()) })
+	voter := &alpenglowVoter{
+		engine:  engine,
+		history: alpenglow.NewVoteHistory(solana.PublicKey{}, 0),
+	}
+	block := alpenglow.ReplayBlockObservation{
+		Block: alpenglow.BlockID{Hash: solana.Hash{1}},
+		At:    time.Now().Add(-2 * time.Second),
+	}
+
+	require.NoError(t, voter.handle(voterEvent{kind: voterEventBlock, block: block}))
+	stats := voter.snapshot()
+	require.Equal(t, uint64(1), stats.BlockEventLatencyCount)
+	require.GreaterOrEqual(t, stats.BlockEventLatencyUS, uint64(time.Second/time.Microsecond))
+	require.Equal(t, stats.BlockEventLatencyUS, stats.BlockEventLatencyMaxUS)
+
+	block.At = time.Time{}
+	require.NoError(t, voter.handle(voterEvent{kind: voterEventBlock, block: block}))
+	block.At = time.Now().Add(-2 * time.Second)
+	require.NoError(t, voter.handle(voterEvent{kind: voterEventFirstShred, block: block}))
+	require.Equal(t, uint64(1), voter.snapshot().BlockEventLatencyCount)
+}
+
+func TestPublishVotingMetricsUsesBoundedStageAndPeerLabels(t *testing.T) {
+	stats := VotingStats{
+		VotesCastThisRun:               1,
+		NetworkLandedVotes:             2,
+		BlockEventLatencyCount:         3,
+		BlockEventLatencyUS:            4,
+		BlockEventLatencyMaxUS:         5,
+		HistoryPersistCount:            6,
+		HistoryPersistUS:               7,
+		HistoryPersistMaxUS:            8,
+		LocalVoteInjectCount:           9,
+		LocalVoteInjectUS:              10,
+		LocalVoteInjectMaxUS:           11,
+		BroadcastMessageQueueWaitCount: 12,
+		BroadcastMessageQueueWaitUS:    13,
+		BroadcastMessageQueueWaitMaxUS: 14,
+		BroadcastPeerSendWaitCount:     15,
+		BroadcastPeerSendWaitUS:        16,
+		BroadcastPeerSendWaitMaxUS:     17,
+		BroadcastSendDatagramCount:     18,
+		BroadcastSendDatagramUS:        19,
+		BroadcastSendDatagramMaxUS:     20,
+		BroadcastDesiredPeers:          21,
+		BroadcastActiveConnections:     22,
+		BroadcastPendingConnections:    23,
+		BroadcastMessagesQueued:        24,
+		BroadcastMessagesDropped:       25,
+		BroadcastPeerSends:             26,
+		BroadcastPeerSendsSkipped:      27,
+		BroadcastPeerSendErrors:        28,
+		BroadcastConnectionAttempts:    29,
+		BroadcastConnectionErrors:      30,
+		BroadcastConnectionJobsDropped: 31,
+		BroadcastPeerSendJobsDropped:   32,
+		BroadcastMessagesNoConnections: 33,
+		BroadcastMessageQueueDepth:     34,
+		BroadcastPeerSendQueueDepth:    35,
+		BroadcastConnectionQueueDepth:  36,
+	}
+	publishVotingMetrics(stats)
+
+	require.Equal(t, map[string]struct{}{
+		"votes_cast": {}, "network_landed": {}, "replay_to_voter_event": {},
+		"history_persist": {}, "local_vote_inject": {}, "message_queue_wait": {},
+		"peer_send_wait": {}, "send_datagram": {},
+	}, gatheredMetricLabelValues(t, "mithril_voter_stage_observations", "stage"))
+	require.Equal(t, map[string]struct{}{
+		"replay_to_voter_event": {}, "history_persist": {}, "local_vote_inject": {},
+		"message_queue_wait": {}, "peer_send_wait": {}, "send_datagram": {},
+	}, gatheredMetricLabelValues(t, "mithril_voter_stage_latency_us", "stage"))
+	require.Equal(t, map[string]struct{}{"total": {}, "max": {}},
+		gatheredMetricLabelValues(t, "mithril_voter_stage_latency_us", "statistic"))
+	require.Equal(t, map[string]struct{}{"desired": {}, "active": {}, "pending": {}},
+		gatheredMetricLabelValues(t, "mithril_voter_peer_connections", "state"))
+	require.Equal(t, map[string]struct{}{
+		"messages_queued": {}, "messages_dropped": {}, "sends": {}, "sends_skipped": {},
+		"send_errors": {}, "connection_attempts": {}, "connection_errors": {},
+		"connection_jobs_dropped": {}, "send_jobs_dropped": {}, "messages_no_connections": {},
+	}, gatheredMetricLabelValues(t, "mithril_voter_peer_events", "event"))
+	require.Equal(t, map[string]struct{}{"message": {}, "send": {}, "connection": {}},
+		gatheredMetricLabelValues(t, "mithril_voter_peer_queue_depth", "queue"))
+	require.Equal(t, float64(4), gatheredGaugeValue(t, "mithril_voter_stage_latency_us", map[string]string{"stage": "replay_to_voter_event", "statistic": "total"}))
+	require.Equal(t, float64(22), gatheredGaugeValue(t, "mithril_voter_peer_connections", map[string]string{"state": "active"}))
+	require.Equal(t, float64(28), gatheredGaugeValue(t, "mithril_voter_peer_events", map[string]string{"event": "send_errors"}))
+	require.Equal(t, float64(35), gatheredGaugeValue(t, "mithril_voter_peer_queue_depth", map[string]string{"queue": "send"}))
+}
+
+func TestVotingStatsLogPathPublishesMetrics(t *testing.T) {
+	voter := &alpenglowVoter{stats: VotingStats{VotesCastThisRun: 41}}
+	voter.maybeLogStats()
+	require.Equal(t, float64(41), gatheredGaugeValue(t, "mithril_voter_stage_observations", map[string]string{"stage": "votes_cast"}))
+}
+
+func gatheredMetricLabelValues(t *testing.T, familyName, labelName string) map[string]struct{} {
+	t.Helper()
+	values := make(map[string]struct{})
+	for _, metric := range gatheredMetricFamily(t, familyName).GetMetric() {
+		for _, label := range metric.GetLabel() {
+			if label.GetName() == labelName {
+				values[label.GetValue()] = struct{}{}
+			}
+		}
+	}
+	return values
+}
+
+func gatheredGaugeValue(t *testing.T, familyName string, wantLabels map[string]string) float64 {
+	t.Helper()
+	for _, metric := range gatheredMetricFamily(t, familyName).GetMetric() {
+		matched := len(metric.GetLabel()) == len(wantLabels)
+		for _, label := range metric.GetLabel() {
+			if wantLabels[label.GetName()] != label.GetValue() {
+				matched = false
+			}
+		}
+		if matched {
+			return metric.GetGauge().GetValue()
+		}
+	}
+	t.Fatalf("metric family %s has no sample with labels %v", familyName, wantLabels)
+	return 0
+}
+
+func gatheredMetricFamily(t *testing.T, familyName string) *dto.MetricFamily {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() == familyName {
+			return family
+		}
+	}
+	t.Fatalf("gathered Prometheus output missing %s", familyName)
+	return nil
 }
 
 func TestEnableVotingRejectsDifferentTransportIdentity(t *testing.T) {
