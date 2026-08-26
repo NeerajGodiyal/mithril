@@ -501,6 +501,32 @@ func FlushPendingStakePubkeys(accountsDbDir string) (int, error) {
 	return FlushPendingStakePubkeysThrough(accountsDbDir, math.MaxUint64)
 }
 
+func recoverIncompleteStakeIndexTail(f *os.File, size int64) (int64, error) {
+	if size == 0 {
+		return 0, nil
+	}
+	var header [8]byte
+	if _, err := f.ReadAt(header[:], 0); err != nil {
+		return 0, fmt.Errorf("reading stake pubkey index header: %w", err)
+	}
+	if string(header[:4]) != string(accountsdb.StakeIndexMagic[:]) {
+		return size, nil
+	}
+	if version := binary.LittleEndian.Uint32(header[4:]); version != accountsdb.StakeIndexVersion {
+		return 0, fmt.Errorf("stake pubkey index: unsupported version %d", version)
+	}
+	if rem := (size - int64(len(header))) % accountsdb.StakeIndexRecordSize; rem != 0 {
+		size -= rem
+		if err := f.Truncate(size); err != nil {
+			return 0, fmt.Errorf("recovering partial stake pubkey index record: %w", err)
+		}
+		if err := f.Sync(); err != nil {
+			return 0, fmt.Errorf("syncing recovered stake pubkey index: %w", err)
+		}
+	}
+	return size, nil
+}
+
 // FlushPendingStakePubkeysThrough appends pending stake entries for slots <=
 // through to the index file and fsyncs. Called at FOLD time, BEFORE the batch
 // commit that makes those slots durable: on the index side a crash can then
@@ -552,7 +578,11 @@ func FlushPendingStakePubkeysThrough(accountsDbDir string, through uint64) (int,
 		restore()
 		return 0, fmt.Errorf("stat stake pubkey index: %w", err)
 	}
-	originalSize := info.Size()
+	originalSize, err := recoverIncompleteStakeIndexTail(f, info.Size())
+	if err != nil {
+		restore()
+		return 0, err
+	}
 	rollback := func(cause error) error {
 		truncateErr := f.Truncate(originalSize)
 		syncErr := f.Sync()
@@ -671,18 +701,14 @@ func LoadStakePubkeyIndex(accountsDbDir string) ([]accountsdb.StakeIndexEntry, e
 	// Detect format: current format starts with "STKI" magic
 	if len(data) >= 8 && string(data[0:4]) == "STKI" {
 		if rem := (len(data) - 8) % accountsdb.StakeIndexRecordSize; rem != 0 {
-			validSize := int64(len(data) - rem)
-			f, err := os.OpenFile(indexPath, os.O_WRONLY, 0)
+			f, err := os.OpenFile(indexPath, os.O_RDWR, 0)
 			if err != nil {
 				return nil, fmt.Errorf("opening partial stake pubkey index record: %w", err)
 			}
-			if err := f.Truncate(validSize); err != nil {
+			validSize, recoverErr := recoverIncompleteStakeIndexTail(f, int64(len(data)))
+			if recoverErr != nil {
 				f.Close()
-				return nil, fmt.Errorf("recovering partial stake pubkey index record: %w", err)
-			}
-			if err := f.Sync(); err != nil {
-				f.Close()
-				return nil, fmt.Errorf("syncing recovered stake pubkey index: %w", err)
+				return nil, recoverErr
 			}
 			if err := f.Close(); err != nil {
 				return nil, fmt.Errorf("closing recovered stake pubkey index: %w", err)
