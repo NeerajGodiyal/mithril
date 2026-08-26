@@ -315,7 +315,7 @@ func loadTransactionStatusCacheForReplay(
 	}
 
 	if expectedRoot != snapshotRoot {
-		return nil, fmt.Errorf("durable replay parent %d is past snapshot root %d but its committed transaction status checkpoint reference is missing; re-bootstrap from a fresh snapshot", expectedRoot, snapshotRoot)
+		return nil, fmt.Errorf("durable replay parent %d is past snapshot root %d but its committed transaction status checkpoint reference is missing; preserve this AccountsDB and rebuild from snapshot into a distinct empty root", expectedRoot, snapshotRoot)
 	}
 
 	seedPath := filepath.Join(accountsDbPath, txstatus.SnapshotSeedFileName)
@@ -324,7 +324,7 @@ func loadTransactionStatusCacheForReplay(
 		if errors.Is(err, os.ErrNotExist) && expectedRoot == 0 {
 			return NewTransactionStatusCache(), nil
 		}
-		return nil, fmt.Errorf("load transaction status cache seed %s for replay parent %d: %w (a fresh snapshot or matching durable status checkpoint is required)",
+		return nil, fmt.Errorf("load transaction status cache seed %s for replay parent %d: %w; preserve this AccountsDB and rebuild from snapshot into a distinct empty root when no matching durable status checkpoint exists",
 			seedPath, expectedRoot, err)
 	}
 	deltas, err := txstatus.DecodeAgaveSnapshot(data)
@@ -632,6 +632,27 @@ func (c *TransactionStatusCache) commitBlockWithPlan(block *b.Block, plan blockT
 		hasBlockID: block.HasAlpenglowBlockID,
 		parent:     c.tip,
 		delta:      delta,
+	}
+	return nil
+}
+
+// commitRootedStatusAndEvents publishes the fallible in-memory domains before
+// callers make the slot visible in the rooted account tail. If event capture
+// rejects the slot, the just-published status node is removed synchronously.
+func commitRootedStatusAndEvents(
+	transactionStatuses *TransactionStatusCache,
+	block *b.Block,
+	commitStatus func() error,
+	recordEvents func() error,
+) error {
+	if err := commitStatus(); err != nil {
+		return err
+	}
+	if err := recordEvents(); err != nil {
+		if unwindErr := transactionStatuses.Unwind(block.Slot); unwindErr != nil {
+			return errors.Join(err, fmt.Errorf("roll back transaction statuses for slot %d: %w", block.Slot, unwindErr))
+		}
+		return err
 	}
 	return nil
 }

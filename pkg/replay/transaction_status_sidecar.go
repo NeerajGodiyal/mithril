@@ -63,17 +63,20 @@ func PrepareTransactionStatusCheckpoint(accountsDBRoot string, root uint64, payl
 	if err != nil {
 		return nil, err
 	}
-	dirWasMissing := false
-	if _, err := os.Stat(dir); err != nil {
-		if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("stat transaction status checkpoint directory: %w", err)
+	exists, err := transactionStatusCheckpointDirectoryExists(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create transaction status checkpoint directory: %w", err)
 		}
-		dirWasMissing = true
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create transaction status checkpoint directory: %w", err)
-	}
-	if dirWasMissing {
+		if exists, err = transactionStatusCheckpointDirectoryExists(dir); err != nil || !exists {
+			if err == nil {
+				err = errors.New("created transaction status checkpoint directory is missing")
+			}
+			return nil, err
+		}
 		// Make creation of the sidecar directory itself durable. Syncing only the
 		// new directory does not persist its entry in the AccountsDB parent.
 		if err := syncTransactionStatusDirectory(filepath.Dir(dir)); err != nil {
@@ -104,7 +107,7 @@ func PrepareTransactionStatusCheckpoint(accountsDBRoot string, root uint64, payl
 		_ = os.Remove(tmpPath)
 	}()
 
-	if err := tmp.Chmod(0o644); err != nil {
+	if err := tmp.Chmod(0o444); err != nil {
 		return nil, fmt.Errorf("chmod transaction status checkpoint temporary: %w", err)
 	}
 	if _, err := io.Copy(tmp, bytes.NewReader(payload)); err != nil {
@@ -179,6 +182,13 @@ func ReadTransactionStatusCheckpoint(accountsDBRoot string, ref *state.Transacti
 	if err != nil {
 		return nil, err
 	}
+	exists, err := transactionStatusCheckpointDirectoryExists(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, errors.New("transaction status checkpoint directory is missing")
+	}
 	path := filepath.Join(dir, ref.File)
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -237,6 +247,13 @@ func CleanupTransactionStatusCheckpoints(accountsDBRoot string, keep []*state.Tr
 	if err != nil {
 		return nil, err
 	}
+	exists, err := transactionStatusCheckpointDirectoryExists(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, nil
+	}
 	keptFiles := make(map[string]struct{}, len(keep))
 	for _, ref := range keep {
 		if ref == nil {
@@ -291,6 +308,20 @@ func transactionStatusCheckpointDir(accountsDBRoot string) (string, error) {
 		return "", fmt.Errorf("resolve AccountsDB root for transaction status checkpoint: %w", err)
 	}
 	return filepath.Join(filepath.Clean(absRoot), TransactionStatusCheckpointDirectory), nil
+}
+
+func transactionStatusCheckpointDirectoryExists(dir string) (bool, error) {
+	info, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("stat transaction status checkpoint directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return false, errors.New("transaction status checkpoint path is not a real non-symlink directory")
+	}
+	return true, nil
 }
 
 func transactionStatusCheckpointBasename(root uint64, digest string) string {
