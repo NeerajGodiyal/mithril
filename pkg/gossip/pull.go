@@ -2,14 +2,19 @@ package gossip
 
 import "fmt"
 
-// Outbound CRDS PullRequest: asks a peer to dump its CRDS table so a fresh node
-// bootstraps its peer/repair set (without it, discovery stalls at ~1 peer). The
-// byte layout is pinned by pull_test.go's golden test.
+// Outbound CRDS PullRequest: asks a peer for one partition of its CRDS table so
+// a fresh node bootstraps its peer/repair set. The byte layout is pinned by
+// pull_test.go's golden test.
 
-// encodeCrdsFilterMatchAll writes a filter that matches everything, so the peer
-// returns its whole table. An empty keys list degenerates to "I have everything"
-// (returns nothing), so keys holds one seed over all-zero bits.
-func encodeCrdsFilterMatchAll(e *encoder, seed uint64) {
+// Current Agave rejects incoming pull filters with fewer than six mask bits.
+// Sixty-four partitions cover the complete hash space while keeping each reply
+// bounded. An empty Bloom filter asks for every value in the selected partition.
+const (
+	crdsPullMaskBits   = uint32(6)
+	crdsPullPartitions = uint64(1) << crdsPullMaskBits
+)
+
+func encodeCrdsFilterPartition(e *encoder, seed, partition uint64) {
 	// Bloom.keys: Vec<u64> = len + one seed
 	e.u64(1)
 	e.u64(seed)
@@ -21,15 +26,17 @@ func encodeCrdsFilterMatchAll(e *encoder, seed uint64) {
 	// Bloom.num_bits_set
 	e.u64(0)
 	// CrdsFilter.mask + mask_bits
-	e.u64(^uint64(0)) // mask = u64::MAX (single partition = whole hash space)
-	e.u32(0)          // mask_bits = 0
+	partition %= crdsPullPartitions
+	mask := partition<<(64-crdsPullMaskBits) | ^uint64(0)>>crdsPullMaskBits
+	e.u64(mask)
+	e.u32(crdsPullMaskBits)
 }
 
-// encodePullRequest builds Protocol::PullRequest(match-all filter, our ContactInfo).
-func encodePullRequest(value CrdsValue, seed uint64) ([]byte, error) {
+// encodePullRequest builds Protocol::PullRequest(partition filter, our ContactInfo).
+func encodePullRequest(value CrdsValue, seed, partition uint64) ([]byte, error) {
 	var e encoder
 	e.variant(protocolPullRequest)
-	encodeCrdsFilterMatchAll(&e, seed)
+	encodeCrdsFilterPartition(&e, seed, partition)
 	value.encode(&e)
 	if len(e.bytes()) > packetDataSize {
 		return nil, fmt.Errorf("pull request size %d exceeds packet size %d", len(e.bytes()), packetDataSize)

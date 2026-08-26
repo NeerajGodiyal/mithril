@@ -1,12 +1,17 @@
 package rpcclient
 
 import (
+	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/internal/safedisplay"
 	"github.com/gagliardetto/solana-go/rpc"
+	"github.com/gagliardetto/solana-go/rpc/jsonrpc"
 )
+
+const defaultRequestTimeout = 30 * time.Second
 
 type RpcClient struct {
 	client   *rpc.Client
@@ -21,7 +26,13 @@ func (e displaySafeError) Error() string { return SanitizeErrorForDisplay(e.err)
 func (e displaySafeError) Unwrap() error { return e.err }
 
 func NewRpcClient(endpoint string) *RpcClient {
-	client := rpc.New(endpoint)
+	return newRpcClient(endpoint, defaultRequestTimeout)
+}
+
+func newRpcClient(endpoint string, timeout time.Duration) *RpcClient {
+	client := rpc.NewWithCustomRPCClient(jsonrpc.NewClientWithOpts(endpoint, &jsonrpc.RPCClientOpts{
+		HTTPClient: &http.Client{Timeout: timeout},
+	}))
 	return &RpcClient{client: client, endpoint: endpoint}
 }
 

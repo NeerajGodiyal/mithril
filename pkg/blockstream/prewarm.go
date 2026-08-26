@@ -25,9 +25,10 @@ import (
 // repair hole into spooled blocks handed to the BlockSource at replay
 // start.
 type TurbinePrewarm struct {
-	cancel   context.CancelFunc
-	done     chan struct{}
-	receiver *turbine.UDPReceiver
+	cancel     context.CancelFunc
+	done       chan struct{}
+	gossipDone chan struct{}
+	receiver   *turbine.UDPReceiver
 
 	mu        sync.Mutex
 	spool     map[uint64]*b.Block
@@ -155,16 +156,18 @@ func StartTurbinePrewarm(cfg TurbinePrewarmConfig) (*TurbinePrewarm, error) {
 	}
 
 	pw := &TurbinePrewarm{
-		cancel:    cancel,
-		done:      make(chan struct{}),
-		receiver:  receiver,
-		spool:     make(map[uint64]*b.Block),
-		floor:     cfg.FloorSlot,
-		probeNext: cfg.FloorSlot + prewarmProbeSlots,
-		capacity:  cfg.MaxSpoolBlocks,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+		gossipDone: make(chan struct{}),
+		receiver:   receiver,
+		spool:      make(map[uint64]*b.Block),
+		floor:      cfg.FloorSlot,
+		probeNext:  cfg.FloorSlot + prewarmProbeSlots,
+		capacity:   cfg.MaxSpoolBlocks,
 	}
 
 	go func() {
+		defer close(pw.gossipDone)
 		if err := client.Run(ctx); err != nil && ctx.Err() == nil {
 			mlog.Log.FileOnlyf("turbine prewarm gossip exited: %v", err)
 		}
@@ -177,16 +180,21 @@ func StartTurbinePrewarm(cfg TurbinePrewarmConfig) (*TurbinePrewarm, error) {
 	select {
 	case err := <-receiverDone:
 		cancel()
+		<-pw.gossipDone
 		close(pw.done)
 		return nil, fmt.Errorf("prewarm receiver failed to start: %v", err)
 	case rerr := <-receiver.Ready():
 		if rerr != nil {
 			cancel()
+			<-receiverDone
+			<-pw.gossipDone
 			close(pw.done)
 			return nil, fmt.Errorf("prewarm receiver not ready: %v", rerr)
 		}
 	case <-time.After(15 * time.Second):
 		cancel()
+		<-receiverDone
+		<-pw.gossipDone
 		close(pw.done)
 		return nil, fmt.Errorf("prewarm receiver not ready within 15s")
 	}
@@ -265,6 +273,32 @@ func (pw *TurbinePrewarm) add(blk *b.Block) {
 	}
 }
 
+// AdvanceFloor moves a full-snapshot prewarm to the fresher incremental
+// manifest frontier. Blocks below that frontier cannot be replayed, so keeping
+// them would spend repair bandwidth on work that bootstrap will discard.
+func (pw *TurbinePrewarm) AdvanceFloor(floor uint64) {
+	if pw == nil || floor == 0 {
+		return
+	}
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+	if pw.stopped || floor <= pw.floor {
+		return
+	}
+	pw.floor = floor
+	pw.probeNext = floor + prewarmProbeSlots
+	for slot := range pw.spool {
+		if slot < floor {
+			delete(pw.spool, slot)
+		}
+	}
+	if pw.receiver != nil {
+		pw.receiver.SetRetentionFloor(floor)
+		pw.receiver.SetHydrationWindow(floor, floor+repairCatchupLiveDeliverWindow)
+		pw.receiver.PrioritizeRepairRange(floor, floor+prewarmProbeSlots-1)
+	}
+}
+
 // Handover stops collection (freeing the turbine bind port for the
 // BlockSource) and returns the spooled blocks in ascending slot order,
 // along with how many overflowed the spool.
@@ -333,10 +367,12 @@ func (pw *TurbinePrewarm) Stop() {
 	if pw.stopped {
 		pw.mu.Unlock()
 		<-pw.done
+		<-pw.gossipDone
 		return
 	}
 	pw.stopped = true
 	pw.mu.Unlock()
 	pw.cancel()
 	<-pw.done
+	<-pw.gossipDone
 }

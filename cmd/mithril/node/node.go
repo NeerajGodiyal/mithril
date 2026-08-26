@@ -1538,8 +1538,10 @@ func runLive(c *cobra.Command, args []string) {
 				// schedule horizon missed the resume region, this rebuild is
 				// what turns the receiver's missing-leader drops into
 				// verified shreds.
-				if seedManifestStakes(m) {
-					ensureLeaderSchedule(m)
+				if seedManifestStakes(m) && ensureLeaderSchedule(m) {
+					floor := m.Bank.Slot + 1
+					turbinePrewarm.AdvanceFloor(floor)
+					mlog.Log.Infof("turbine prewarm: advanced replay frontier to slot %d from the incremental manifest", floor)
 				}
 				return
 			}

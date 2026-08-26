@@ -87,6 +87,7 @@ type Client struct {
 	txPingMessages   atomic.Uint64
 	txPongMessages   atomic.Uint64
 	txPullResponses  atomic.Uint64
+	pullPartition    atomic.Uint64
 	lastRxUnix       atomic.Int64
 	lastTxUnix       atomic.Int64
 }
@@ -290,6 +291,9 @@ func (c *Client) Run(ctx context.Context) error {
 		return err
 	}
 	_ = c.sendPing(conn, c.entrypoint)
+	// The first pull normally triggers the remote peer's ping challenge. Sending
+	// it now lets the first ticker retry after we have answered that challenge.
+	_ = c.sendPullRequests(conn)
 
 	pushTicker := time.NewTicker(c.cfg.PushInterval)
 	defer pushTicker.Stop()
@@ -478,7 +482,7 @@ func (c *Client) pushContact(conn *net.UDPConn) error {
 	for _, peer := range c.currentPeers() {
 		if err := sendUDP(conn, packet, peer); err != nil {
 			c.txErrors.Add(1)
-			return err
+			continue
 		}
 		c.recordTx()
 		c.txPushMessages.Add(1)
@@ -516,23 +520,21 @@ func (c *Client) sendPullRequests(conn *net.UDPConn) error {
 	if _, err := rand.Read(seedBytes[:]); err != nil {
 		return err
 	}
-	packet, err := encodePullRequest(value, binary.LittleEndian.Uint64(seedBytes[:]))
-	if err != nil {
-		return err
-	}
-	// Pull from a bounded window each tick rather than flooding every peer (avoids
-	// peers rate-limiting our gossip, which the shared turbine path relies on). Start
-	// offset is derived from the random seed so the window rotates over time.
+	// Pull from a bounded peer window rather than flooding every peer. Partitions
+	// rotate independently so a small peer table still covers the CRDS hash space.
 	peers := c.currentPeers()
 	if len(peers) == 0 {
 		return nil
 	}
 	start := int(binary.LittleEndian.Uint64(seedBytes[:]) % uint64(len(peers)))
+	seed := binary.LittleEndian.Uint64(seedBytes[:])
+	firstPartition := c.pullPartition.Add(maxPullRequestsPerTick) - maxPullRequestsPerTick
 	n := maxPullRequestsPerTick
-	if n > len(peers) {
-		n = len(peers)
-	}
 	for i := 0; i < n; i++ {
+		packet, err := encodePullRequest(value, seed+uint64(i), firstPartition+uint64(i))
+		if err != nil {
+			return err
+		}
 		if err := sendUDP(conn, packet, peers[(start+i)%len(peers)]); err != nil {
 			c.txErrors.Add(1)
 			continue
