@@ -91,6 +91,7 @@ func TestSchedulerCleanupDropsExpired(t *testing.T) {
 
 	// Force an expired blockhash while keeping a unique message hash.
 	expired := solana.Hash{0xee}
+	tx.Message.RecentBlockhash = expired
 	e := &entry{
 		tx:          tx,
 		wireSize:    len(wire),
@@ -116,6 +117,7 @@ func TestSchedulerMaybeCleanupAfterInsertInterval(t *testing.T) {
 	wire := txfixture.MustSignedTransferWire(4)
 	tx, err := solana.TransactionFromBytes(wire)
 	require.NoError(t, err)
+	tx.Message.RecentBlockhash = solana.Hash{0xee}
 	reward, mh, err := scoreTransaction(tx, sched.feats)
 	require.NoError(t, err)
 
@@ -123,7 +125,7 @@ func TestSchedulerMaybeCleanupAfterInsertInterval(t *testing.T) {
 		tx:          tx,
 		wireSize:    len(wire),
 		messageHash: mh,
-		blockhash:   solana.Hash{0xee},
+		blockhash:   tx.Message.RecentBlockhash,
 		reward:      reward,
 		seq:         1,
 	})
@@ -279,6 +281,6 @@ func TestSchedulerCopiesPooledPacketBytes(t *testing.T) {
 func TestClassifyBufferedExpired(t *testing.T) {
 	env := blockprod.NewTestEnv(blockprod.TestEnvConfig{})
 	defer env.Close()
-	require.Equal(t, blockprod.BufferedExpired, env.Bank.ClassifyBuffered(solana.Hash{0x01}, [32]byte{}))
-	require.Equal(t, blockprod.BufferedKeep, env.Bank.ClassifyBuffered(txfixture.TestBlockhash(), [32]byte{0xab}))
+	require.Equal(t, blockprod.BufferedExpired, env.Bank.ClassifyBuffered(&solana.Transaction{Message: solana.Message{RecentBlockhash: solana.Hash{0x01}}}, [32]byte{}))
+	require.Equal(t, blockprod.BufferedKeep, env.Bank.ClassifyBuffered(&solana.Transaction{Message: solana.Message{RecentBlockhash: txfixture.TestBlockhash()}}, [32]byte{0xab}))
 }

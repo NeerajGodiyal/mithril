@@ -27,6 +27,7 @@ type TestEnvConfig struct {
 	EntryHash           solana.Hash
 	Sink                BatchSink
 	TransactionStatuses *replay.TransactionStatusView
+	CaptureRootedEvents bool
 }
 
 func NewTestEnv(cfg TestEnvConfig) *TestEnv {
@@ -69,6 +70,16 @@ func NewTestEnv(cfg TestEnvConfig) *TestEnv {
 	prevRent := sealevel.SysvarCache.Rent.Sysvar
 	rent := sealevel.NewDefaultRentSysvar()
 	sealevel.SysvarCache.Rent.Sysvar = &rent
+	bankSysvars, err := sealevel.NewBankSysvars(slotCtx.Slot,
+		&accounts.Account{Key: sealevel.SysvarRecentBlockHashesAddr, Lamports: 1, Data: rbh.MustMarshal()},
+		&accounts.Account{Key: sealevel.SysvarRentAddr, Lamports: 1, Data: rent.MustMarshal()},
+	)
+	if err != nil {
+		panic(err)
+	}
+	if err := slotCtx.PublishBankSysvars(bankSysvars); err != nil {
+		panic(err)
+	}
 
 	bank := NewWorkingBank(BankConfig{
 		SlotCtx:             slotCtx,
@@ -78,6 +89,7 @@ func NewTestEnv(cfg TestEnvConfig) *TestEnv {
 		EntryHash:           entryHash,
 		Sink:                cfg.Sink,
 		TransactionStatuses: statuses,
+		CaptureRootedEvents: cfg.CaptureRootedEvents,
 	})
 	controller := NewController()
 	controller.SetWorkingBank(bank)

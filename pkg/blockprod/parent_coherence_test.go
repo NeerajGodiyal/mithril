@@ -183,12 +183,12 @@ func TestLeaderSuppressesFooterIfGenerationSwitchesDuringCommit(t *testing.T) {
 	loop.activeParentChainedRoot = parent.ParentChainedMerkleRoot
 	loop.activeParentGeneration = parent.ReplayGeneration
 	commitCalled := false
-	loop.commitLeaderSlot = func(in replay.CommitLeaderInput) (*sealevel.SlotCtx, error) {
+	loop.commitLeaderSlot = func(in replay.CommitLeaderInput) (*replay.LeaderCommitResult, error) {
 		commitCalled = true
 		require.Equal(t, parent.ParentBlockID, solana.Hash(in.Block.AlpenglowParentBlockID))
 		in.SlotCtx.FinalBankhash = make([]byte, 32)
 		parent.ReplayGeneration++
-		return in.SlotCtx, nil
+		return &replay.LeaderCommitResult{SlotCtx: in.SlotCtx}, nil
 	}
 
 	loop.finishActiveSlotLocked()
@@ -196,4 +196,63 @@ func TestLeaderSuppressesFooterIfGenerationSwitchesDuringCommit(t *testing.T) {
 	assert.Nil(t, loop.activeBank)
 	assert.Zero(t, broadcaster.count(), "no footer or ending tick may be emitted for the stale parent generation")
 	assert.False(t, blockDelivered)
+}
+
+func TestLeaderSuppressesFooterIfCapturedAccountBankStalesDuringCommit(t *testing.T) {
+	global.ResetAlpenglowChainMetadata()
+	t.Cleanup(global.ResetAlpenglowChainMetadata)
+	const slot = uint64(96)
+	const parentSlot = slot - 1
+	global.SetReplayFrontier(parentSlot)
+	global.SetAlpenglowBlockID(parentSlot, solana.Hash{1})
+	global.SetAlpenglowChainedMerkleRoot(parentSlot, solana.Hash{2})
+	parent := coherentTestParentContext(parentSlot, solana.Hash{3})
+	parent.PrevFeeGovernor = &sealevel.FeeRateGovernor{
+		PrevLamportsPerSignature: 5000,
+		LamportsPerSignature:     5000,
+	}
+	broadcaster := &captureBroadcaster{}
+	identity := txfixture.PayerPrivateKey()
+	session := turbine.NewBroadcastSession(turbine.BroadcastSessionConfig{
+		Leader:                  identity,
+		Slot:                    slot,
+		ParentSlot:              parentSlot,
+		ParentBlockID:           parent.ParentBlockID,
+		ParentChainedMerkleRoot: parent.ParentChainedMerkleRoot,
+		Broadcaster:             broadcaster,
+	})
+	slotCtx := &sealevel.SlotCtx{
+		Slot:            slot,
+		ParentSlot:      parentSlot,
+		Features:        features.NewFeaturesDefault(),
+		FeeRateGovernor: parent.PrevFeeGovernor,
+	}
+	sink := NewShredSink(session)
+	bank := NewWorkingBank(BankConfig{SlotCtx: slotCtx, Slot: slot, Leader: identity.PublicKey(), Sink: sink})
+	loop := NewLeaderLoop(LeaderLoopConfig{
+		Identity:      identity,
+		AccountsDb:    &accountsdb.AccountsDb{},
+		EpochSchedule: &sealevel.SysvarEpochSchedule{SlotsPerEpoch: 1_000},
+		ParentContext: func(uint64) ParentContext { return parent },
+	})
+	loop.activeSlot = slot
+	loop.activeBank = bank
+	loop.activeSess = session
+	loop.activeSink = sink
+	loop.parentCtx = parent
+	loop.activeParentID = parent.ParentBlockID
+	loop.activeParentChainedRoot = parent.ParentChainedMerkleRoot
+	loop.activeParentGeneration = parent.ReplayGeneration
+	commitCalled := false
+	loop.commitLeaderSlot = func(in replay.CommitLeaderInput) (*replay.LeaderCommitResult, error) {
+		commitCalled = true
+		in.SlotCtx.FinalBankhash = make([]byte, 32)
+		in.SlotCtx.UnrootedRead = &failingAccountReadValidator{failAt: 1}
+		return &replay.LeaderCommitResult{SlotCtx: in.SlotCtx}, nil
+	}
+
+	loop.finishActiveSlotLocked()
+	require.True(t, commitCalled)
+	assert.Nil(t, loop.activeBank)
+	assert.Zero(t, broadcaster.count(), "no footer or ending tick may be emitted for a stale captured account bank")
 }

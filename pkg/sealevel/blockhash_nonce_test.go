@@ -5,11 +5,24 @@ import (
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type nonceAccountReader struct {
+	key     solana.PublicKey
+	account *accounts.Account
+}
+
+func (r nonceAccountReader) GetAccount(_ uint64, key solana.PublicKey) (*accounts.Account, error) {
+	if key != r.key || r.account == nil {
+		return nil, accountsdb.ErrNoAccount
+	}
+	return r.account.Clone(), nil
+}
 
 func marshalNonceCurrentState(t *testing.T, durableNonce [32]byte, authority solana.PublicKey) []byte {
 	t.Helper()
@@ -93,6 +106,23 @@ func TestIsTransactionAgeValid_NonceMissing_NilAccountsDb_ReturnsFalse(t *testin
 	require.NotPanics(t, func() {
 		assert.False(t, IsTransactionAgeValid(tx, instrs, slotCtx))
 	})
+}
+
+func TestIsTransactionAgeValidReadsNonceFromCapturedBank(t *testing.T) {
+	defer withEmptyRecentBlockhashesSysvar(t)()
+	authority := publicKeyForTest('A', 1)
+	noncePk := publicKeyForTest('N', 2)
+	durable := [32]byte{0xAA}
+	slotCtx := &SlotCtx{
+		Accounts: accounts.NewMemAccounts(), LastBlockhash: [32]byte{0x77},
+		UnrootedRead: nonceAccountReader{key: noncePk, account: &accounts.Account{
+			Key: noncePk, Owner: a.SystemProgramAddr, Data: marshalNonceCurrentState(t, durable, authority),
+		}},
+	}
+	require.True(t, IsTransactionAgeValid(
+		&solana.Transaction{Message: solana.Message{RecentBlockhash: durable}},
+		[]Instruction{makeAdvanceNonceAccountInstr(noncePk, authority)}, slotCtx,
+	))
 }
 
 func TestTransactionAgeUsesBankRecentBlockhashQueue(t *testing.T) {

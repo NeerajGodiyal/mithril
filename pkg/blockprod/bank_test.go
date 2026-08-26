@@ -1,9 +1,15 @@
 package blockprod
 
 import (
+	"encoding/binary"
+	"errors"
+	"math"
 	"sync"
 	"testing"
 
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
+	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/costmodel"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
@@ -15,6 +21,54 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+var errTestAccountBankStale = errors.New("test account bank stale")
+var errTestAccountSourceFailure = errors.New("test account source failure")
+
+type failingAccountReadValidator struct {
+	failAt      int
+	validations int
+}
+
+type failingStableAccountSource struct{}
+
+type singleAccountReader struct {
+	key     solana.PublicKey
+	account *accounts.Account
+}
+
+func (r singleAccountReader) GetAccount(_ uint64, key solana.PublicKey) (*accounts.Account, error) {
+	if key != r.key || r.account == nil {
+		return nil, accountsdb.ErrNoAccount
+	}
+	return r.account.Clone(), nil
+}
+
+func leaderLookupTableAccount(key solana.PublicKey, loaded ...solana.PublicKey) *accounts.Account {
+	data := make([]byte, sealevel.AddressLookupTableMetaSize+len(loaded)*solana.PublicKeyLength)
+	binary.LittleEndian.PutUint32(data, sealevel.AddressLookupTableProgramStateLookupTable)
+	binary.LittleEndian.PutUint64(data[4:], math.MaxUint64)
+	for i, address := range loaded {
+		copy(data[sealevel.AddressLookupTableMetaSize+i*solana.PublicKeyLength:], address[:])
+	}
+	return &accounts.Account{Key: key, Lamports: 1, Owner: [32]byte(addresses.AddressLookupTableAddr), Data: data}
+}
+
+func (failingStableAccountSource) GetAccount(uint64, solana.PublicKey) (*accounts.Account, error) {
+	return nil, errTestAccountSourceFailure
+}
+
+func (r *failingAccountReadValidator) GetAccount(uint64, solana.PublicKey) (*accounts.Account, error) {
+	return nil, accountsdb.ErrNoAccount
+}
+
+func (r *failingAccountReadValidator) ValidateAccountRead() error {
+	r.validations++
+	if r.validations >= r.failAt {
+		return errTestAccountBankStale
+	}
+	return nil
+}
 
 type captureSink struct {
 	batches [][]turbine.Entry
@@ -42,6 +96,8 @@ func TestWorkingBankDropsPayerThatCannotRemainRentExempt(t *testing.T) {
 	rentMin := rent.MinimumBalance(0)
 	require.Equal(t, uint64(890880), rentMin)
 	setPayerLamports(t, env, rentMin+5000-1)
+	payerBefore, err := env.SlotCtx.GetAccount(txfixture.PayerPubkey())
+	require.NoError(t, err)
 
 	destBefore, err := env.SlotCtx.GetAccount(txfixture.DestPubkey())
 	require.NoError(t, err)
@@ -51,10 +107,100 @@ func TestWorkingBankDropsPayerThatCannotRemainRentExempt(t *testing.T) {
 
 	destAfter, err := env.SlotCtx.GetAccount(txfixture.DestPubkey())
 	require.NoError(t, err)
+	payerAfter, err := env.SlotCtx.GetAccount(txfixture.PayerPubkey())
+	require.NoError(t, err)
+	assert.Equal(t, payerBefore.Lamports, payerAfter.Lamports)
 	assert.Equal(t, destBefore.Lamports, destAfter.Lamports)
 	assert.Empty(t, env.Bank.ForgedTransactions())
 	assert.Zero(t, env.Bank.CostTracker().BlockCost())
 	assert.Zero(t, env.Bank.EntryBuilder().PendingCount())
+	assert.Zero(t, env.Bank.TxFeeAccumulator().TotalFees)
+}
+
+func TestWorkingBankDropsPreExecutionInstructionErrorWithoutStopping(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{})
+	defer env.Close()
+	payer := txfixture.PayerPubkey()
+	limit := []byte{sealevel.ComputeBudgetInstrTypeSetComputeUnitLimit, 1, 0, 0, 0}
+	tx, err := solana.NewTransaction([]solana.Instruction{
+		solana.NewInstruction(addresses.ComputeBudgetProgramAddr, nil, limit),
+		solana.NewInstruction(addresses.ComputeBudgetProgramAddr, nil, limit),
+	}, txfixture.TestBlockhash(), solana.TransactionPayer(payer))
+	require.NoError(t, err)
+	privateKey := txfixture.PayerPrivateKey()
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key == payer {
+			return &privateKey
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	wire, err := tx.MarshalBinary()
+	require.NoError(t, err)
+
+	result, reason := env.Bank.Forge(wire)
+	require.Equal(t, ForgeDroppedExecution, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+	require.True(t, env.Bank.accepting)
+	require.Empty(t, env.Bank.ForgedTransactions())
+	require.Zero(t, env.Bank.EntryBuilder().PendingCount())
+}
+
+func TestWorkingBankForgesV0LookupTransactionAndPreservesWire(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{})
+	defer env.Close()
+	payer := txfixture.PayerPubkey()
+	destination := txfixture.DestPubkey()
+	tableKey := solana.PublicKey{0xa1, 1}
+	env.SlotCtx.UnrootedRead = singleAccountReader{
+		key: tableKey, account: leaderLookupTableAccount(tableKey, destination),
+	}
+	recent := sealevel.SysvarRecentBlockhashes{{
+		Blockhash: txfixture.TestBlockhash(), FeeCalculator: sealevel.FeeCalculator{LamportsPerSignature: 5000},
+	}}
+	rent := sealevel.NewDefaultRentSysvar()
+	slotHashes := sealevel.SysvarSlotHashes{}
+	bankSysvars, err := sealevel.NewBankSysvars(env.SlotCtx.Slot,
+		&accounts.Account{Key: sealevel.SysvarRecentBlockHashesAddr, Lamports: 1, Data: recent.MustMarshal()},
+		&accounts.Account{Key: sealevel.SysvarRentAddr, Lamports: 1, Data: rent.MustMarshal()},
+		&accounts.Account{Key: sealevel.SysvarSlotHashesAddr, Lamports: 1, Data: (&slotHashes).MustMarshal()},
+	)
+	require.NoError(t, err)
+	require.NoError(t, env.SlotCtx.PublishBankSysvars(bankSysvars))
+
+	tx, err := solana.NewTransaction(
+		[]solana.Instruction{system.NewTransferInstruction(1, payer, destination).Build()},
+		txfixture.TestBlockhash(),
+		solana.TransactionPayer(payer),
+		solana.TransactionAddressTables(map[solana.PublicKey]solana.PublicKeySlice{tableKey: {destination}}),
+	)
+	require.NoError(t, err)
+	require.True(t, tx.Message.IsVersioned())
+	require.Equal(t, 1, tx.Message.AddressTableLookups.NumLookups())
+	privateKey := txfixture.PayerPrivateKey()
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key == payer {
+			return &privateKey
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	wire, err := tx.MarshalBinary()
+	require.NoError(t, err)
+	destinationBefore, err := env.SlotCtx.GetAccount(destination)
+	require.NoError(t, err)
+
+	result, reason := env.Bank.Forge(wire)
+	require.Equal(t, ForgeAccepted, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+	destinationAfter, err := env.SlotCtx.GetAccount(destination)
+	require.NoError(t, err)
+	require.Equal(t, destinationBefore.Lamports+1, destinationAfter.Lamports)
+	forged := env.Bank.ForgedTransactions()
+	require.Len(t, forged, 1)
+	preservedWire, err := forged[0].MarshalBinary()
+	require.NoError(t, err)
+	require.Equal(t, wire, preservedWire)
 }
 
 func TestWorkingBankStopsWhenPayerWouldFallBelowRent(t *testing.T) {
@@ -80,6 +226,157 @@ func TestWorkingBankStopsWhenPayerWouldFallBelowRent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, destBefore.Lamports+1, destAfter.Lamports)
 	assert.Len(t, env.Bank.ForgedTransactions(), 1)
+}
+
+func TestWorkingBankIncludesExecutedFailureWithFeeRollback(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{CaptureRootedEvents: true})
+	defer env.Close()
+	payer := txfixture.PayerPubkey()
+	destination := txfixture.DestPubkey()
+	payerBefore, err := env.SlotCtx.GetAccount(payer)
+	require.NoError(t, err)
+	destinationBefore, err := env.SlotCtx.GetAccount(destination)
+	require.NoError(t, err)
+
+	transfer := system.NewTransferInstruction(100, payer, destination).Build()
+	fail := solana.NewInstruction(addresses.SystemProgramAddr, nil, []byte{0xff, 0xff, 0xff, 0xff})
+	tx, err := solana.NewTransaction(
+		[]solana.Instruction{transfer, fail}, txfixture.TestBlockhash(), solana.TransactionPayer(payer),
+	)
+	require.NoError(t, err)
+	privateKey := txfixture.PayerPrivateKey()
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key == payer {
+			return &privateKey
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	wire, err := tx.MarshalBinary()
+	require.NoError(t, err)
+
+	result, reason := env.Bank.Forge(wire)
+	require.Equal(t, ForgeAccepted, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+	require.Len(t, env.Bank.ForgedTransactions(), 1)
+	require.Equal(t, 1, env.Bank.EntryBuilder().PendingCount())
+	payerAfter, err := env.SlotCtx.GetAccount(payer)
+	require.NoError(t, err)
+	destinationAfter, err := env.SlotCtx.GetAccount(destination)
+	require.NoError(t, err)
+	require.Equal(t, payerBefore.Lamports-5_000, payerAfter.Lamports)
+	require.Equal(t, destinationBefore.Lamports, destinationAfter.Lamports)
+
+	observations, captured := env.Bank.RootedEventObservations()
+	require.True(t, captured)
+	require.Len(t, observations, 1)
+	require.False(t, observations[0].Succeeded)
+	require.Equal(t, "InstructionError(1, InvalidInstructionData)", observations[0].Failure)
+}
+
+func TestWorkingBankIncludesFeesOnlyProgramLoadFailure(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{CaptureRootedEvents: true})
+	defer env.Close()
+	payer := txfixture.PayerPubkey()
+	payerBefore, err := env.SlotCtx.GetAccount(payer)
+	require.NoError(t, err)
+	missingProgram := solana.NewWallet().PublicKey()
+	tx, err := solana.NewTransaction(
+		[]solana.Instruction{solana.NewInstruction(missingProgram, nil, nil)},
+		txfixture.TestBlockhash(),
+		solana.TransactionPayer(payer),
+	)
+	require.NoError(t, err)
+	privateKey := txfixture.PayerPrivateKey()
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key == payer {
+			return &privateKey
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	wire, err := tx.MarshalBinary()
+	require.NoError(t, err)
+
+	result, reason := env.Bank.Forge(wire)
+	require.Equal(t, ForgeAccepted, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+	require.Len(t, env.Bank.ForgedTransactions(), 1)
+	require.Equal(t, 1, env.Bank.EntryBuilder().PendingCount())
+	payerAfter, err := env.SlotCtx.GetAccount(payer)
+	require.NoError(t, err)
+	require.Equal(t, payerBefore.Lamports-5_000, payerAfter.Lamports)
+
+	observations, captured := env.Bank.RootedEventObservations()
+	require.True(t, captured)
+	require.Len(t, observations, 1)
+	require.False(t, observations[0].Succeeded)
+	require.Equal(t, replay.TransactionErrorProgramAccountNotFound.String(), observations[0].Failure)
+}
+
+func TestWorkingBankDoesNotPublishAfterAccountBankChanges(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{})
+	defer env.Close()
+	validator := &failingAccountReadValidator{failAt: 3}
+	env.SlotCtx.UnrootedRead = validator
+
+	result, reason := env.Bank.Forge(txfixture.MustSignedTransferWire(0))
+	require.Equal(t, ForgeDroppedNoLeader, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+	require.GreaterOrEqual(t, validator.validations, validator.failAt)
+	require.Empty(t, env.Bank.ForgedTransactions())
+	require.Zero(t, env.Bank.EntryBuilder().PendingCount())
+	require.False(t, env.Bank.accepting)
+}
+
+func TestWorkingBankStopsOnFeePayerSourceFailure(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{})
+	defer env.Close()
+	env.SlotCtx.Accounts = accounts.NewMemAccounts()
+	env.SlotCtx.UnrootedRead = failingStableAccountSource{}
+
+	result, reason := env.Bank.Forge(txfixture.MustSignedTransferWire(0))
+	require.Equal(t, ForgeDroppedNoLeader, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+	require.False(t, env.Bank.accepting)
+	require.Empty(t, env.Bank.ForgedTransactions())
+}
+
+func TestClassifyBufferedUsesBankLocalRecentBlockhashes(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{})
+	defer env.Close()
+	globalOnly := solana.Hash{0x44}
+	globalRecent := sealevel.SysvarRecentBlockhashes{{Blockhash: globalOnly}}
+	sealevel.SysvarCache.RecentBlockHashes.Sysvar = &globalRecent
+
+	require.Equal(t, BufferedKeep, env.Bank.ClassifyBuffered(&solana.Transaction{Message: solana.Message{RecentBlockhash: txfixture.TestBlockhash()}}, [32]byte{}))
+	require.Equal(t, BufferedExpired, env.Bank.ClassifyBuffered(&solana.Transaction{Message: solana.Message{RecentBlockhash: globalOnly}}, [32]byte{}))
+
+	bankRecent := sealevel.SysvarRecentBlockhashes{{Blockhash: globalOnly}}
+	env.SlotCtx.LatestEvictedBlockhash = solana.Hash{0x33}
+	bankSysvars, err := sealevel.NewBankSysvars(env.SlotCtx.Slot, &accounts.Account{
+		Key: sealevel.SysvarRecentBlockHashesAddr, Lamports: 1, Data: bankRecent.MustMarshal(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, env.SlotCtx.PublishBankSysvars(bankSysvars))
+	require.Equal(t, BufferedExpired, env.Bank.ClassifyBuffered(&solana.Transaction{Message: solana.Message{RecentBlockhash: txfixture.TestBlockhash()}}, [32]byte{}))
+	require.Equal(t, BufferedKeep, env.Bank.ClassifyBuffered(&solana.Transaction{Message: solana.Message{RecentBlockhash: globalOnly}}, [32]byte{}))
+
+	latestEvicted := solana.Hash{0x55}
+	env.SlotCtx.LatestEvictedBlockhash = latestEvicted
+	require.Equal(t, BufferedKeep, env.Bank.ClassifyBuffered(&solana.Transaction{Message: solana.Message{RecentBlockhash: latestEvicted}}, [32]byte{}))
+
+	nonceData := make([]byte, 4)
+	binary.LittleEndian.PutUint32(nonceData, sealevel.SystemProgramInstrTypeAdvanceNonceAccount)
+	potentialNonce := &solana.Transaction{Message: solana.Message{
+		RecentBlockhash: solana.Hash{0x66},
+		AccountKeys:     []solana.PublicKey{addresses.SystemProgramAddr},
+		Instructions: []solana.CompiledInstruction{{
+			ProgramIDIndex: 0,
+			Data:           nonceData,
+		}},
+	}}
+	require.Equal(t, BufferedKeep, env.Bank.ClassifyBuffered(potentialNonce, [32]byte{}))
 }
 
 func mustSignedTransfer(t *testing.T, lamports uint64) *solana.Transaction {
@@ -125,7 +422,7 @@ func TestWorkingBankAcceptsTransferThatDrainsPayerToZero(t *testing.T) {
 	assert.Equal(t, destBefore.Lamports+transfer, destAfter.Lamports)
 }
 
-func TestWorkingBankDropsTransferThatLeavesPayerBelowRent(t *testing.T) {
+func TestWorkingBankIncludesRentFailureAndRollsBackTransfer(t *testing.T) {
 	env := NewTestEnv(TestEnvConfig{})
 	defer env.Close()
 
@@ -137,13 +434,18 @@ func TestWorkingBankDropsTransferThatLeavesPayerBelowRent(t *testing.T) {
 	require.NoError(t, err)
 	tx := mustSignedTransfer(t, transfer)
 	result, reason := env.Bank.ForgeTransaction(tx, 200)
-	require.Equal(t, ForgeDroppedExecution, result)
+	require.Equal(t, ForgeAccepted, result)
 	require.Equal(t, costmodel.ExceedNone, reason)
 
+	payerAfter, err := env.SlotCtx.GetAccount(txfixture.PayerPubkey())
+	require.NoError(t, err)
 	destAfter, err := env.SlotCtx.GetAccount(txfixture.DestPubkey())
 	require.NoError(t, err)
+	assert.Equal(t, transfer+leftover, payerAfter.Lamports)
 	assert.Equal(t, destBefore.Lamports, destAfter.Lamports)
-	assert.Empty(t, env.Bank.ForgedTransactions())
+	assert.Len(t, env.Bank.ForgedTransactions(), 1)
+	assert.Equal(t, 1, env.Bank.EntryBuilder().PendingCount())
+	assert.Equal(t, uint64(5_000), env.Bank.TxFeeAccumulator().TotalFees)
 }
 
 func TestWorkingBankForgesTransfer(t *testing.T) {
@@ -156,6 +458,45 @@ func TestWorkingBankForgesTransfer(t *testing.T) {
 	assert.Equal(t, ForgeAccepted, result)
 	assert.Equal(t, costmodel.ExceedNone, reason)
 	assert.Equal(t, 1, env.Bank.EntryBuilder().PendingCount())
+}
+
+func TestWorkingBankCapturesOnlyAcceptedRootedTransactions(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{CaptureRootedEvents: true})
+	defer env.Close()
+
+	wire := txfixture.MustSignedTransferWire(0)
+	result, reason := env.Bank.Forge(wire)
+	require.Equal(t, ForgeAccepted, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+
+	observations, captured := env.Bank.RootedEventObservations()
+	require.True(t, captured)
+	require.Len(t, observations, 1)
+	require.True(t, observations[0].Succeeded)
+	require.Equal(t, uint32(0), observations[0].Index)
+	require.NotEmpty(t, observations[0].Message)
+	require.NotEmpty(t, observations[0].AccountKeys)
+
+	result, reason = env.Bank.Forge(wire)
+	require.Equal(t, ForgeDroppedAlreadyProcessed, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+	afterDrop, _ := env.Bank.RootedEventObservations()
+	require.Len(t, afterDrop, 1, "rejected transactions must not enter the rooted stream")
+
+	observations[0].Message[0] ^= 0xff
+	owned, _ := env.Bank.RootedEventObservations()
+	require.NotEqual(t, observations[0].Message, owned[0].Message)
+}
+
+func TestWorkingBankSkipsRootedCaptureWhenDisabled(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{})
+	defer env.Close()
+
+	result, _ := env.Bank.Forge(txfixture.MustSignedTransferWire(0))
+	require.Equal(t, ForgeAccepted, result)
+	observations, captured := env.Bank.RootedEventObservations()
+	require.False(t, captured)
+	require.Empty(t, observations)
 }
 
 func TestWorkingBankRejectsExactDuplicateMessage(t *testing.T) {
@@ -549,6 +890,14 @@ func TestWorkingBankRebatesUnusedLoadedAccountsCost(t *testing.T) {
 	assert.Less(t, got, estimated.Sum())
 	assert.Less(t, got, estimated.LoadedAccountsDataSizeCost)
 	assert.Greater(t, got, estimated.SignatureCost)
+}
+
+func TestActualExecutionUsageUsesLoaderAccumulator(t *testing.T) {
+	const loadedSize = uint32(8_248)
+	_, got := actualExecutionUsage(replay.LoadAndExecuteTransactionOutput{
+		LoadedAccountsDataSize: loadedSize,
+	})
+	assert.Equal(t, costmodel.LoadedAccountsDataSizeCost(loadedSize), got)
 }
 
 func TestWorkingBankDropsWhenBlockCostExceeded(t *testing.T) {

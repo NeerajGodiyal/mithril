@@ -70,3 +70,15 @@ func TestCalculateAndDeductTxFees_BlockReplay_PanicMessageContainsContext(t *tes
 		false,
 	)
 }
+
+func TestCalculateTxFeesUsesV1DirectPriorityFee(t *testing.T) {
+	tx := newEmptyTransaction()
+	limits := &sealevel.ComputeBudgetLimits{
+		ComputeUnitLimit:          200_000,
+		PrioritizationFeeLamports: 777,
+	}
+	fee := CalculateTxFees(tx, nil, limits, features.NewFeaturesDefault())
+	require.Equal(t, uint64(5_000), fee.ExecutionFee)
+	require.Equal(t, uint64(777), fee.PriorityFee)
+	require.Equal(t, uint64(5_777), fee.TotalFee)
+}

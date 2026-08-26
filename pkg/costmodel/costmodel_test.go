@@ -1,11 +1,14 @@
 package costmodel
 
 import (
+	"bytes"
 	"testing"
 
+	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
+	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,8 +32,75 @@ func TestEstimateTransactionCostTransfer(t *testing.T) {
 	assert.Equal(t, uint64(SignatureCost), cost.SignatureCost)
 	assert.Equal(t, uint64(2*WriteLockUnits), cost.WriteLockCost)
 	assert.Greater(t, cost.ProgramsExecutionCost, uint64(0))
-	assert.Len(t, cost.WritableAccounts, 2)
+	assert.Equal(t, []solana.PublicKey{txfixture.PayerPubkey(), txfixture.DestPubkey()}, cost.WritableAccounts)
+	assert.NotContains(t, cost.WritableAccounts, tx.Message.AccountKeys[len(tx.Message.AccountKeys)-1], "readonly program must not consume the destination's writable-account budget")
 	assert.Greater(t, cost.Sum(), uint64(0))
+}
+
+func TestEstimateTransactionCostV1ReservesOneLoadedDataPage(t *testing.T) {
+	tx := mustParseTransferTx(t, 0)
+	_, err := tx.Message.SetVersion(solana.MessageVersionV1)
+	require.NoError(t, err)
+
+	cost, err := EstimateTransactionCost(tx, features.NewFeaturesDefault())
+	require.NoError(t, err)
+	require.Equal(t, uint64(HeapCost), cost.LoadedAccountsDataSizeCost)
+}
+
+func TestSignatureCostIncludesPrecompiles(t *testing.T) {
+	tx := &solana.Transaction{
+		Signatures: []solana.Signature{{}},
+		Message: solana.Message{
+			AccountKeys: []solana.PublicKey{
+				solana.PublicKey(addresses.Ed25519PrecompileAddr),
+				solana.PublicKey(addresses.Secp256kPrecompileAddr),
+				solana.PublicKey(addresses.Secp256r1PrecompileAddr),
+			},
+			Instructions: []solana.CompiledInstruction{
+				{ProgramIDIndex: 0, Data: []byte{2}},
+				{ProgramIDIndex: 1, Data: []byte{3}},
+				{ProgramIDIndex: 2, Data: []byte{4}},
+			},
+		},
+	}
+	feats := features.NewFeaturesDefault()
+	require.Equal(t, uint64(SignatureCost+2*Ed25519VerifyStrictCost+3*Secp256k1VerifyCost), signatureCost(tx, feats))
+	feats.EnableFeature(features.EnableSecp256r1Precompile, 0)
+	require.Equal(t, uint64(SignatureCost+2*Ed25519VerifyStrictCost+3*Secp256k1VerifyCost+4*Secp256r1VerifyCost), signatureCost(tx, feats))
+}
+
+func marshalAllocateCostTest(t *testing.T, space uint64) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	require.NoError(t, (&sealevel.SystemInstrAllocate{Space: space}).MarshalWithEncoder(bin.NewBorshEncoder(&buffer)))
+	return buffer.Bytes()
+}
+
+func TestEstimateAllocDeltaSystemAllocations(t *testing.T) {
+	feats := features.NewFeaturesDefault()
+	instrs := []sealevel.Instruction{
+		{ProgramId: addresses.SystemProgramAddr, Data: marshalAllocateCostTest(t, 10)},
+		{ProgramId: addresses.SystemProgramAddr, Data: marshalAllocateCostTest(t, 20)},
+	}
+	require.Equal(t, uint64(30), estimateAllocDelta(instrs, feats))
+	instrs = append(instrs, sealevel.Instruction{ProgramId: addresses.SystemProgramAddr, Data: marshalAllocateCostTest(t, sealevel.SystemProgMaxPermittedDataLen)})
+	require.Equal(t, uint64(sealevel.SystemProgMaxPermittedDataLen), estimateAllocDelta(instrs, feats), "sum is capped per transaction")
+	require.Zero(t, estimateAllocDelta([]sealevel.Instruction{{ProgramId: addresses.SystemProgramAddr, Data: marshalAllocateCostTest(t, sealevel.SystemProgMaxPermittedDataLen+1)}}, feats))
+	require.Zero(t, estimateAllocDelta([]sealevel.Instruction{{ProgramId: addresses.SystemProgramAddr, Data: []byte{1}}}, feats))
+}
+
+func TestCostTrackerChargesActualTransferDestination(t *testing.T) {
+	tx := mustParseTransferTx(t, 0)
+	cost, err := EstimateTransactionCost(tx, features.NewFeaturesDefault())
+	require.NoError(t, err)
+	limits := DefaultLimits()
+	limits.BlockCost = ^uint64(0)
+	limits.WritableAccountCost = cost.Sum()
+	tracker := NewCostTracker(limits)
+	require.Equal(t, ExceedNone, tracker.WouldExceed(cost))
+	tracker.Record(cost)
+	require.Equal(t, cost.Sum(), tracker.WritableAccountCost(txfixture.DestPubkey()))
+	require.Equal(t, ExceedWritableAccountCost, tracker.WouldExceed(cost))
 }
 
 func TestCostTrackerBlockLimit(t *testing.T) {

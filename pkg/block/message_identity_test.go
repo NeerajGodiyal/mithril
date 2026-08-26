@@ -142,7 +142,9 @@ func TestFixupTxVersionsInvalidatesTransactionDerivedState(t *testing.T) {
 	}
 	block.MarkTransactionSignaturesVerified()
 
-	block.FixupTxVersions()
+	if err := block.FixupTxVersions(); err != nil {
+		t.Fatalf("fix up versions: %v", err)
+	}
 
 	if tx.Message.GetVersion() != solana.MessageVersionV0 {
 		t.Fatalf("message version = %d, want v0", tx.Message.GetVersion())

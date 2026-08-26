@@ -125,3 +125,56 @@ func TestUpdateCallerAccountRegionPreservesFirstWriteClone(t *testing.T) {
 	require.False(t, txCtx.Accounts.Shared[0])
 	require.True(t, txCtx.Accounts.Touched[0], "the direct-mapped write must be published")
 }
+
+func TestUpdateCallerAccountRegionInstallsGrowthHandlerAfterOwnerChange(t *testing.T) {
+	features := feat.NewFeaturesDefault()
+	features.EnableFeature(feat.VirtualAddressSpaceAdjustments, 0)
+	features.EnableFeature(feat.AccountDataDirectMapping, 0)
+
+	programKey := solana.PublicKey{1}
+	accountKey := solana.PublicKey{2}
+	txAccounts := NewTransactionAccounts([]accounts.Account{
+		{Key: accountKey, Owner: programKey, Lamports: 1},
+		{Key: programKey, Executable: true, Lamports: 1},
+	})
+	txCtx := NewTransactionCtx(*txAccounts, 4, 4)
+	instrCtx := &InstructionCtx{}
+	instrCtx.Configure(
+		[]uint64{1},
+		[]InstructionAccount{{
+			IndexInTransaction: 0,
+			IndexInCaller:      0,
+			IndexInCallee:      0,
+			IsWritable:         true,
+		}},
+		nil,
+	)
+	txCtx.InstructionTrace = []InstructionCtx{*instrCtx}
+	txCtx.InstructionStack = []uint64{0}
+	execCtx := &ExecutionCtx{Features: *features, TransactionContext: txCtx}
+
+	borrowed, err := instrCtx.BorrowInstructionAccount(txCtx, 0)
+	require.NoError(t, err)
+	meter := cu.NewComputeMeter(1)
+	vm := sbpf.NewInterpreter(&sbpf.Program{TextVA: sbpf.VaddrProgram, Funcs: map[uint32]int64{}}, &sbpf.VMOpts{
+		Input:        []byte{0},
+		Context:      execCtx,
+		ComputeMeter: &meter,
+		InputRegions: []sbpf.InputRegion{{
+			Offset:               0,
+			AddressSpaceReserved: MaxPermittedDataIncrease,
+			AccountIndex:         0,
+		}},
+	})
+	defer vm.Finish()
+
+	require.NoError(t, updateCallerAccountRegion(vm, execCtx, &CallerAccount{
+		VmDataAddr: sbpf.VaddrInput,
+	}, borrowed, false))
+	borrowed.Drop()
+
+	require.NoError(t, vm.Write8(sbpf.VaddrInput, 9))
+	require.Len(t, txCtx.Accounts.Accounts[0].Data, MaxPermittedDataIncrease)
+	require.Equal(t, byte(9), txCtx.Accounts.Accounts[0].Data[0])
+	require.True(t, txCtx.Accounts.Touched[0])
+}

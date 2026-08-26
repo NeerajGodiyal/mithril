@@ -21,6 +21,16 @@ func (panicLeaderAccountReader) GetAccount(uint64, solana.PublicKey) (*accounts.
 	panic("leader preparation consulted mutable parent account reader")
 }
 
+type recordingLeaderAccountReader struct {
+	slot uint64
+	acct *accounts.Account
+}
+
+func (r *recordingLeaderAccountReader) GetAccount(slot uint64, _ solana.PublicKey) (*accounts.Account, error) {
+	r.slot = slot
+	return r.acct, nil
+}
+
 func leaderTestEpochScheduleAccount(t *testing.T, schedule sealevel.SysvarEpochSchedule) *accounts.Account {
 	t.Helper()
 	var data bytes.Buffer
@@ -43,6 +53,7 @@ func TestNewLeaderSlotCtxInheritsAcctsLtHashAndFeatures(t *testing.T) {
 		SlotsPerEpoch: 54000,
 	}
 	slotCtx, err := NewLeaderSlotCtx(100, 99, nil, ParentContext{
+		ParentBlockHeight:      39,
 		PrevNumSigs:            42,
 		AcctsLtHash:            parentLtHash,
 		Features:               parentFeatures,
@@ -58,11 +69,28 @@ func TestNewLeaderSlotCtxInheritsAcctsLtHashAndFeatures(t *testing.T) {
 	require.True(t, slotCtx.Features.IsActive(features.RemoveAccountsDeltaHash))
 	require.True(t, slotCtx.Features.IsActive(features.FormalizeLoadedTransactionDataSize))
 	require.Equal(t, uint64(0), slotCtx.NumSignatures)
+	require.Equal(t, uint64(40), slotCtx.BlockHeight)
 	require.Equal(t, uint64(0), slotCtx.Epoch) // slot 100 with default schedule
 	require.Equal(t, [32]byte{7}, slotCtx.LastBlockhash)
 	require.Equal(t, [32]byte{8}, slotCtx.LatestEvictedBlockhash)
 	require.Equal(t, uint64(10), slotCtx.VoteAccts[solana.PublicKey{9}])
 	require.Equal(t, uint64(10), slotCtx.TotalEpochStake)
+}
+
+func TestNewLeaderSlotCtxReadsCapturedParentSlot(t *testing.T) {
+	const (
+		parentSlot = uint64(99)
+		childSlot  = uint64(100)
+	)
+	key := solana.PublicKey{1}
+	reader := &recordingLeaderAccountReader{acct: &accounts.Account{Key: key, Lamports: 42}}
+	slotCtx, err := NewLeaderSlotCtx(childSlot, parentSlot, nil, ParentContext{UnrootedRead: reader}, nil)
+	require.NoError(t, err)
+
+	acct, err := slotCtx.GetAccountFromAccountsDb(key)
+	require.NoError(t, err)
+	require.Equal(t, uint64(42), acct.Lamports)
+	require.Equal(t, parentSlot, reader.slot)
 }
 
 func TestNewLeaderSlotCtxInstallsPinnedBankState(t *testing.T) {

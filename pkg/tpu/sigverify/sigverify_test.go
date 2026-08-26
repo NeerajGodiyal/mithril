@@ -12,14 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// signedV0Transaction builds a versioned (v0) transaction and signs it over the
-// bytes a real Solana client signs — that is, with the 0x80 version prefix that
-// txverify.MessageBytes produces, not solana-go's MarshalBinary output.
-//
-// This distinction is the whole point of the test. solana-go's MarshalV0 emits
-// versionNum+127 = 0x7f, which is not the wire encoding. A verifier that
-// marshals for itself and skips the fixup checks the signature against bytes no
-// honest client ever signed, so it rejects every valid versioned transaction.
+// signedV0Transaction builds a canonical v0 transaction for the TPU verifier.
 func signedV0Transaction(t *testing.T) *solana.Transaction {
 	t.Helper()
 
@@ -34,7 +27,8 @@ func signedV0Transaction(t *testing.T) *solana.Transaction {
 		solana.TransactionPayer(payer.PublicKey()),
 	)
 	require.NoError(t, err)
-	tx.Message.SetVersion(solana.MessageVersionV0)
+	_, err = tx.Message.SetVersion(solana.MessageVersionV0)
+	require.NoError(t, err)
 
 	msg, err := txverify.MessageBytes(tx)
 	require.NoError(t, err)
@@ -46,9 +40,7 @@ func signedV0Transaction(t *testing.T) *solana.Transaction {
 	return tx
 }
 
-// Regression: versioned transactions used to be dropped at TPU ingest no matter
-// how well signed they were, because this package marshalled the message itself
-// and never applied the version-byte fixup.
+// Regression: every supported version must use the same canonical verifier.
 func TestVersionedTransactionIsAccepted(t *testing.T) {
 	tx := signedV0Transaction(t)
 	require.True(t, VerifyTransaction(tx),
@@ -68,6 +60,9 @@ func TestGarbageAndCorruptionAreRejected(t *testing.T) {
 	copy(corrupt, wire)
 	corrupt[3] ^= 0xFF // inside the first signature
 	require.False(t, VerifyPacket(corrupt), "corrupted signature")
+
+	trailing := append(append([]byte(nil), wire...), 0)
+	require.False(t, VerifyPacket(trailing), "trailing bytes")
 }
 
 // Batching must not change any verdict, and an unparseable packet in the middle

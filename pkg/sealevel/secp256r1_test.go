@@ -1,10 +1,14 @@
 package sealevel
 
 import (
+	"encoding/binary"
 	"encoding/hex"
+	"math"
 	"testing"
 
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSecp256r1_Success_1(t *testing.T) {
@@ -73,4 +77,68 @@ func TestSecp256r1_Failure_1(t *testing.T) {
 
 	err = verifySecp256r1(pub, []byte(msg), sig)
 	assert.Error(t, err)
+}
+
+func secp256r1TestTxCtx(current []byte, instructions ...[]byte) *TransactionCtx {
+	txCtx := NewTransactionCtx(*NewTransactionAccounts([]accounts.Account{}), 1, 2)
+	for _, data := range instructions {
+		txCtx.AllInstructions = append(txCtx.AllInstructions, Instruction{Data: data})
+	}
+	if current != nil {
+		txCtx.PushInstructionCtx(InstructionCtx{Data: current})
+		txCtx.InstructionStack = append(txCtx.InstructionStack, 1)
+	}
+	return txCtx
+}
+
+func TestSecp256r1GetDataSliceUsesInvalidDataOffsets(t *testing.T) {
+	external := make([]byte, 100)
+	txCtx := secp256r1TestTxCtx(make([]byte, 100), external)
+
+	got, err := Secp256r1GetDataSlice(txCtx, 0, 99, 1)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	_, err = Secp256r1GetDataSlice(txCtx, 0, 100, 1)
+	require.ErrorIs(t, err, PrecompileErrDataOffset)
+	_, err = Secp256r1GetDataSlice(txCtx, 1, 0, 1)
+	require.ErrorIs(t, err, PrecompileErrDataOffset)
+
+	_, err = Secp256r1GetDataSlice(txCtx, math.MaxUint16, 100, 1)
+	require.ErrorIs(t, err, PrecompileErrDataOffset)
+	_, err = Secp256r1GetDataSlice(secp256r1TestTxCtx(nil), math.MaxUint16, 0, 1)
+	require.ErrorIs(t, err, PrecompileErrDataOffset)
+}
+
+func secp256r1OffsetsData(messageOffset, messageSize uint16) []byte {
+	data := make([]byte, Secp256r1DataStart)
+	data[0] = 1
+	binary.LittleEndian.PutUint16(data[2:4], 0)
+	binary.LittleEndian.PutUint16(data[4:6], 0)
+	binary.LittleEndian.PutUint16(data[6:8], 0)
+	binary.LittleEndian.PutUint16(data[8:10], 0)
+	binary.LittleEndian.PutUint16(data[10:12], messageOffset)
+	binary.LittleEndian.PutUint16(data[12:14], messageSize)
+	binary.LittleEndian.PutUint16(data[14:16], 0)
+	return data
+}
+
+func TestSecp256r1ProgramRendersOffsetAndSignatureCodes(t *testing.T) {
+	external := make([]byte, 100)
+	for _, test := range []struct {
+		name   string
+		offset uint16
+		want   error
+		code   int
+	}{
+		{"exact boundary reaches signature validation", 99, PrecompileErrSignature, 2},
+		{"out of bounds is invalid data offsets", 100, PrecompileErrDataOffset, 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data := secp256r1OffsetsData(test.offset, 1)
+			txCtx := secp256r1TestTxCtx(data, external)
+			err := Secp256r1ProgramExecute(&ExecutionCtx{TransactionContext: txCtx})
+			require.ErrorIs(t, err, test.want)
+			require.Equal(t, test.code, TranslateErrToErrCode(err))
+		})
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/stretchr/testify/require"
@@ -217,6 +218,113 @@ func TestUpdateClockSysvarForModeUsesStakeWeightedEstimate(t *testing.T) {
 	// so it replaces the clock timestamp. The block footer 9999999 is not used.
 	require.Equal(t, int64(1004), clock.UnixTimestamp)
 	require.Equal(t, int64(1000), clock.EpochStartTimestamp)
+}
+
+func TestClassicSlotRangeDurationTracksFeatureTransitions(t *testing.T) {
+	epochSchedule := &sealevel.SysvarEpochSchedule{
+		SlotsPerEpoch:            100,
+		LeaderScheduleSlotOffset: 100,
+	}
+	f := features.NewFeaturesDefault()
+	f.EnableFeature(features.ReduceSlotTimeTo350ms, 50)  // effective at slot 100
+	f.EnableFeature(features.ReduceSlotTimeTo200ms, 150) // effective at slot 200
+
+	got := classicSlotRangeDuration(f, epochSchedule, 99, 200)
+	require.Equal(t, uint64(35), got.Secs)
+	require.Equal(t, uint32(600_000_000), got.Nanos)
+}
+
+func TestUpdateClockSysvarUsesReducedDevnetSlotTime(t *testing.T) {
+	prevCalcUnixTime := global.CalcUnixTimeForClockSysvar()
+	global.SetCalcUnixTimeForClockSysvar(true)
+
+	const epoch = uint64(1129)
+	const parentSlot = uint64(487739670)
+	const parentTimestamp = int64(1787649533)
+	voter := testPubkey(10)
+	global.PutVoteCacheItem(voter, &sealevel.VoteStateVersions{
+		Type: sealevel.VoteStateVersionCurrent,
+		Current: sealevel.VoteState{
+			LastTimestamp: sealevel.BlockTimestamp{Slot: parentSlot, Timestamp: parentTimestamp},
+		},
+	})
+	global.PutEpochStakesEntry(epoch, voter, 100, nil)
+	t.Cleanup(func() {
+		global.SetCalcUnixTimeForClockSysvar(prevCalcUnixTime)
+		global.DeleteVoteCacheItem(voter)
+		global.ClearEpochStakes(epoch)
+	})
+
+	epochSchedule := &sealevel.SysvarEpochSchedule{
+		SlotsPerEpoch:            432000,
+		LeaderScheduleSlotOffset: 432000,
+	}
+	f := features.NewFeaturesDefault()
+	f.EnableFeature(features.ReduceSlotTimeTo200ms, 317520000)
+	clock := &sealevel.SysvarClock{
+		Slot:                parentSlot,
+		Epoch:               epoch,
+		LeaderScheduleEpoch: epoch + 1,
+		EpochStartTimestamp: 1787647607,
+		UnixTimestamp:       parentTimestamp,
+	}
+	blk := &block.Block{Slot: parentSlot + 1, Epoch: epoch, Features: f}
+
+	require.NoError(t, updateClockSysvarForMode(clock, blk, epochSchedule, false))
+	require.Equal(t, parentTimestamp, clock.UnixTimestamp)
+}
+
+func TestTimestampEstimateIgnoresFutureVoteTimestamp(t *testing.T) {
+	voter := testPubkey(11)
+	global.PutVoteCacheItem(voter, &sealevel.VoteStateVersions{
+		Type: sealevel.VoteStateVersionCurrent,
+		Current: sealevel.VoteState{
+			LastTimestamp: sealevel.BlockTimestamp{Slot: 101, Timestamp: 1000},
+		},
+	})
+	global.PutEpochStakesEntry(1, voter, 100, nil)
+	t.Cleanup(func() {
+		global.DeleteVoteCacheItem(voter)
+		global.ClearEpochStakes(1)
+	})
+
+	epochSchedule := &sealevel.SysvarEpochSchedule{SlotsPerEpoch: 100}
+	_, ok := getTimestampEstimate(100, 100, 1000, epochSchedule, nil)
+	require.False(t, ok)
+}
+
+func TestUpdateClockSysvarForModePreservesTimestampWithoutStakeWeightedEstimate(t *testing.T) {
+	prevCalcUnixTime := global.CalcUnixTimeForClockSysvar()
+	global.SetCalcUnixTimeForClockSysvar(true)
+
+	voter := testPubkey(8)
+	stakedVoter := testPubkey(9)
+	global.PutVoteCacheItem(voter, &sealevel.VoteStateVersions{
+		Type:    sealevel.VoteStateVersionCurrent,
+		Current: sealevel.VoteState{LastTimestamp: sealevel.BlockTimestamp{Slot: 2160005, Timestamp: 1002}},
+	})
+	global.PutEpochStakesEntry(5, stakedVoter, 100, nil)
+	t.Cleanup(func() {
+		global.SetCalcUnixTimeForClockSysvar(prevCalcUnixTime)
+		global.DeleteVoteCacheItem(voter)
+		global.ClearEpochStakes(5)
+	})
+
+	epochSchedule := &sealevel.SysvarEpochSchedule{
+		SlotsPerEpoch:            432000,
+		LeaderScheduleSlotOffset: 432000,
+	}
+	clock := &sealevel.SysvarClock{
+		Slot:                2160009,
+		Epoch:               5,
+		LeaderScheduleEpoch: 6,
+		EpochStartTimestamp: 1000,
+		UnixTimestamp:       1000,
+	}
+	blk := &block.Block{Slot: 2160010, Epoch: 5}
+
+	require.NoError(t, updateClockSysvarForMode(clock, blk, epochSchedule, false))
+	require.Equal(t, int64(1000), clock.UnixTimestamp)
 }
 
 // Both footer timestamp fields being zero marks "no footer time", so the update must be a no-op.

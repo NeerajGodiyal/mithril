@@ -155,6 +155,26 @@ func TestEd25519PrecompileRejectsATamperedSignature(t *testing.T) {
 		"a tampered signature must fail the equation")
 }
 
+func TestEd25519PrecompileClassifiesMalformedPublicKey(t *testing.T) {
+	badPublicKey := [PubkeySerializedSize]byte{}
+	found := false
+	for candidate := 0; candidate < 256; candidate++ {
+		badPublicKey[0] = byte(candidate)
+		if _, err := new(edwards25519.Point).SetBytes(badPublicKey[:]); err != nil {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "test search must find a malformed compressed point")
+
+	data := buildEd25519Instruction(badPublicKey[:], make([]byte, SignatureSerializedSize), []byte("message"))
+	for _, strict := range []bool{false, true} {
+		err := runEd25519PrecompileWithStrict(t, data, strict)
+		require.ErrorIs(t, err, PrecompileErrPublicKey)
+		require.Equal(t, 0, TranslateErrToErrCode(err))
+	}
+}
+
 // smallOrderForgery builds a signature the standard library accepts and the
 // strict predicate rejects: A is the identity, so [s]B - [k]A collapses to
 // [s]B, which is exactly the R the signature carries. Nothing about it is

@@ -111,6 +111,10 @@ func TestValidateTransactionEnforcesWireBounds(t *testing.T) {
 			Succeeded:   true,
 		}
 	}
+	atLimit := valid()
+	atLimit.Message = make([]byte, maxTransactionMessageBytes)
+	require.NoError(t, validateTransaction(1, 0, atLimit))
+
 	tests := []struct {
 		name   string
 		change func(*TransactionObservation)

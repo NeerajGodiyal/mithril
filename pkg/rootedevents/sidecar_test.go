@@ -10,6 +10,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/state"
+	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/require"
 )
@@ -50,6 +51,60 @@ func TestPrepareAndReadSidecar(t *testing.T) {
 	retry, err := PrepareSidecar(root, deltas, metadata)
 	require.NoError(t, err)
 	require.Equal(t, ref, retry, "identical preparation must be idempotent")
+}
+
+func TestSidecarRoundTripsV1Message(t *testing.T) {
+	config := solana.TransactionConfig{}.
+		WithPriorityFee(9_001).
+		WithComputeUnitLimit(300_000).
+		WithLoadedAccountsDataSizeLimit(65_536).
+		WithHeapSize(64 * 1024)
+	message := solana.Message{
+		Header: solana.MessageHeader{
+			NumRequiredSignatures:       1,
+			NumReadonlyUnsignedAccounts: 1,
+		},
+		AccountKeys: []solana.PublicKey{{1}, {2}},
+		Instructions: []solana.CompiledInstruction{{
+			ProgramIDIndex: 1,
+			Accounts:       []uint16{0},
+		}},
+		TransactionConfig: config,
+	}
+	_, err := message.SetVersion(solana.MessageVersionV1)
+	require.NoError(t, err)
+	wire, err := message.MarshalBinary()
+	require.NoError(t, err)
+
+	root := t.TempDir()
+	ref, err := PrepareSidecar(root,
+		[]accounts.SlotDelta{{Slot: 10}},
+		map[uint64]SlotMeta{10: {
+			Slot: 10, ParentSlot: 9, Bankhash: [32]byte{10},
+			Transactions: []TransactionObservation{{
+				Signature:   solana.Signature{1}.String(),
+				Message:     wire,
+				AccountKeys: []string{solana.PublicKey{1}.String(), solana.PublicKey{2}.String()},
+				Succeeded:   true,
+			}},
+		}},
+	)
+	require.NoError(t, err)
+
+	var record *TransactionRecord
+	require.NoError(t, ReadSidecar(root, ref, func(event Event) error {
+		if event.Transaction != nil {
+			record = event.Transaction
+		}
+		return nil
+	}))
+	require.NotNil(t, record)
+	var decoded solana.Message
+	decoder := bin.NewBinDecoder(record.Message)
+	require.NoError(t, decoded.UnmarshalWithDecoder(decoder))
+	require.False(t, decoder.HasRemaining())
+	require.Equal(t, solana.MessageVersionV1, decoded.GetVersion())
+	require.Equal(t, config, decoded.TransactionConfig)
 }
 
 func TestReadSidecarRejectsTamperAndSymlink(t *testing.T) {

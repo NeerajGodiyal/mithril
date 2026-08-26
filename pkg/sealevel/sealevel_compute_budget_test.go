@@ -8,11 +8,52 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/cu"
 	bin "github.com/gagliardetto/binary"
+	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/require"
 
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestComputeBudgetForV1UsesInlineConfig(t *testing.T) {
+	config := solana.TransactionConfig{}.
+		WithPriorityFee(9876).
+		WithComputeUnitLimit(MaxComputeUnitLimit + 1).
+		WithLoadedAccountsDataSizeLimit(MaxLoadedAccountsDataSizeBytes + 1).
+		WithHeapSize(64 * 1024)
+	tx := &solana.Transaction{
+		Signatures: []solana.Signature{{}},
+		Message: solana.Message{
+			Header:            solana.MessageHeader{NumRequiredSignatures: 1, NumReadonlyUnsignedAccounts: 1},
+			AccountKeys:       []solana.PublicKey{{1}, {2}},
+			Instructions:      []solana.CompiledInstruction{{ProgramIDIndex: 1, Accounts: []uint16{0}}},
+			TransactionConfig: config,
+		},
+	}
+	_, err := tx.Message.SetVersion(solana.MessageVersionV1)
+	require.NoError(t, err)
+
+	limits, err := ComputeBudgetForTransaction(tx, []Instruction{{ProgramId: a.ComputeBudgetProgramAddr}}, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint32(64*1024), limits.UpdatedHeapBytes)
+	require.Equal(t, uint32(MaxComputeUnitLimit), limits.ComputeUnitLimit)
+	require.Equal(t, uint32(MaxLoadedAccountsDataSizeBytes), limits.LoadedAccountBytes)
+	require.Equal(t, uint64(9876), limits.PrioritizationFeeLamports)
+	require.Zero(t, limits.ComputeUnitPrice)
+
+	tx.Message.TransactionConfig = solana.TransactionConfig{}
+	limits, err = ComputeBudgetForTransaction(tx, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint32(MinHeapFrameBytes), limits.UpdatedHeapBytes)
+	require.Zero(t, limits.ComputeUnitLimit)
+	require.Zero(t, limits.LoadedAccountBytes)
+	require.Zero(t, limits.PrioritizationFeeLamports)
+
+	badHeap := uint32(MinHeapFrameBytes + 1)
+	tx.Message.TransactionConfig.HeapSize = &badHeap
+	_, err = ComputeBudgetForTransaction(tx, nil, nil)
+	require.Error(t, err)
+}
 
 // ComputeBudget program tests
 
@@ -286,6 +327,13 @@ func TestExecute_Tx_ComputeBudget_Instructions(t *testing.T) {
 	assert.Equal(t, uint32(MinHeapFrameBytes), cbl.UpdatedHeapBytes)
 	assert.Equal(t, uint64(0), cbl.ComputeUnitPrice)
 	assert.Equal(t, uint32(1234), cbl.LoadedAccountBytes)
+
+	zeroLimit, err := newTestComputeBudgetInstrSetLoadedAccountsDataSizeLimit(0)
+	assert.NoError(t, err)
+	_, err = ComputeBudgetExecuteInstructions([]Instruction{blankInstr, zeroLimit}, nil)
+	var budgetErr *ComputeBudgetError
+	require.ErrorAs(t, err, &budgetErr)
+	assert.Equal(t, ComputeBudgetErrorInvalidLoadedAccountsDataSizeLimit, budgetErr.Kind)
 
 	// 20
 	instr1, err = newTestComputeBudgetInstrSetLoadedAccountsDataSizeLimit(MaxLoadedAccountsDataSizeBytes + 1)

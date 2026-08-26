@@ -32,7 +32,7 @@ func TestSendTransaction_RejectsSanitizeFailure(t *testing.T) {
 	rpcServer := &RpcServer{}
 	tx := &solana.Transaction{
 		Message: solana.Message{
-			Header:      solana.MessageHeader{NumRequiredSignatures: 1},
+			Header:      solana.MessageHeader{NumRequiredSignatures: 1, NumReadonlySignedAccounts: 1},
 			AccountKeys: []solana.PublicKey{{1}},
 		},
 	}

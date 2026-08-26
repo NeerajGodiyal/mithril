@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"testing"
 
@@ -12,6 +13,68 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func computeBudgetFailureTx(instructions ...[]byte) *solana.Transaction {
+	payer := testPubkey(1)
+	otherProgram := testPubkey(2)
+	keys := []solana.PublicKey{payer, otherProgram, addresses.ComputeBudgetProgramAddr}
+	compiled := []solana.CompiledInstruction{{ProgramIDIndex: 1}}
+	for _, data := range instructions {
+		compiled = append(compiled, solana.CompiledInstruction{ProgramIDIndex: 2, Data: data})
+	}
+	return &solana.Transaction{
+		Signatures: []solana.Signature{{}},
+		Message: solana.Message{
+			Header: solana.MessageHeader{
+				NumRequiredSignatures:       1,
+				NumReadonlyUnsignedAccounts: 2,
+			},
+			AccountKeys:  keys,
+			Instructions: compiled,
+		},
+	}
+}
+
+func computeBudgetU32(kind byte, value uint32) []byte {
+	data := make([]byte, 5)
+	data[0] = kind
+	binary.LittleEndian.PutUint32(data[1:], value)
+	return data
+}
+
+func TestLoadAndExecuteTransactionPreservesComputeBudgetErrorTypeAndIndex(t *testing.T) {
+	ctx := &sealevel.SlotCtx{Features: features.NewFeaturesDefault()}
+	limit := computeBudgetU32(sealevel.ComputeBudgetInstrTypeSetComputeUnitLimit, 1)
+	cases := []struct {
+		name       string
+		tx         *solana.Transaction
+		wantType   TransactionErrorType
+		wantIndex  uint8
+		wantInstr  error
+		indexIsSet bool
+	}{
+		{"malformed", computeBudgetFailureTx([]byte{sealevel.ComputeBudgetInstrTypeSetComputeUnitLimit}), TransactionErrorInstructionError, 1, sealevel.InstrErrInvalidInstructionData, true},
+		{"duplicate", computeBudgetFailureTx(limit, limit), TransactionErrorDuplicateInstruction, 2, nil, true},
+		{"zero loaded limit", computeBudgetFailureTx(computeBudgetU32(sealevel.ComputeBudgetInstrTypeSetLoadedAccountsDataSizeLimit, 0)), TransactionErrorInvalidLoadedAccountsDataSizeLimit, 0, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := LoadAndExecuteTransaction(LoadAndExecuteTransactionInput{SlotCtx: ctx, Transaction: tc.tx, IsSimulation: true})
+			require.NotNil(t, out.ProcessingResult.TransactionError)
+			txErr := out.ProcessingResult.TransactionError
+			assert.Equal(t, tc.wantType, txErr.ErrorType)
+			if tc.indexIsSet {
+				require.NotNil(t, txErr.InstructionIndex)
+				assert.Equal(t, tc.wantIndex, *txErr.InstructionIndex)
+			} else {
+				assert.Nil(t, txErr.InstructionIndex)
+			}
+			assert.ErrorIs(t, txErr.InstructionError, tc.wantInstr)
+			assert.False(t, out.ExecutionStarted)
+			assert.False(t, out.FeesOnly)
+		})
+	}
+}
 
 func TestPrecomputedInstructionAccountsMatchLegacyResolution(t *testing.T) {
 	payer := testPubkey(1)
@@ -348,6 +411,27 @@ func TestTransactionError_MarshalJSON_CustomCarriesShape(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"InstructionError":[0,{"Custom":0}]}`, string(got))
+}
+
+func TestTransactionError_MarshalJSON_RendersActualCustomCodes(t *testing.T) {
+	idx := uint8(1)
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"program custom", sealevel.InstrErrCustomCode{Code: 42}, `{"InstructionError":[1,{"Custom":42}]}`},
+		{"precompile", sealevel.PrecompileErrSignature, `{"InstructionError":[1,{"Custom":2}]}`},
+		{"builtin", sealevel.SystemProgErrInvalidAccountDataLength, `{"InstructionError":[1,{"Custom":3}]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := json.Marshal(&TransactionError{
+				ErrorType: TransactionErrorInstructionError, InstructionIndex: &idx, InstructionError: test.err,
+			})
+			require.NoError(t, err)
+			assert.JSONEq(t, test.want, string(got))
+		})
+	}
 }
 
 // TestTransactionError_MarshalJSON_TupleStructVariants covers the

@@ -98,17 +98,16 @@ func withEmptyRecentBlockhashesSysvarFixture() func() {
 	return func() { sealevel.SysvarCache.RecentBlockHashes.Sysvar = prev }
 }
 
-// Without a populated AccountsDb, the System Program is unreachable and
-// the loader rejects with ProgramAccountNotFound. With AccountsDb (the
-// production case), the Pass-1 fallback resolves it and the tx fails
-// later at the fee-payer balance check (InsufficientFundsForFee). Either
-// outcome is a clean TransactionError, never a panic.
+// Without a populated AccountsDb, the fee payer itself is absent. With a
+// partially populated source the loader may instead reach the missing program;
+// a production source reaches the payer balance check. Every outcome is a
+// clean TransactionError, never a panic.
 func TestSimulateFixture_MissingAccount(t *testing.T) {
 	out := runSimulateFixture(t, fixtureMissingAccount)
 	require.NotNil(t, out.ProcessingResult.TransactionError)
 	got := out.ProcessingResult.TransactionError.ErrorType
 	assert.Contains(t,
-		[]TransactionErrorType{TransactionErrorProgramAccountNotFound, TransactionErrorInsufficientFundsForFee},
+		[]TransactionErrorType{TransactionErrorAccountNotFound, TransactionErrorProgramAccountNotFound, TransactionErrorInsufficientFundsForFee},
 		got,
 		"expected ProgramAccountNotFound (no AccountsDb) or InsufficientFundsForFee (with AccountsDb), got %v", got,
 	)
@@ -156,14 +155,14 @@ func TestSimulateFixture_NoInstructions(t *testing.T) {
 	assert.Equal(t, TransactionErrorAccountNotFound, out.ProcessingResult.TransactionError.ErrorType)
 }
 
-// Same caveat as MissingAccount: with no AccountsDb the System Program
-// is unreachable, so the loader fails earlier than the fee-payer check.
+// Same caveat as MissingAccount: the empty fixture may fail at the absent payer
+// before program loading or the fee-balance check.
 func TestSimulateFixture_SelfTransfer(t *testing.T) {
 	out := runSimulateFixture(t, fixtureSelfTransfer)
 	require.NotNil(t, out.ProcessingResult.TransactionError)
 	got := out.ProcessingResult.TransactionError.ErrorType
 	assert.Contains(t,
-		[]TransactionErrorType{TransactionErrorProgramAccountNotFound, TransactionErrorInsufficientFundsForFee},
+		[]TransactionErrorType{TransactionErrorAccountNotFound, TransactionErrorProgramAccountNotFound, TransactionErrorInsufficientFundsForFee},
 		got,
 	)
 }
@@ -171,9 +170,5 @@ func TestSimulateFixture_SelfTransfer(t *testing.T) {
 func TestSimulateFixture_DuplicateKeys(t *testing.T) {
 	out := runSimulateFixture(t, fixtureDuplicateKeys)
 	require.NotNil(t, out.ProcessingResult.TransactionError)
-	got := out.ProcessingResult.TransactionError.ErrorType
-	assert.Contains(t,
-		[]TransactionErrorType{TransactionErrorProgramAccountNotFound, TransactionErrorInsufficientFundsForFee},
-		got,
-	)
+	assert.Equal(t, TransactionErrorAccountLoadedTwice, out.ProcessingResult.TransactionError.ErrorType)
 }

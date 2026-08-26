@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"errors"
 	"math"
 	"testing"
 
@@ -12,6 +13,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+var errTestAccountSource = errors.New("test account source failure")
+
+type failingAccountSource struct{}
+
+func (failingAccountSource) GetAccount(uint64, solana.PublicKey) (*accounts.Account, error) {
+	return nil, errTestAccountSource
+}
 
 // newSimd186SlotCtx returns a minimal SlotCtx wired for the SIMD-186
 // account loader path: empty MemAccounts and the
@@ -63,6 +72,23 @@ func TestLoadAndValidateTxAcctsSimd186_FabricatesDefaultForMissingAccount(t *tes
 		assert.False(t, fabricated.Executable)
 		assert.Empty(t, fabricated.Data)
 	})
+}
+
+func TestLoadAndValidateTxAcctsSimd186RejectsAccountSourceFailure(t *testing.T) {
+	slotCtx := newSimd186SlotCtx()
+	slotCtx.UnrootedRead = failingAccountSource{}
+	missingKey := testPubkey(43)
+	tx := &solana.Transaction{Message: solana.Message{
+		Header:      solana.MessageHeader{NumRequiredSignatures: 1},
+		AccountKeys: []solana.PublicKey{missingKey},
+	}}
+
+	_, _, err := loadAndValidateTxAcctsSimd186(
+		slotCtx, nil, tx, nil, &accounts.Account{Key: sealevel.SysvarInstructionsAddr}, math.MaxUint32,
+	)
+	require.ErrorIs(t, err, errTestAccountSource)
+	var sourceErr *accountSourceError
+	require.ErrorAs(t, err, &sourceErr)
 }
 
 // TestLoadAndValidateTxAcctsSimd186_LoadedAccountTakesPrecedence
@@ -170,4 +196,52 @@ func TestLoadAndValidateTxAcctsSimd186_MixedLoadedAndMissing(t *testing.T) {
 	assert.Equal(t, uint64(0), txAccts.Accounts[1].Lamports, "missing account should be fabricated default")
 	assert.Equal(t, addresses.SystemProgramAddr, txAccts.Accounts[1].Owner)
 	assert.Equal(t, uint64(math.MaxUint64), txAccts.Accounts[1].RentEpoch)
+}
+
+func TestLoadAndValidateTxAcctsLegacyReportsCompleteLoadedDataSize(t *testing.T) {
+	feats := features.NewFeaturesDefault()
+	mem := accounts.NewMemAccounts()
+	slotCtx := &sealevel.SlotCtx{Accounts: mem, Features: feats}
+
+	payer := testPubkey(10)
+	program := testPubkey(11)
+	loader := testPubkey(12)
+	require.NoError(t, mem.SetAccountWithoutLock(payer, &accounts.Account{
+		Key: payer, Owner: addresses.SystemProgramAddr, Lamports: 1, Data: make([]byte, 3),
+	}))
+	require.NoError(t, mem.SetAccountWithoutLock(program, &accounts.Account{
+		Key: program, Owner: loader, Lamports: 1, Executable: true, Data: make([]byte, 5),
+	}))
+	require.NoError(t, mem.SetAccountWithoutLock(loader, &accounts.Account{
+		Key: loader, Owner: addresses.NativeLoaderAddr, Lamports: 1, Executable: true, Data: make([]byte, 7),
+	}))
+
+	tx := &solana.Transaction{Message: solana.Message{
+		Header:      solana.MessageHeader{NumRequiredSignatures: 1, NumReadonlyUnsignedAccounts: 1},
+		AccountKeys: []solana.PublicKey{payer, program},
+		Instructions: []solana.CompiledInstruction{{
+			ProgramIDIndex: 1,
+		}},
+	}}
+	instrs := []sealevel.Instruction{{ProgramId: program}}
+
+	txAccts, _, err := loadAndValidateTxAccts(slotCtx, nil, tx, instrs, nil, math.MaxUint32)
+	require.NoError(t, err)
+	// The legacy loader's program-account special case contributes no data;
+	// the payer's 3 bytes plus the separately loaded owner's 7 bytes do.
+	assert.Equal(t, uint32(10), txAccts.LoadedAccountsDataSize)
+}
+
+func TestLoadedAccountSizeIgnoresMalformedUpgradeableProgramMetadata(t *testing.T) {
+	slotCtx := newSimd186SlotCtx()
+	key := testPubkey(90)
+	accumulator := NewLoadedAcctSizeAccumulatorSimd186(slotCtx, math.MaxUint32, []solana.PublicKey{key})
+	acct := &accounts.Account{
+		Key: key, Lamports: 1, Owner: addresses.BpfLoaderUpgradeableAddr,
+		Data: []byte{1},
+	}
+	require.NotPanics(t, func() {
+		require.NoError(t, accumulator.collectAcct(acct))
+	})
+	assert.Equal(t, uint64(txAcctBaseSize+1), accumulator.accumulator)
 }

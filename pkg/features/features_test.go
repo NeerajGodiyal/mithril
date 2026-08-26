@@ -119,3 +119,15 @@ func TestAccountDataDirectMappingFeatureGate(t *testing.T) {
 	assert.Equal(t, base58.MustDecodeFromString("CR3dVN2Yoo95Y96kLSTaziWDAQT2MNEpiWh5cqVq2pNE"), AccountDataDirectMapping.Address)
 	assert.Contains(t, AllFeatureGates, AccountDataDirectMapping)
 }
+
+func TestDirectAccountPointersInProgramInputFeatureGate(t *testing.T) {
+	assert.Equal(t, "DirectAccountPointersInProgramInput", DirectAccountPointersInProgramInput.Name)
+	assert.Equal(t, base58.MustDecodeFromString("ptr9umikaeAS7ZBBp2fsfRhie16F1V2jCKA2y6gXNAK"), DirectAccountPointersInProgramInput.Address)
+	assert.Contains(t, AllFeatureGates, DirectAccountPointersInProgramInput)
+}
+
+func TestTransactionV1FeatureGate(t *testing.T) {
+	assert.Equal(t, "EnableTransactionV1", EnableTransactionV1.Name)
+	assert.Equal(t, base58.MustDecodeFromString("txv1aq4pp281K9um3tnPgkfX8UqtFT6wcVW3hNezGLL"), EnableTransactionV1.Address)
+	assert.Contains(t, AllFeatureGates, EnableTransactionV1)
+}

@@ -293,6 +293,10 @@ func TestLeanWritableFastPathPreservesWritableStakeAndVoteBookkeeping(t *testing
 	}
 
 	require.NoError(t, ApplySuccessfulTransaction(slotCtx, output))
+	require.NotNil(t, global.VoteCacheItem(voteKey), "transaction publication must not mutate the global vote cache before bank commit")
+	require.Empty(t, global.PendingStakeEntriesSnapshot(), "transaction publication must not enqueue stake keys before bank commit")
+	assert.Equal(t, uint64(0), voteStakeDirtySlot.Load())
+	require.True(t, commitVoteStakeCacheUpdates(slotCtx))
 	require.Nil(t, global.VoteCacheItem(voteKey), "reassigned writable vote account must be removed from the vote cache")
 	pending := global.PendingStakeEntriesSnapshot()
 	require.Len(t, pending, 1)

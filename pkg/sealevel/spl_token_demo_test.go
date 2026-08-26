@@ -24,7 +24,7 @@ var splTokenProgramAddr = base58.MustDecodeFromString("TokenkegQfeZyiNwAJbNbGKPF
 // spl token program later.
 func setupSplTokenProgramAccount(t *testing.T, accts *accounts.Accounts) accounts.Account {
 	programBytes := fixtures.Load(t, "sbpf", "spl-token.so")
-	splTokenAcct := accounts.Account{Key: splTokenProgramAddr, Lamports: 0, Data: programBytes, Owner: a.BpfLoader2Addr, Executable: true, RentEpoch: 100}
+	splTokenAcct := accounts.Account{Key: splTokenProgramAddr, Lamports: 1, Data: programBytes, Owner: a.BpfLoader2Addr, Executable: true, RentEpoch: 100}
 
 	pk := [32]byte(splTokenProgramAddr)
 	err := (*accts).SetAccount(&pk, &splTokenAcct)
@@ -37,6 +37,7 @@ func setupSplTokenProgramAccount(t *testing.T, accts *accounts.Accounts) account
 func newExecCtx(t *testing.T, log *LogRecorder) *ExecutionCtx {
 	accts := accounts.NewMemAccounts()
 	execCtx := ExecutionCtx{Log: log, ComputeMeter: cu.NewComputeMeter(10000000000), Accounts: accts}
+	execCtx.SlotCtx = &SlotCtx{Accounts: accts, Slot: 1337}
 	f := features.NewFeaturesDefault()
 	execCtx.Features = *f
 

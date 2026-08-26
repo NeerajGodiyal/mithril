@@ -146,6 +146,10 @@ func TestParentDerivedBankLoadsLifecycleSysvarsFromExactSnapshot(t *testing.T) {
 		"Alpenglow bank start preserves the exact parent timestamp")
 	require.Equal(t, uint64(1), childClock.LeaderScheduleEpoch,
 		"Clock derivation uses the retained bank's EpochSchedule, not the stale external pointer")
+	childEpochSchedule, ok := childSnapshot.EpochSchedule()
+	require.True(t, ok)
+	require.Equal(t, parentEpochSchedule, childEpochSchedule,
+		"programs retain the exact parent EpochSchedule account")
 	childSlotHashes, ok := childSnapshot.SlotHashes()
 	require.True(t, ok)
 	require.Len(t, childSlotHashes, 2)
