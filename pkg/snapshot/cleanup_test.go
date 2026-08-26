@@ -6,18 +6,23 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Overclock-Validator/mithril/pkg/rootedevents"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestCleanAccountsDbDirRemovesTransactionStatusCheckpoints(t *testing.T) {
+func TestCleanAccountsDbDirRemovesLineageSidecars(t *testing.T) {
 	root := t.TempDir()
 	checkpointDir := filepath.Join(root, "transaction-status-checkpoints")
 	require.NoError(t, os.MkdirAll(checkpointDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(checkpointDir, "stale.bin"), []byte("stale"), 0o644))
+	eventDir := filepath.Join(root, rootedevents.SidecarDirectory)
+	require.NoError(t, os.MkdirAll(eventDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(eventDir, "stale.jsonl"), []byte("stale"), 0o644))
 
 	require.NoError(t, CleanAccountsDbDir(root))
 	assert.NoDirExists(t, checkpointDir)
+	assert.NoDirExists(t, eventDir)
 }
 
 func TestCleanAccountsDbDirRejectsUnsafeRoots(t *testing.T) {

@@ -75,6 +75,7 @@ var ungatedRPCMethods = map[string]struct{}{
 	// unhealth, so they must answer while unhealthy.
 	"getVerificationStatus": {},
 	"getHealth":             {},
+	"getRootedFeedStatus":   {},
 }
 
 func methodRequiresHealthyNode(method string) bool {

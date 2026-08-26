@@ -98,6 +98,12 @@ func (api *rpcAPI) GetLatestBlockhash(ctx context.Context, p jsonrpc.RawParams) 
 	})
 }
 
+func (api *rpcAPI) GetRootedFeedStatus(ctx context.Context, p jsonrpc.RawParams) (GetRootedFeedStatusResp, error) {
+	return callRPC(ctx, func() (GetRootedFeedStatusResp, error) {
+		return api.server.GetRootedFeedStatus(ctx, p)
+	})
+}
+
 func (api *rpcAPI) SendTransaction(ctx context.Context, p jsonrpc.RawParams) (string, error) {
 	return callExpensiveRPC(ctx, api.server, func() (string, error) {
 		return api.server.SendTransaction(ctx, p)

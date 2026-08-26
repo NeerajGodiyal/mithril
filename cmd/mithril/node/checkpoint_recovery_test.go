@@ -54,25 +54,25 @@ func testDurableStatusContext(t *testing.T, accountsDbPath string, root uint64) 
 func TestValidateDurableResumeContextChecksSidecarCoverageRootTipAndIdentity(t *testing.T) {
 	accountsDbPath := t.TempDir()
 	ctx := testDurableStatusContext(t, accountsDbPath, 7)
-	require.NoError(t, validateDurableResumeContext(accountsDbPath, 7, ctx))
+	require.NoError(t, validateDurableResumeContext(accountsDbPath, 7, ctx, true))
 
 	withoutID := *ctx
 	withoutID.AlpenglowBlockID = ""
-	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 7, &withoutID), "has no Alpenglow block id")
+	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 7, &withoutID, true), "has no Alpenglow block id")
 
 	withoutRoot := *ctx
 	withoutRoot.AlpenglowChainedMerkleRoot = ""
-	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 7, &withoutRoot), "has no Alpenglow chained merkle root")
+	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 7, &withoutRoot, true), "has no Alpenglow chained merkle root")
 
 	malformedRoot := *ctx
 	malformedRoot.AlpenglowChainedMerkleRoot = "not-base58-0"
-	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 7, &malformedRoot), "decode resume context Alpenglow chained merkle root")
+	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 7, &malformedRoot, true), "decode resume context Alpenglow chained merkle root")
 
 	wrongID := *ctx
 	var other solana.Hash
 	other[0] = 99
 	wrongID.AlpenglowBlockID = other.String()
-	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 7, &wrongID), "lineage")
+	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 7, &wrongID, true), "lineage")
 
 	checkpointPath := filepath.Join(accountsDbPath, replay.TransactionStatusCheckpointDirectory, ctx.TransactionStatusCheckpoint.File)
 	payload, err := os.ReadFile(checkpointPath)
@@ -83,7 +83,7 @@ func TestValidateDurableResumeContextChecksSidecarCoverageRootTipAndIdentity(t *
 	wrongRoot := *ctx
 	wrongRoot.Slot = 8
 	wrongRoot.TransactionStatusCheckpoint = wrongRootRef
-	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 8, &wrongRoot), "rooted through slot 7, want 8")
+	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 8, &wrongRoot, true), "rooted through slot 7, want 8")
 
 	incompletePayload := append([]byte(nil), payload...)
 	incompletePayload[4] = 0 // clear complete + genesis-origin proof flags
@@ -91,12 +91,17 @@ func TestValidateDurableResumeContextChecksSidecarCoverageRootTipAndIdentity(t *
 	require.NoError(t, err)
 	incomplete := *ctx
 	incomplete.TransactionStatusCheckpoint = incompleteRef
-	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 7, &incomplete), "incomplete retained-root coverage")
+	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 7, &incomplete, true), "incomplete retained-root coverage")
+
+	classic := *ctx
+	classic.AlpenglowBlockID = ""
+	classic.AlpenglowChainedMerkleRoot = ""
+	require.NoError(t, validateDurableResumeContext(accountsDbPath, 7, &classic, false))
 
 	payload[len(payload)-1] ^= 0xff
 	require.NoError(t, os.Chmod(checkpointPath, 0o644))
 	require.NoError(t, os.WriteFile(checkpointPath, payload, 0o644))
-	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 7, ctx), "SHA-256 mismatch")
+	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 7, ctx, true), "SHA-256 mismatch")
 }
 
 func TestRecoveredManifestContextIsAuthoritativeAtEqualRoot(t *testing.T) {
@@ -114,7 +119,7 @@ func TestRecoveredManifestContextIsAuthoritativeAtEqualRoot(t *testing.T) {
 	require.NoError(t, adoptRecoveredManifestContextBeforeIntegrity(accountsDbPath, s, accountsdb.RecoveryResult{
 		DurableThrough: 5,
 		ResumeCtx:      encoded,
-	}))
+	}, true))
 	assert.Equal(t, "manifest-bankhash", s.LastRootedBankhash)
 	assert.Equal(t, manifestCtx.TransactionStatusCheckpoint, s.LastRootedContext.TransactionStatusCheckpoint)
 }
@@ -129,7 +134,7 @@ func TestRecoveredManifestContextAdvancesStaleStateBeforeIntegrity(t *testing.T)
 	require.NoError(t, adoptRecoveredManifestContextBeforeIntegrity(accountsDbPath, s, accountsdb.RecoveryResult{
 		DurableThrough: 5,
 		ResumeCtx:      encoded,
-	}))
+	}, true))
 	assert.Equal(t, uint64(5), s.LastRootedSlot)
 	assert.Equal(t, uint64(5), s.LastSlot)
 	assert.Equal(t, manifestCtx, s.LastRootedContext)

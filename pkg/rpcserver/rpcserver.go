@@ -49,13 +49,17 @@ type RpcServer struct {
 	// verificationSnapshot is the evidence-gate seam. It defaults to
 	// replay.VerificationSnapshot; tests replace it to drive every verification
 	// state without running a replay.
-	verificationSnapshot verificationSnapshotFunc
-	epochSchedule        *sealevel.SysvarEpochSchedule
-	genesisHashMu        sync.RWMutex
-	genesisHash          string
-	slotCtx              *sealevel.SlotCtx
-	slotCtxMu            sync.RWMutex
-	slotCtxLifecycle     uint64
+	verificationSnapshot  verificationSnapshotFunc
+	epochSchedule         *sealevel.SysvarEpochSchedule
+	genesisHashMu         sync.RWMutex
+	genesisHash           string
+	rootedFeedMu          sync.RWMutex
+	rootedFeedIdentitySet bool
+	rootedEventsEnabled   bool
+	accountsDBRootRunID   string
+	slotCtx               *sealevel.SlotCtx
+	slotCtxMu             sync.RWMutex
+	slotCtxLifecycle      uint64
 
 	leaderTPUCacheMu           sync.RWMutex
 	leaderTPUByIdentity        map[solana.PublicKey]tpuEndpoint
@@ -122,6 +126,7 @@ var supportedRPCMethods = map[string]struct{}{
 	"getVerificationStatus": {},
 	"getHealth":             {},
 	"getLatestBlockhash":    {},
+	"getRootedFeedStatus":   {},
 	"sendTransaction":       {},
 	"simulateTransaction":   {},
 }

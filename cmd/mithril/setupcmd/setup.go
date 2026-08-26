@@ -931,7 +931,8 @@ func (m setupModel) generateConfig() (tea.Model, tea.Cmd) {
 	fmt.Fprintf(&cfg, "accounts = %q\n", filepath.Clean(m.accountsPath))
 	fmt.Fprintf(&cfg, "shredstore = %q\n", filepath.Clean(m.shredstorePath))
 	fmt.Fprintf(&cfg, "snapshots = %q\n", filepath.Clean(m.snapshotsPath))
-	fmt.Fprintf(&cfg, "logs = %q\n\n", filepath.Clean(m.logsPath))
+	fmt.Fprintf(&cfg, "logs = %q\n", filepath.Clean(m.logsPath))
+	cfg.WriteString("rooted_events = false\n\n")
 
 	cfg.WriteString("[network]\n")
 	fmt.Fprintf(&cfg, "cluster = %q\n", m.cluster)
@@ -1043,6 +1044,7 @@ accounts = "/mnt/mithril-accounts"            # AccountsDB (~500GB, use fastest 
 shredstore = "/mnt/mithril-ledger/shredstore" # Lightbringer shred storage
 snapshots = "/mnt/mithril-ledger/snapshots"   # ~100GB for full + incremental
 logs = "/mnt/mithril-logs"                    # Log files (created if missing)
+rooted_events = false                         # Persist finalized events for local indexers
 
 [network]
 cluster = "alpenglow"  # mainnet-beta/testnet/devnet use classic verifying-only RPC replay

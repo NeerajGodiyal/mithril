@@ -12,7 +12,7 @@ import (
 func TestNewReadyStateForBootstrapAlwaysBindsChain(t *testing.T) {
 	for _, mode := range []string{"explicit", "snapshot", "new-snapshot", "new-incremental", "auto"} {
 		t.Run(mode, func(t *testing.T) {
-			got, err := newReadyStateForBootstrap(2233733, 41, mode, "alpenglow", testNodeGenesisHash)
+			got, err := newReadyStateForBootstrap(2233733, 41, mode, "alpenglow", testNodeGenesisHash, true)
 			if err != nil {
 				t.Fatalf("new ready state: %v", err)
 			}
@@ -38,10 +38,10 @@ func TestNewReadyStateForBootstrapAlwaysBindsChain(t *testing.T) {
 }
 
 func TestNewReadyStateForBootstrapRejectsUnboundBuild(t *testing.T) {
-	if _, err := newReadyStateForBootstrap(1, 0, "new-snapshot", "alpenglow", ""); err == nil {
+	if _, err := newReadyStateForBootstrap(1, 0, "new-snapshot", "alpenglow", "", true); err == nil {
 		t.Fatal("ready state accepted an empty genesis hash")
 	}
-	if _, err := newReadyStateForBootstrap(1, 0, "new-snapshot", "", testNodeGenesisHash); err == nil {
+	if _, err := newReadyStateForBootstrap(1, 0, "new-snapshot", "", testNodeGenesisHash, true); err == nil {
 		t.Fatal("ready state accepted an empty cluster")
 	}
 }

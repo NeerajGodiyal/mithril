@@ -201,6 +201,7 @@ accounts = %q             # AccountsDB — put on the fastest NVMe
 shredstore = %q           # Received-shred storage
 snapshots = %q            # Downloaded full + incremental snapshots
 logs = %q                 # Log files (created if missing)
+rooted_events = false     # Persist finalized account and transaction events for local indexers
 fold_batch_slots = 128    # Rooted slots folded to disk per segment (32..512; larger = less NVMe wear, more RAM tail)
 index_wal = true          # Account-index Pebble WAL (keep true until soaked)
 rewind_horizon_batches = 64 # Fold batches of undo pointers kept actionable (~55 min of chain at K=128)

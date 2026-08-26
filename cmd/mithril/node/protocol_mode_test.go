@@ -80,12 +80,65 @@ func TestRPCVerificationGateStartsClosedWhenVerificationIsRequired(t *testing.T)
 		replay.VerifierConfig{Enabled: true, Required: true},
 		&state.MithrilState{LastRootedSlot: 42},
 		true,
+		true,
 	)
 	got, required, verified, eligible := replay.VerificationSnapshot()
 	require.Equal(t, replay.VerificationUnavailable, got)
 	require.True(t, required)
 	require.Equal(t, uint64(42), verified)
 	require.Equal(t, uint64(42), eligible)
+}
+
+func TestClassicRootedRPCVerificationGateStartsClosed(t *testing.T) {
+	t.Cleanup(func() { replay.ResetVerificationStatus(false, 0) })
+	initializeVerificationStatusForRPC(
+		replay.VerifierConfig{Enabled: true, Required: true},
+		&state.MithrilState{SnapshotSlot: 21, RootedDurable: true},
+		true,
+		false,
+	)
+	got, required, verified, eligible := replay.VerificationSnapshot()
+	require.Equal(t, replay.VerificationUnavailable, got)
+	require.True(t, required)
+	require.Equal(t, uint64(21), verified)
+	require.Equal(t, uint64(21), eligible)
+}
+
+func TestValidateClassicRootedVerifier(t *testing.T) {
+	require.NoError(t, validateClassicRootedVerifier(false, replay.VerifierConfig{}))
+	require.NoError(t, validateClassicRootedVerifier(true, replay.VerifierConfig{Enabled: true, Required: true}))
+	require.Error(t, validateClassicRootedVerifier(true, replay.VerifierConfig{Enabled: true}))
+}
+
+func TestValidateRootedDurableProfile(t *testing.T) {
+	require.NoError(t, validateRootedDurableProfile(nil, false))
+	require.Error(t, validateRootedDurableProfile(nil, true))
+	require.NoError(t, validateRootedDurableProfile(&state.MithrilState{RootedDurable: true}, true))
+	require.NoError(t, validateRootedDurableProfile(&state.MithrilState{}, false))
+	require.Error(t, validateRootedDurableProfile(&state.MithrilState{RootedDurable: true}, false))
+
+	s := &state.MithrilState{StateSchemaVersion: state.CurrentStateSchemaVersion, Stage: "ready", SnapshotSlot: 100}
+	require.Error(t, validateRootedDurableProfile(s, true))
+	require.False(t, s.RootedDurable)
+}
+
+func TestBindRootRunID(t *testing.T) {
+	root := t.TempDir()
+	s := &state.MithrilState{StateSchemaVersion: state.CurrentStateSchemaVersion, Stage: "ready"}
+	const first = "00112233445566778899aabbccddeeff"
+	require.NoError(t, bindRootRunID(s, root, first))
+	require.Equal(t, first, s.RootRunID)
+	require.NoError(t, bindRootRunID(s, root, "ffeeddccbbaa99887766554433221100"))
+	require.Equal(t, first, s.RootRunID)
+
+	loaded, err := state.LoadState(root)
+	require.NoError(t, err)
+	require.Equal(t, first, loaded.RootRunID)
+	require.Error(t, bindRootRunID(&state.MithrilState{Stage: "ready"}, root, "NOT-HEX"))
+
+	legacy := &state.MithrilState{StateSchemaVersion: state.CurrentStateSchemaVersion, Stage: "ready", CurrentRunID: "aabbccdd"}
+	require.NoError(t, bindRootRunID(legacy, t.TempDir(), first))
+	require.Equal(t, "aabbccdd", legacy.RootRunID)
 }
 
 func TestTxParallelismForMode(t *testing.T) {

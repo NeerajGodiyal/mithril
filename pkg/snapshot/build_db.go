@@ -17,6 +17,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/progress"
+	"github.com/Overclock-Validator/mithril/pkg/rootedevents"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/cockroachdb/pebble"
@@ -116,6 +117,7 @@ func cleanAccountsDbRoot(
 		"accounts",
 		txstatus.SnapshotSeedFileName,
 		"transaction-status-checkpoints",
+		rootedevents.SidecarDirectory,
 		"mithril_db",
 		"mithril_db_log_shards",
 		"bankhash_db",
