@@ -195,14 +195,15 @@ You can also specify a config file explicitly:
 4. Replay catches up toward the tip with RPC `getBlock` calls, then hands off to live blocks reconstructed from native turbine shreds (which carry the Alpenglow block ids and footer certificates)
 5. Blocks execute the moment they are assembled; Alpenglow certificates drive fork choice and gate what is promoted to durable storage, and a trailing verifier cross-checks execution results against finalized RPC blocks
 
-### Mithril's Simple RPC Server
+### Mithril RPC Server
 
-Mithril includes a basic RPC server implementation that exposes a subset of Solana-compatible JSON-RPC methods. This is still under active development and not yet feature-complete.
+Mithril includes a focused subset of Solana-compatible JSON-RPC methods.
 
-To enable it, set the port in your config:
+The listener defaults to loopback. Enable it with:
 
 ```toml
 [rpc]
+    bind_address = "127.0.0.1"
     port = 8899
 ```
 
@@ -214,26 +215,35 @@ curl http://localhost:8899 -X POST -H "Content-Type: application/json" -d '
   {"jsonrpc":"2.0","id":1,"method":"getBlockHeight"}
 '
 
-# Query from another server (replace with your Mithril host IP)
-curl http://YOUR_MITHRIL_IP:8899 -X POST -H "Content-Type: application/json" -d '
+# For remote use, forward the loopback listener over SSH.
+ssh -N -L 8899:127.0.0.1:8899 USER@MITHRIL_HOST
+curl http://127.0.0.1:8899 -X POST -H "Content-Type: application/json" -d '
   {"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["YOUR_PUBKEY",{"encoding":"base64"}]}
 '
 ```
 
-**Currently supported RPC methods:**
+**Supported RPC methods:**
 - `getAccountInfo` - Get account data and lamports
 - `getBankHash` - Get bankhash for a slot (Mithril extension, not standard Solana RPC)
 - `getBlockHeight` - Get current block height
 - `getEpochInfo` - Get current epoch info
+- `getGenesisHash` - Get the configured cluster genesis hash
+- `getHealth` - Return the standard Solana health response
 - `getLatestBlockhash` - Get recent blockhash
+- `getSubmittedTransactionStatus` - Query this process's local submission receipt
+- `getVerificationStatus` - Get Mithril's replay-verification state
+- `sendTransaction` - Validate and forward a signed transaction
+- `simulateTransaction` - Simulate a transaction against the processed bank
 
-We're actively expanding RPC method coverage. Upcoming methods include transaction simulation, send transaction, and get leader schedule.
+`sendTransaction` success means the node forwarded the transaction, not that it
+landed. Submission receipts are bounded, kept in memory, and cover only
+transactions sent through the current Mithril process.
 
 ### Current Limitations
 
 - **RPC still required**: live near-tip blocks stream from turbine shreds, but RPC `getBlock` is still used for catchup and by the trailing execution verifier (Alpenglow certificates attest block *data*, not execution results, so an external oracle cross-checks execution until peer bankhash cross-checking lands).
 - **Alpenglow voting is experimental**: validator mode now signs, persists, self-verifies, and broadcasts Votor votes, but should be exercised on the community cluster before production use. Vote history is identity-bound and startup fails closed if it is corrupt. A `vote landed source=votor-quic proof=verified-aggregate` log is emitted only when an exact network-received, BLS-verified certificate includes the validator's rank for a vote present in its durable history; periodic `alpenglow voting stats` lines expose the cumulative confirmation and broadcast counters.
-- **Leader edge cases fail closed**: local production intentionally misses epoch-transition slots and slots with active partitioned epoch rewards until producer-side transition handling is implemented. TPU sanitation currently accepts legacy transactions only; versioned transactions are dropped rather than produced incorrectly.
+- **Leader edge cases fail closed**: local production intentionally misses epoch-transition slots and slots with active partitioned epoch rewards until producer-side transition handling is implemented.
 - **Remaining validator services**: repair serving and Rotor relay duty are still future work.
 
 ### RPC Sources
