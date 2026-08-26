@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	b "github.com/Overclock-Validator/mithril/pkg/block"
-	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/stretchr/testify/require"
 )
@@ -36,20 +35,14 @@ func TestVerifyFooterBankHashSkippedWhenUnset(t *testing.T) {
 }
 
 func TestRequireAlpenglowBlockFooter(t *testing.T) {
-	ft := features.NewFeaturesDefault()
-	ft.EnableFeature(features.Alpenglow, 1)
-	slotCtx := &sealevel.SlotCtx{Features: ft}
-
-	require.False(t, requireAlpenglowBlockFooter(&b.Block{Slot: 1, FromLiveStream: true}, slotCtx, false))
-	require.False(t, requireAlpenglowBlockFooter(&b.Block{Slot: 1, FromLiveStream: true, IsSkipped: true}, slotCtx, true))
-	require.False(t, requireAlpenglowBlockFooter(&b.Block{Slot: 1}, slotCtx, true))
-	require.True(t, requireAlpenglowBlockFooter(&b.Block{Slot: 1, FromLiveStream: true}, slotCtx, true))
+	require.False(t, requireAlpenglowBlockFooter(&b.Block{Slot: 1, FromLiveStream: true}, false))
+	require.False(t, requireAlpenglowBlockFooter(&b.Block{Slot: 1, FromLiveStream: true, IsSkipped: true}, true))
+	require.False(t, requireAlpenglowBlockFooter(&b.Block{Slot: 1}, true))
+	require.True(t, requireAlpenglowBlockFooter(&b.Block{Slot: 1, FromLiveStream: true}, true))
 }
 
 func TestVerifyAlpenglowBlockFooterMissing(t *testing.T) {
-	ft := features.NewFeaturesDefault()
-	ft.EnableFeature(features.Alpenglow, 1)
-	slotCtx := &sealevel.SlotCtx{Slot: 99, Features: ft, FinalBankhash: []byte{1}}
+	slotCtx := &sealevel.SlotCtx{Slot: 99, FinalBankhash: []byte{1}}
 	block := &b.Block{Slot: 99, FromLiveStream: true}
 
 	err := verifyAlpenglowBlockFooter(slotCtx, block, true)
@@ -58,9 +51,7 @@ func TestVerifyAlpenglowBlockFooterMissing(t *testing.T) {
 }
 
 func TestVerifyAlpenglowBlockFooterRequiresBankHash(t *testing.T) {
-	ft := features.NewFeaturesDefault()
-	ft.EnableFeature(features.Alpenglow, 1)
-	slotCtx := &sealevel.SlotCtx{Slot: 99, Features: ft, FinalBankhash: []byte{1}}
+	slotCtx := &sealevel.SlotCtx{Slot: 99, FinalBankhash: []byte{1}}
 	block := &b.Block{Slot: 99, FromLiveStream: true, HasAlpenglowFooter: true}
 
 	err := verifyAlpenglowBlockFooter(slotCtx, block, true)
@@ -68,9 +59,7 @@ func TestVerifyAlpenglowBlockFooterRequiresBankHash(t *testing.T) {
 }
 
 func TestVerifyAlpenglowBlockFooterAllowsLeaderBlocks(t *testing.T) {
-	ft := features.NewFeaturesDefault()
-	ft.EnableFeature(features.Alpenglow, 1)
-	slotCtx := &sealevel.SlotCtx{Slot: 99, Features: ft, FinalBankhash: []byte{1}}
+	slotCtx := &sealevel.SlotCtx{Slot: 99, FinalBankhash: []byte{1}}
 	block := &b.Block{Slot: 99}
 
 	require.NoError(t, verifyAlpenglowBlockFooter(slotCtx, block, true))

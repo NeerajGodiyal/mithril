@@ -745,6 +745,28 @@ func TestDecodeAlpenglowParentMarkers(t *testing.T) {
 	}
 }
 
+func TestDecodeBlockEnforcesConsensusMarkerMode(t *testing.T) {
+	marker := testAlpenglowParentMarkerBytes(blockMarkerVariantHeader, 42, solana.Hash{1})
+	newState := func() *slotState {
+		return &slotState{
+			slot:       43,
+			parentSlot: 42,
+			shreds: map[uint32]*Shred{
+				0: {Type: ShredTypeData, Index: 0, Flags: shredFlagDataComplete, Data: marker},
+			},
+		}
+	}
+
+	_, _, _, err := newState().decodeBlock(false, nil)
+	if err == nil || !strings.Contains(err.Error(), "Alpenglow block marker in Classic mode") {
+		t.Fatalf("Classic marker error = %v", err)
+	}
+	_, _, _, err = newState().decodeBlock(true, nil)
+	if err == nil || !strings.Contains(err.Error(), "Alpenglow block is missing its footer") {
+		t.Fatalf("Alpenglow footer error = %v", err)
+	}
+}
+
 func TestSlotAssemblerRecoversMissingMerkleDataShredFromCodingShreds(t *testing.T) {
 	dataShreds := localnetMerkleShreds(t, "d")
 	codeShreds := localnetMerkleShreds(t, "c")

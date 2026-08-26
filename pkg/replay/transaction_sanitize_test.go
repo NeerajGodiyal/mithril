@@ -214,3 +214,16 @@ func TestLoadAndExecuteTransactionRejectsUnresolvedV0Lookups(t *testing.T) {
 	require.NotNil(t, out.ProcessingResult.TransactionError)
 	require.Equal(t, TransactionErrorSanitizeFailure, out.ProcessingResult.TransactionError.ErrorType)
 }
+
+func TestLoadAndExecuteTransactionReportsInactiveV1AsUnsupported(t *testing.T) {
+	tx := validShapeTransaction()
+	_, err := tx.Message.SetVersion(solana.MessageVersionV1)
+	require.NoError(t, err)
+	out := LoadAndExecuteTransaction(LoadAndExecuteTransactionInput{
+		SlotCtx:      &sealevel.SlotCtx{Features: features.NewFeaturesDefault()},
+		Transaction:  tx,
+		IsSimulation: true,
+	})
+	require.NotNil(t, out.ProcessingResult.TransactionError)
+	require.Equal(t, TransactionErrorUnsupportedVersion, out.ProcessingResult.TransactionError.ErrorType)
+}

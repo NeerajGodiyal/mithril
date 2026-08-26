@@ -469,7 +469,10 @@ func TestAsyncPromoterOrdersTailDurableGenerationAtAdmission(t *testing.T) {
 
 	p := newAsyncPromoter(tail.asyncCommitter, &tail.durableGeneration)
 	defer p.stop()
+	beforeGeneration := tail.durableGeneration.Load()
 	p.enqueue(job)
+	admittedGeneration := tail.durableGeneration.Load()
+	require.Equal(t, beforeGeneration+1, admittedGeneration)
 	_, err = beforeAdmission.GetAccount(7, testKey(3))
 	require.ErrorIs(t, err, errCapturedBankStale)
 
@@ -478,6 +481,7 @@ func TestAsyncPromoterOrdersTailDurableGenerationAtAdmission(t *testing.T) {
 	require.NotNil(t, res)
 	require.NoError(t, res.err)
 	tail.applyFoldJob(res.job)
+	require.Equal(t, admittedGeneration, tail.durableGeneration.Load(), "worker double-advanced the durable generation")
 
 	_, err = afterAdmission.GetAccount(7, testKey(3))
 	require.NoError(t, err)

@@ -233,6 +233,7 @@ func generatedAlpenglowDataShreds(t *testing.T) []*Shred {
 func TestSlotAssemblerFinalizationHonorsHintLearnedDuringVerification(t *testing.T) {
 	shreds := generatedAlpenglowDataShreds(t)
 	assembler := NewSlotAssembler()
+	assembler.SetAlpenglowMode(true)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	assembler.verifyTransactions = func(context.Context, *block.Block) error {
