@@ -34,6 +34,10 @@ func PopulateManifestSeed(s *state.MithrilState, m *SnapshotManifest) {
 	// Block config
 	s.ManifestParentSlot = m.Bank.Slot
 	s.ManifestParentBankhash = base58.Encode(m.Bank.Hash[:])
+	s.ManifestParentAlpenglowBlockID = ""
+	if m.BlockID != nil {
+		s.ManifestParentAlpenglowBlockID = base58.Encode(m.BlockID[:])
+	}
 	s.ManifestBlockHeight = m.Bank.BlockHeight
 
 	// LtHash: use Hash() method, encode as base64

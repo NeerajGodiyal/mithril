@@ -263,6 +263,16 @@ type SnapshotManifest struct {
 	EpochAccountHash                   [32]byte
 	VersionedEpochStakes               []VersionedEpochStakesPair
 	LtHash                             *lthash.LtHash
+	BlockIDFieldPresent                bool
+	BlockID                            *[32]byte
+}
+
+func validateManifestCount(decoder *bin.Decoder, count uint64, minElementBytes int, field string) error {
+	remaining := decoder.Remaining()
+	if minElementBytes <= 0 || remaining < 0 || count > uint64(remaining/minElementBytes) {
+		return fmt.Errorf("snapshot %s count %d cannot fit in %d remaining bytes", field, count, remaining)
+	}
+	return nil
 }
 
 func (bhv *BlockHashVec) UnmarshalWithDecoder(decoder *bin.Decoder) error {
@@ -1458,7 +1468,7 @@ func (snapshot *SnapshotManifest) UnmarshalWithDecoder(decoder *bin.Decoder) err
 		snapshot.BankIncrementalSnapshotPersistence = new(BankIncrementalSnapshotPersistence)
 		err = snapshot.BankIncrementalSnapshotPersistence.UnmarshalWithDecoder(decoder)
 		if err != nil {
-			return nil
+			return err
 		}
 	}
 
@@ -1487,6 +1497,9 @@ func (snapshot *SnapshotManifest) UnmarshalWithDecoder(decoder *bin.Decoder) err
 
 	numVersionedEpochStakes, err := decoder.ReadUint64(bin.LE)
 	if err != nil {
+		return err
+	}
+	if err := validateManifestCount(decoder, numVersionedEpochStakes, 12, "versioned epoch stakes"); err != nil {
 		return err
 	}
 
@@ -1518,6 +1531,33 @@ func (snapshot *SnapshotManifest) UnmarshalWithDecoder(decoder *bin.Decoder) err
 			return err
 		}
 		snapshot.LtHash = new(lthash.LtHash).InitWithHash(ltHashBytes)
+	}
+	if !decoder.HasRemaining() {
+		return nil
+	}
+	return snapshot.decodeV4Tail(decoder)
+}
+
+func (snapshot *SnapshotManifest) decodeV4Tail(decoder *bin.Decoder) error {
+	snapshot.BlockIDFieldPresent = true
+	snapshot.BlockID = nil
+	option, err := decoder.ReadUint8()
+	if err != nil {
+		return err
+	}
+	if option > 1 {
+		return fmt.Errorf("snapshot block ID option has invalid discriminant %d", option)
+	}
+	if option == 1 {
+		blockIDBytes, err := decoder.ReadBytes(32)
+		if err != nil {
+			return err
+		}
+		blockID := [32]byte(blockIDBytes)
+		snapshot.BlockID = &blockID
+	}
+	if decoder.HasRemaining() {
+		return fmt.Errorf("snapshot manifest has %d trailing bytes", decoder.Remaining())
 	}
 
 	return nil

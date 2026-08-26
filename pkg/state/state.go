@@ -74,10 +74,11 @@ type MithrilState struct {
 	// =========================================================================
 
 	// Block configuration seed
-	ManifestParentSlot     uint64 `json:"manifest_parent_slot,omitempty"`
-	ManifestParentBankhash string `json:"manifest_parent_bankhash,omitempty"` // base58
-	ManifestBlockHeight    uint64 `json:"manifest_block_height,omitempty"`
-	ManifestAcctsLtHash    string `json:"manifest_accts_lt_hash,omitempty"` // base64
+	ManifestParentSlot             uint64 `json:"manifest_parent_slot,omitempty"`
+	ManifestParentBankhash         string `json:"manifest_parent_bankhash,omitempty"`           // base58
+	ManifestParentAlpenglowBlockID string `json:"manifest_parent_alpenglow_block_id,omitempty"` // base58
+	ManifestBlockHeight            uint64 `json:"manifest_block_height,omitempty"`
+	ManifestAcctsLtHash            string `json:"manifest_accts_lt_hash,omitempty"` // base64
 
 	// Fee rate governor seed (static fields only)
 	ManifestFeeRateGovernor *ManifestFeeRateGovernorSeed `json:"manifest_fee_rate_governor,omitempty"`
