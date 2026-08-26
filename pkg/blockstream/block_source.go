@@ -35,7 +35,10 @@ const (
 )
 
 type BlockSourceOpts struct {
-	RpcClient               *rpcclient.RpcClient // Primary RPC for block fetching (getBlock)
+	RpcClient *rpcclient.RpcClient // Primary RPC for block fetching (getBlock)
+	// FinalizedOnly makes scheduling, block fetches, and skip proofs use
+	// finalized RPC commitment. The default remains confirmed.
+	FinalizedOnly           bool
 	SourceType              BlockSourceType
 	LightbringerEndpoint    string
 	TurbineBindAddr         string
@@ -299,6 +302,7 @@ type BlockSource struct {
 	currentSlot           uint64
 	blockDir              string
 	sourceType            BlockSourceType
+	finalizedOnly         bool
 
 	// RPC failover tracking
 	activeRpcIdx       atomic.Int32  // Currently active RPC index (0 = primary)
@@ -727,6 +731,7 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		currentSlot:                    opts.StartSlot,
 		blockDir:                       opts.BlockDir,
 		sourceType:                     opts.SourceType,
+		finalizedOnly:                  opts.FinalizedOnly,
 		rateLimiter:                    rate.NewLimiter(rate.Limit(maxRPS), maxRPS),
 		maxInflight:                    maxInflight,
 		tipSafetyMargin:                tipSafetyMargin,
@@ -1767,7 +1772,7 @@ func (bs *BlockSource) confirmSlotAbsentViaRPC(slot uint64) bool {
 	confirmedAbsent := false
 	shouldLog := bs.shouldLogDetailedRPCOutcome(slot)
 	for _, idx := range probeOrder {
-		slots, err := bs.rpcClients[idx].GetBlocksWithLimitConfirmed(slot, 1)
+		slots, err := bs.getSlotsWithLimit(bs.rpcClients[idx], slot, 1)
 		if shouldLog {
 			switch {
 			case err != nil:
@@ -1813,7 +1818,10 @@ func (bs *BlockSource) tryGetBlockFromFile(slot uint64) (*block.Block, error) {
 		file.Close()
 		return nil, fmt.Errorf("block decode error: %w", err)
 	}
-	out.FixupTxVersions()
+	if err := out.FixupTxVersions(); err != nil {
+		file.Close()
+		return nil, fmt.Errorf("block transaction versions: %w", err)
+	}
 
 	file.Close()
 	os.Remove(blockFilename)
@@ -1910,9 +1918,13 @@ func (bs *BlockSource) restoreToPrimary() bool {
 // fetchBlockOnce fetches a single block without internal retry loop.
 // rpcIdx specifies which RPC client to use (for consistent error attribution).
 func (bs *BlockSource) fetchBlockOnce(slot uint64, rpcIdx int32) (*b.Block, error) {
-	// Try file first
-	if blk, err := bs.tryGetBlockFromFile(slot); err == nil {
-		return blk, nil
+	// A legacy block file carries no commitment proof. Finalized-only replay
+	// must fetch through its finalized RPC path instead of relabelling a file
+	// captured earlier under confirmed commitment.
+	if !bs.finalizedOnly {
+		if blk, err := bs.tryGetBlockFromFile(slot); err == nil {
+			return blk, nil
+		}
 	}
 
 	// Use the specified RPC client (not getActiveRpc - that could race with failover)
@@ -1922,12 +1934,33 @@ func (bs *BlockSource) fetchBlockOnce(slot uint64, rpcIdx int32) (*b.Block, erro
 	rpc := bs.rpcClients[rpcIdx]
 
 	// Single RPC attempt (no internal retry - scheduler handles retries)
-	blockResult, err := rpc.GetBlockConfirmedOnce(slot)
+	blockResult, err := bs.getBlockOnce(rpc, slot)
 	if err != nil {
 		return nil, err
 	}
 
-	return block.FromBlockResult(blockResult, slot, rpc), nil
+	return block.FromBlockResult(blockResult, slot, rpc)
+}
+
+func (bs *BlockSource) getBlockOnce(client *rpcclient.RpcClient, slot uint64) (*rpc.GetBlockResult, error) {
+	if bs.finalizedOnly {
+		return client.GetBlockFinalizedOnce(slot)
+	}
+	return client.GetBlockConfirmedOnce(slot)
+}
+
+func (bs *BlockSource) getSchedulingTip(client *rpcclient.RpcClient, timeout time.Duration) (uint64, error) {
+	if bs.finalizedOnly {
+		return client.GetSlotWithTimeoutAndCommitment(timeout, rpc.CommitmentFinalized)
+	}
+	return client.GetSlotWithTimeout(timeout)
+}
+
+func (bs *BlockSource) getSlotsWithLimit(client *rpcclient.RpcClient, startSlot, limit uint64) ([]uint64, error) {
+	if bs.finalizedOnly {
+		return client.GetBlocksWithLimitFinalized(startSlot, limit)
+	}
+	return client.GetBlocksWithLimitConfirmed(startSlot, limit)
 }
 
 // pollTip periodically updates the confirmed tip by querying all configured RPCs
@@ -2435,7 +2468,7 @@ func (bs *BlockSource) RefreshTipsForSummary() {
 		for _, rpc := range bs.rpcClients {
 			go func(client *rpcclient.RpcClient) {
 				var r result
-				if tip, err := client.GetSlotWithTimeout(timeout); err == nil {
+				if tip, err := bs.getSchedulingTip(client, timeout); err == nil {
 					r.confirmed = tip
 				}
 				if tip, err := client.GetSlotProcessedWithTimeout(timeout); err == nil {
@@ -2479,7 +2512,7 @@ func (bs *BlockSource) getMaxTipFromAllRpcs(timeout time.Duration) uint64 {
 
 	// For single RPC, no need for goroutines
 	if len(bs.rpcClients) == 1 {
-		if tip, err := bs.rpcClients[0].GetSlotWithTimeout(timeout); err == nil {
+		if tip, err := bs.getSchedulingTip(bs.rpcClients[0], timeout); err == nil {
 			return tip
 		}
 		return 0
@@ -2494,7 +2527,7 @@ func (bs *BlockSource) getMaxTipFromAllRpcs(timeout time.Duration) uint64 {
 
 	for _, rpc := range bs.rpcClients {
 		go func(client *rpcclient.RpcClient) {
-			tip, err := client.GetSlotWithTimeout(timeout)
+			tip, err := bs.getSchedulingTip(client, timeout)
 			results <- result{tip: tip, err: err}
 		}(rpc)
 	}
@@ -2593,7 +2626,10 @@ func (bs *BlockSource) worker(wg *sync.WaitGroup, id int) {
 			bs.stats.FetchLatencyCount.Add(1)
 		}
 
-		skipped := err == rpcclient.SlotSkipped
+		// getBlock alone is not authoritative evidence of a skipped slot. Treat
+		// both skip-shaped responses as candidates; ordered emission separately
+		// requires a sufficiently-deep finalized getBlocks omission proof.
+		skipped := err == rpcclient.SlotSkipped || isSlotNotAvailableErr(err)
 		select {
 		case bs.resultQueue <- fetchResult{
 			slot:      slot,
@@ -2621,6 +2657,9 @@ func (bs *BlockSource) emitReplayBlock(blk *b.Block) bool {
 // emitOrderedBlocks receives results and emits blocks in order
 func (bs *BlockSource) emitOrderedBlocks() {
 	for result := range bs.resultQueue {
+		if result.skipped && result.rpcIdx >= 0 && bs.shouldProbeAbsentConfirmation(result.slot) && bs.confirmSlotAbsent != nil {
+			result.absentOK = bs.confirmSlotAbsent(result.slot)
+		}
 		if result.block != nil && result.block.FromLiveStream {
 			bs.finishLiveDelivery(result.slot)
 		}
@@ -2633,6 +2672,7 @@ func (bs *BlockSource) emitOrderedBlocks() {
 		var isHardErr bool
 		var isHistoryErr bool
 		var isRetriable bool
+		var finalizedSkip bool
 
 		if result.wakeEmitter {
 			bs.reorderMu.Lock()
@@ -2815,15 +2855,19 @@ func (bs *BlockSource) emitOrderedBlocks() {
 			}
 		}
 
-		// Handle result
-		// CRITICAL: All errors except SlotSkipped are retriable.
-		isRetriable = result.err != nil && !result.skipped
-
 		if result.err != nil {
 			bs.trackSlotError(result.slot, result.err, result.rpcIdx, result.latencyMs)
 		}
+		finalizedSkip = result.skipped
+		if finalizedSkip && result.rpcIdx >= 0 {
+			finalizedSkip = bs.shouldFinalizeSkippedSlot(result.slot, result.absentOK)
+		}
 
-		if result.skipped {
+		// Every RPC skip-shaped error remains retriable until a separate finalized
+		// omission proof confirms it. Certificate-driven skips use rpcIdx=-1.
+		isRetriable = result.err != nil && !finalizedSkip
+
+		if finalizedSkip {
 			bs.stats.FetchSkipped.Add(1)
 			bs.skippedSlots[result.slot] = true
 			delete(bs.liveSynthesizedSkips, result.slot)
@@ -3648,7 +3692,7 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 			rpc := bs.getActiveRpc()
 			for {
 				// Use single-attempt fetch to avoid inner retry loop bypassing rate limits
-				blockResult, err = rpc.GetBlockConfirmedOnce(uint64(slot))
+				blockResult, err = bs.getBlockOnce(rpc, uint64(slot))
 				if err == nil {
 					break
 				} else if err == rpcclient.SlotSkipped {
@@ -3663,14 +3707,17 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 					return nil, fmt.Errorf("error fetching block: %w", err)
 				}
 			}
-			blk = block.FromBlockResult(blockResult, slot, rpc)
+			blk, err = block.FromBlockResult(blockResult, slot, rpc)
+			if err != nil {
+				return nil, err
+			}
 		}
 	} else if bs.sourceType == BlockSourceLightbringer || bs.sourceType == BlockSourceTurbine {
 		// Legacy sequential mode does not support the live stream handoff.
 		// If this path is ever used, fall back to the RPC catchup fetcher.
 		rpc := bs.getActiveRpc()
 		for {
-			blockResult, err = rpc.GetBlockConfirmedOnce(slot)
+			blockResult, err = bs.getBlockOnce(rpc, slot)
 			if err == nil {
 				break
 			} else if err == rpcclient.SlotSkipped {
@@ -3685,7 +3732,10 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 				return nil, fmt.Errorf("error fetching block: %w", err)
 			}
 		}
-		blk = block.FromBlockResult(blockResult, slot, rpc)
+		blk, err = block.FromBlockResult(blockResult, slot, rpc)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return blk, nil

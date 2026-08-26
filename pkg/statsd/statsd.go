@@ -151,6 +151,14 @@ var (
 	TasksSetIfSlotHigherQueueSize = Metric{"tasks_set_if_slot_higher_queue_size"}
 	Epoch                         = Metric{"epoch"}
 	Slot                          = Metric{"slot"}
+	MithrilReplaySlot             = Metric{"mithril_replay_slot"}
+	MithrilRootedSlot             = Metric{"mithril_rooted_slot"}
+	MithrilFinalitySlot           = Metric{"mithril_finality_slot"}
+	MithrilVoterStageObservations = Metric{"mithril_voter_stage_observations"}
+	MithrilVoterStageLatencyUS    = Metric{"mithril_voter_stage_latency_us"}
+	MithrilVoterPeerConnections   = Metric{"mithril_voter_peer_connections"}
+	MithrilVoterPeerEvents        = Metric{"mithril_voter_peer_events"}
+	MithrilVoterPeerQueueDepth    = Metric{"mithril_voter_peer_queue_depth"}
 
 	TestCount = Metric{"test_count"} // used for testing purposes, not a real metric
 )
@@ -275,6 +283,14 @@ var MetricToType = map[Metric]metricType{
 	TasksSetIfSlotHigherQueueSize: GaugeT,
 	Epoch:                         GaugeT,
 	Slot:                          GaugeT,
+	MithrilReplaySlot:             GaugeT,
+	MithrilRootedSlot:             GaugeT,
+	MithrilFinalitySlot:           GaugeT,
+	MithrilVoterStageObservations: GaugeT,
+	MithrilVoterStageLatencyUS:    GaugeT,
+	MithrilVoterPeerConnections:   GaugeT,
+	MithrilVoterPeerEvents:        GaugeT,
+	MithrilVoterPeerQueueDepth:    GaugeT,
 	TurbineReceiverActive:         GaugeT,
 	TurbineAssemblerActiveSlots:   GaugeT,
 	TurbineLastPacketTimestamp:    GaugeT,
@@ -393,6 +409,14 @@ var MetricToLabels = map[Metric][]string{
 	TasksSetIfSlotHigherQueueSize: {},
 	Epoch:                         {},
 	Slot:                          {},
+	MithrilReplaySlot:             {},
+	MithrilRootedSlot:             {},
+	MithrilFinalitySlot:           {},
+	MithrilVoterStageObservations: {"stage"},
+	MithrilVoterStageLatencyUS:    {"stage", "statistic"},
+	MithrilVoterPeerConnections:   {"state"},
+	MithrilVoterPeerEvents:        {"event"},
+	MithrilVoterPeerQueueDepth:    {"queue"},
 	TurbineReceiverActive:         {},
 	TurbineAssemblerActiveSlots:   {},
 	TurbineLastPacketTimestamp:    {},

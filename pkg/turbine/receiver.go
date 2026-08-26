@@ -183,6 +183,13 @@ func (r *UDPReceiver) SetFirstShredSink(fn func(slot uint64)) {
 	r.firstShredMu.Unlock()
 }
 
+func (r *UDPReceiver) SetAlpenglowMode(enabled bool) {
+	if r == nil || r.assembler == nil {
+		return
+	}
+	r.assembler.SetAlpenglowMode(enabled)
+}
+
 func (r *UDPReceiver) noteFirstShred(slot uint64) {
 	r.firstShredMu.Lock()
 	if _, exists := r.firstShredSeen[slot]; exists {
@@ -250,6 +257,19 @@ func (r *UDPReceiver) RepairOutstandingForSlot(slot uint64) int {
 func (r *UDPReceiver) SetKnownAlpenglowBlockID(slot uint64, blockID solana.Hash) {
 	if r == nil || r.assembler == nil {
 		return
+	}
+	r.slotResetMu.Lock()
+	defer r.slotResetMu.Unlock()
+	// A decisive block identity is the recovery boundary for a dead equivocated
+	// slot. Drop both conflicting packet sets before repairing the selected one.
+	if r.assembler.SlotDead(slot) {
+		if r.repairClient != nil {
+			r.repairClient.cancelSlotRequests(slot)
+		}
+		r.assembler.ResetSlot(slot)
+		if r.spool != nil {
+			r.spool.DiscardSlot(slot)
+		}
 	}
 	r.assembler.SetKnownAlpenglowBlockID(slot, blockID)
 }
@@ -755,6 +775,9 @@ func (r *UDPReceiver) processPacket(ctx context.Context, conn *net.UDPConn, pack
 	if err != nil {
 		if errors.Is(err, ErrDuplicateShred) {
 			return true
+		}
+		if errors.Is(err, ErrConflictingShred) && r.repairClient != nil {
+			r.repairClient.cancelSlotRequests(shred.Slot)
 		}
 		r.assemblyErrors.Add(1)
 		select {

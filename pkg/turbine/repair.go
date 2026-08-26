@@ -543,9 +543,10 @@ func (c *repairClient) handleRepairPing(conn *net.UDPConn, packet []byte, from *
 // request it is matched to by (responder, nonce). Serve-repair answers
 // WindowIndex/HighestWindowIndex with DATA shreds only: a WindowIndex response
 // must carry the exact requested data index; a HighestWindowIndex response
-// carries the highest data shred at or beyond the requested index. Anything
-// else — wrong slot, a coding shred, a different/short index — is a
-// non-conforming answer. Enforcing this BEFORE crediting stops a
+// carries the highest data shred at or beyond the requested index, or a lower
+// shred carrying LAST_SHRED_IN_SLOT (which proves the block ended before that
+// index). Anything else — wrong slot, a coding shred, or a lower non-terminal
+// index — is a non-conforming answer. Enforcing this BEFORE crediting stops a
 // malicious/buggy peer from echoing a valid nonce with a signed-but-wrong shred
 // to farm responder credit, poison peer ranking, inflate response stats, and
 // prematurely release the still-missing shred's in-flight retry slot.
@@ -557,7 +558,7 @@ func shredSatisfiesRequest(key repairRequestKey, shred *Shred) bool {
 	case repairRequestWindowIndex:
 		return shred.Index == key.index
 	case repairRequestHighestWindowIndex:
-		return shred.Index >= key.index
+		return shred.Index >= key.index || shred.LastInSlot()
 	default:
 		return false
 	}

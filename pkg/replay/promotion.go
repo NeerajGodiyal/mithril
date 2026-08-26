@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/rootedevents"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/gagliardetto/solana-go"
@@ -20,11 +22,27 @@ import (
 // exceed it rather than growing RAM unbounded (~16x normal rooting lag).
 const unrootedTailHaltCap = 512
 
+// rootedEventObservationBytesLimit bounds fork-local transaction evidence held
+// before the next durable fold.
+const rootedEventObservationBytesLimit = uint64(512 << 20)
+
 // batchCommitter durably folds a batch of rooted slots into the canonical
 // store as one sequential segment (union-deduped, one fsync, atomic index
 // flip). Satisfied by AccountsDb.CommitBatch.
 type batchCommitter interface {
 	CommitBatch(deltas []accounts.SlotDelta, throughSlot uint64, bankhashes map[uint64][32]byte, resumeCtx []byte) (accountsdb.BatchCommitResult, error)
+}
+
+// generationCommitter invalidates previously captured bank readers before the
+// durable account index can begin publishing a newer rooted generation.
+type generationCommitter struct {
+	batchCommitter
+	generation *atomic.Uint64
+}
+
+func (c generationCommitter) CommitBatch(deltas []accounts.SlotDelta, throughSlot uint64, bankhashes map[uint64][32]byte, resumeCtx []byte) (accountsdb.BatchCommitResult, error) {
+	c.generation.Add(1)
+	return c.batchCommitter.CommitBatch(deltas, throughSlot, bankhashes, resumeCtx)
 }
 
 // TransactionStatusCheckpointHooks deliberately split status-cache capture
@@ -39,6 +57,13 @@ type TransactionStatusCheckpointHooks struct {
 	// has durably selected the manifest carrying selected. Its error is logged
 	// and ignored: once CommitBatch succeeds, the fold must remain successful.
 	AfterCommit func(selected *state.TransactionStatusCheckpointRef) error
+}
+
+// RootedEventHooks installs immutable per-slot transaction and account events
+// before the fold manifest selects them.
+type RootedEventHooks struct {
+	Install     func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error)
+	AfterCommit func(*state.RootedEventBatchRef) error
 }
 
 // defaultFoldBatchSlots is the fold chunk size K when none is configured:
@@ -110,6 +135,8 @@ type unrootedState interface {
 	blockAccountSource
 	Add(slot uint64, delta []*accounts.Account, bankhash []byte)
 	SetContext(slot uint64, ctx *state.ResumeContext, bankSysvars ...*sealevel.BankSysvars)
+	CapturesRootedEvents() bool
+	RecordRootedEventSlot(slot, parentSlot uint64, observations []rootedevents.TransactionObservation) error
 	promote(through uint64) (uint64, *state.ResumeContext, error)
 	// flush force-folds the trailing partial chunk <= through. Epoch-boundary
 	// scans use it to settle the durable AccountsDB view; graceful shutdown uses
@@ -121,12 +148,18 @@ type unrootedState interface {
 // unrootedTail layers an in-RAM UnrootedOverlay over the durable store: reads
 // resolve overlay→durable, commits buffer until rooted slots promote out.
 type unrootedTail struct {
-	overlay     *accounts.WorkingSet
-	durable     blockAccountSource // the canonical rooted store (for read fall-through)
-	committer   batchCommitter     // durable promotion of rooted slot batches
-	bankhashes  map[uint64][32]byte
-	batchSlots  int    // fold chunk size K
-	stakeIdxDir string // directory of stake_pubkeys.idx; pending stake entries flush here at fold time
+	overlay           *accounts.WorkingSet
+	durable           blockAccountSource // the canonical rooted store (for read fall-through)
+	committer         batchCommitter     // synchronous durable promotion of rooted slot batches
+	asyncCommitter    batchCommitter     // raw committer; async admission advances durableGeneration on the loop thread
+	durableGeneration atomic.Uint64
+	bankhashes        map[uint64][32]byte
+	parentSlots       map[uint64]uint64
+	transactions      map[uint64][]rootedevents.TransactionObservation
+	transactionSizes  map[uint64]uint64
+	transactionBytes  uint64
+	batchSlots        int    // fold chunk size K
+	stakeIdxDir       string // directory of stake_pubkeys.idx; pending stake entries flush here at fold time
 	// contexts holds the deep-copied end-of-slot resume context per held slot,
 	// retained until promotion so the context as of the last rooted slot survives for resume.
 	contexts map[uint64]*state.ResumeContext
@@ -140,23 +173,78 @@ type unrootedTail struct {
 	haltCap     int // halt replay if held slots exceed this (rooting stalled)
 
 	transactionStatusCheckpointHooks TransactionStatusCheckpointHooks
+	rootedEventHooks                 RootedEventHooks
+}
+
+var errCapturedBankStale = errors.New("captured account bank durable generation changed")
+
+type capturedUnrootedBank struct {
+	slot       uint64
+	overlay    *accounts.WorkingSetView
+	durable    blockAccountSource
+	generation *atomic.Uint64
+	captured   uint64
+}
+
+func (r *capturedUnrootedBank) ValidateAccountRead() error {
+	if r.generation.Load() != r.captured {
+		return errCapturedBankStale
+	}
+	return nil
+}
+
+func (r *capturedUnrootedBank) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
+	if slot != r.slot {
+		return nil, fmt.Errorf("captured account bank slot %d cannot serve slot %d", r.slot, slot)
+	}
+	if r.generation.Load() != r.captured {
+		return nil, errCapturedBankStale
+	}
+	if acct, ok := r.overlay.Lookup([32]byte(pubkey)); ok {
+		return acct.Clone(), nil
+	}
+	acct, err := r.durable.GetAccount(r.slot, pubkey)
+	if r.generation.Load() != r.captured {
+		return nil, errCapturedBankStale
+	}
+	if err != nil || acct == nil {
+		return acct, err
+	}
+	return acct.Clone(), nil
+}
+
+func (t *unrootedTail) captureBank(slot uint64) sealevel.AccountReader {
+	return &capturedUnrootedBank{
+		slot:       slot,
+		overlay:    t.overlay.ViewAt(slot),
+		durable:    t.durable,
+		generation: &t.durableGeneration,
+		captured:   t.durableGeneration.Load(),
+	}
 }
 
 func newUnrootedTail(durable blockAccountSource, committer batchCommitter, haltCap int, batchSlots int, stakeIdxDir string) *unrootedTail {
 	if batchSlots <= 0 {
 		batchSlots = defaultFoldBatchSlots
 	}
-	return &unrootedTail{
-		overlay:     accounts.NewWorkingSet(),
-		durable:     durable,
-		committer:   committer,
-		bankhashes:  make(map[uint64][32]byte),
-		batchSlots:  batchSlots,
-		stakeIdxDir: stakeIdxDir,
-		contexts:    make(map[uint64]*state.ResumeContext),
-		bankSysvars: make(map[uint64]*sealevel.BankSysvars),
-		haltCap:     haltCap,
+	tail := &unrootedTail{
+		overlay:          accounts.NewWorkingSet(),
+		durable:          durable,
+		bankhashes:       make(map[uint64][32]byte),
+		parentSlots:      make(map[uint64]uint64),
+		transactions:     make(map[uint64][]rootedevents.TransactionObservation),
+		transactionSizes: make(map[uint64]uint64),
+		batchSlots:       batchSlots,
+		stakeIdxDir:      stakeIdxDir,
+		contexts:         make(map[uint64]*state.ResumeContext),
+		bankSysvars:      make(map[uint64]*sealevel.BankSysvars),
+		haltCap:          haltCap,
 	}
+	if committer != nil {
+		tail.asyncCommitter = committer
+		tail.committer = generationCommitter{batchCommitter: committer, generation: &tail.durableGeneration}
+	}
+	return tail
 }
 
 // SetTransactionStatusCheckpointHooks installs the fold-time durability hooks.
@@ -170,10 +258,80 @@ func (t *unrootedTail) SetTransactionStatusCheckpointHooks(hooks TransactionStat
 	return nil
 }
 
-// GetAccount resolves the newest unrooted write for pubkey, else the durable
-// (rooted) value read at slot.
+// SetRootedEventHooks configures event installation before promotion starts.
+func (t *unrootedTail) SetRootedEventHooks(hooks RootedEventHooks) error {
+	if err := validateRootedEventHooks(hooks); err != nil {
+		return err
+	}
+	t.rootedEventHooks = hooks
+	return nil
+}
+
+func (t *unrootedTail) CapturesRootedEvents() bool {
+	return t != nil && t.rootedEventHooks.Install != nil
+}
+
+// RecordRootedEventSlot attaches owned execution observations and lineage to a
+// held slot. The data follows that slot through promotion or unwind.
+func (t *unrootedTail) RecordRootedEventSlot(slot, parentSlot uint64, observations []rootedevents.TransactionObservation) error {
+	return t.recordRootedEventSlotWithLimit(slot, parentSlot, observations, rootedEventObservationBytesLimit)
+}
+
+func (t *unrootedTail) recordRootedEventSlotWithLimit(
+	slot, parentSlot uint64,
+	observations []rootedevents.TransactionObservation,
+	limit uint64,
+) error {
+	if !t.CapturesRootedEvents() {
+		return nil
+	}
+	size := transactionObservationsSize(observations)
+	retained := t.transactionBytes - t.transactionSizes[slot]
+	if size > limit || retained > limit-size {
+		return fmt.Errorf("rooted transaction observations exceed the %d-byte fork-tail limit at slot %d", limit, slot)
+	}
+	t.parentSlots[slot] = parentSlot
+	t.transactions[slot] = rootedevents.CloneTransactionObservations(observations)
+	t.transactionSizes[slot] = size
+	t.transactionBytes = retained + size
+	return nil
+}
+
+func transactionObservationsSize(observations []rootedevents.TransactionObservation) uint64 {
+	var size uint64
+	add := func(value uint64) {
+		if value > ^uint64(0)-size {
+			size = ^uint64(0)
+			return
+		}
+		size += value
+	}
+	for _, observation := range observations {
+		add(256)
+		add(uint64(len(observation.Signature) + len(observation.Message) + len(observation.Failure)))
+		for _, key := range observation.AccountKeys {
+			add(16 + uint64(len(key)))
+		}
+		for _, log := range observation.Logs {
+			add(16 + uint64(len(log)))
+		}
+		for _, group := range observation.Inner {
+			add(32)
+			for _, instruction := range group.Instructions {
+				add(32 + uint64(len(instruction.Accounts))*2 + uint64(len(instruction.Data)))
+			}
+		}
+		if observation.ReturnData != nil {
+			add(32 + uint64(len(observation.ReturnData.ProgramID)+len(observation.ReturnData.Data)))
+		}
+	}
+	return size
+}
+
+// GetAccount resolves the newest unrooted write at or before slot, else the
+// durable (rooted) value read at slot.
 func (t *unrootedTail) GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
-	if a, ok := t.overlay.Lookup([32]byte(pubkey)); ok {
+	if a, ok := t.overlay.LookupAt(slot, [32]byte(pubkey)); ok {
 		return a.Clone(), nil
 	}
 	a, err := t.durable.GetAccount(slot, pubkey)
@@ -186,7 +344,7 @@ func (t *unrootedTail) GetAccount(slot uint64, pubkey solana.PublicKey) (*accoun
 func (t *unrootedTail) GetAccountWithStats(slot uint64, pubkey solana.PublicKey) (*accounts.Account, accountsdb.AccountReadStats, error) {
 	var stats accountsdb.AccountReadStats
 	lookupStart := time.Now()
-	if a, ok := t.overlay.Lookup([32]byte(pubkey)); ok {
+	if a, ok := t.overlay.LookupAt(slot, [32]byte(pubkey)); ok {
 		stats.WorkingSetLookupNanoseconds = uint64(time.Since(lookupStart).Nanoseconds())
 		stats.WorkingSetHit = true
 		// Callers receive a mutable account, never the WorkingSet's retained
@@ -244,7 +402,7 @@ func (t *unrootedTail) GetAccountsBatchSharedWithStats(ctx context.Context, slot
 	}
 	out := make([]*accounts.Account, len(pks))
 	lookupStart := time.Now()
-	t.overlay.LookupBatch(pks, out)
+	t.overlay.LookupBatchAt(slot, pks, out)
 	stats.WorkingSetLookupNanoseconds = uint64(time.Since(lookupStart).Nanoseconds())
 	missCount := 0
 	for _, acct := range out {
@@ -323,7 +481,11 @@ func (t *unrootedTail) flush(through uint64) (uint64, *state.ResumeContext, erro
 }
 
 func (t *unrootedTail) promoteChunked(through uint64, force bool) (uint64, *state.ResumeContext, error) {
-	promotedThrough, err := promoteRootedBatched(t.overlay, through, t.bankhashes, t.contexts, t.committer, t.batchSlots, t.stakeIdxDir, force, t.transactionStatusCheckpointHooks)
+	promotedThrough, err := promoteRootedBatchedWithEvents(
+		t.overlay, through, t.bankhashes, t.parentSlots, t.transactions, t.contexts,
+		t.committer, t.batchSlots, t.stakeIdxDir, force, t.rootedEventHooks,
+		t.transactionStatusCheckpointHooks,
+	)
 	if promotedThrough == 0 {
 		return 0, nil, err
 	}
@@ -338,7 +500,23 @@ func (t *unrootedTail) promoteChunked(through uint64, force bool) (uint64, *stat
 			delete(t.bankSysvars, s)
 		}
 	}
+	t.dropRootedEventSlotsThrough(promotedThrough)
 	return promotedThrough, ctx, err
+}
+
+func (t *unrootedTail) dropRootedEventSlotsThrough(through uint64) {
+	for slot := range t.parentSlots {
+		if slot <= through {
+			delete(t.parentSlots, slot)
+		}
+	}
+	for slot, size := range t.transactionSizes {
+		if slot <= through {
+			delete(t.transactions, slot)
+			delete(t.transactionSizes, slot)
+			t.transactionBytes -= size
+		}
+	}
 }
 
 // ── Async promotion ─────────────────────────────────────────────────────────
@@ -381,6 +559,9 @@ type foldJob struct {
 	transactionStatusCheckpointPayload     []byte
 	installTransactionStatusCheckpoint     func(through uint64, payload []byte) (*state.TransactionStatusCheckpointRef, error)
 	afterTransactionStatusCheckpointCommit func(selected *state.TransactionStatusCheckpointRef) error
+	rootedEventMetadata                    map[uint64]rootedevents.SlotMeta
+	installRootedEvents                    func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error)
+	afterRootedEventsCommit                func(*state.RootedEventBatchRef) error
 }
 
 type foldResult struct {
@@ -434,6 +615,13 @@ func (t *unrootedTail) buildFoldJob(through uint64, force bool, hookOverrides ..
 			bankhashes[sd.Slot] = bh
 		}
 	}
+	var rootedEventMetadata map[uint64]rootedevents.SlotMeta
+	if t.rootedEventHooks.Install != nil {
+		rootedEventMetadata, err = buildRootedEventMetadata(chunk, bankhashes, t.parentSlots, t.transactions)
+		if err != nil {
+			return nil, fmt.Errorf("fold chunk through slot %d: %w", through, err)
+		}
+	}
 	return &foldJob{
 		chunk:                                  append([]accounts.SlotDelta(nil), chunk...),
 		through:                                through,
@@ -443,6 +631,9 @@ func (t *unrootedTail) buildFoldJob(through uint64, force bool, hookOverrides ..
 		transactionStatusCheckpointPayload:     checkpointPayload,
 		installTransactionStatusCheckpoint:     hooks.Install,
 		afterTransactionStatusCheckpointCommit: hooks.AfterCommit,
+		rootedEventMetadata:                    rootedEventMetadata,
+		installRootedEvents:                    t.rootedEventHooks.Install,
+		afterRootedEventsCommit:                t.rootedEventHooks.AfterCommit,
 	}, nil
 }
 
@@ -467,6 +658,20 @@ func runFoldJob(committer batchCommitter, job *foldJob) error {
 		selectedCopy := refCopy
 		selectedCheckpoint = &selectedCopy
 	}
+	var selectedRootedEvents *state.RootedEventBatchRef
+	if job.installRootedEvents != nil {
+		ref, err := job.installRootedEvents(job.chunk, job.rootedEventMetadata)
+		if err != nil {
+			return fmt.Errorf("fold chunk through slot %d: prepare rooted events: %w", job.through, err)
+		}
+		if err := validateRootedEventRef(ref, job.chunk); err != nil {
+			return fmt.Errorf("fold chunk through slot %d: prepared rooted events are invalid: %w", job.through, err)
+		}
+		refCopy := *ref
+		job.ctx.RootedEventBatch = &refCopy
+		selectedCopy := refCopy
+		selectedRootedEvents = &selectedCopy
+	}
 	ctxJSON, err := json.Marshal(job.ctx)
 	if err != nil {
 		return fmt.Errorf("fold chunk through slot %d: marshal resume context: %w", job.through, err)
@@ -484,6 +689,11 @@ func runFoldJob(committer batchCommitter, job *foldJob) error {
 	if job.afterTransactionStatusCheckpointCommit != nil {
 		if err := job.afterTransactionStatusCheckpointCommit(selectedCheckpoint); err != nil {
 			mlog.Log.Warnf("fold chunk through slot %d: transaction status checkpoint cleanup failed after durable commit: %v", job.through, err)
+		}
+	}
+	if job.afterRootedEventsCommit != nil {
+		if err := job.afterRootedEventsCommit(selectedRootedEvents); err != nil {
+			mlog.Log.Warnf("fold chunk through slot %d: rooted-event cleanup failed after durable commit: %v", job.through, err)
 		}
 	}
 	return nil
@@ -509,25 +719,28 @@ func (t *unrootedTail) applyFoldJob(job *foldJob) *state.ResumeContext {
 			delete(t.bankSysvars, s)
 		}
 	}
+	t.dropRootedEventSlotsThrough(job.through)
 	return job.ctx
 }
 
 // asyncPromoter runs fold jobs on a worker goroutine, one in flight at a time.
 // inFlight is loop-thread-owned; jobs/results carry the handoff.
 type asyncPromoter struct {
-	committer batchCommitter
-	jobs      chan *foldJob
-	results   chan foldResult
-	inFlight  bool
-	done      chan struct{}
+	committer  batchCommitter
+	generation *atomic.Uint64
+	jobs       chan *foldJob
+	results    chan foldResult
+	inFlight   bool
+	done       chan struct{}
 }
 
-func newAsyncPromoter(committer batchCommitter) *asyncPromoter {
+func newAsyncPromoter(committer batchCommitter, generation *atomic.Uint64) *asyncPromoter {
 	p := &asyncPromoter{
-		committer: committer,
-		jobs:      make(chan *foldJob, 1),
-		results:   make(chan foldResult, 1),
-		done:      make(chan struct{}),
+		committer:  committer,
+		generation: generation,
+		jobs:       make(chan *foldJob, 1),
+		results:    make(chan foldResult, 1),
+		done:       make(chan struct{}),
 	}
 	go p.run()
 	return p
@@ -547,6 +760,9 @@ func (p *asyncPromoter) run() {
 
 // enqueue hands a job to the worker (loop thread; requires !inFlight).
 func (p *asyncPromoter) enqueue(job *foldJob) {
+	if p.generation != nil {
+		p.generation.Add(1)
+	}
 	p.jobs <- job
 	p.inFlight = true
 }
@@ -602,6 +818,18 @@ func (t *unrootedTail) unwind(fromSlot uint64) (*state.ResumeContext, *sealevel.
 	for s := range t.bankhashes {
 		if s >= fromSlot {
 			delete(t.bankhashes, s)
+		}
+	}
+	for slot := range t.parentSlots {
+		if slot >= fromSlot {
+			delete(t.parentSlots, slot)
+		}
+	}
+	for slot, size := range t.transactionSizes {
+		if slot >= fromSlot {
+			delete(t.transactions, slot)
+			delete(t.transactionSizes, slot)
+			t.transactionBytes -= size
 		}
 	}
 	var ctx *state.ResumeContext
@@ -673,6 +901,29 @@ func promoteRootedBatched(
 	force bool,
 	hookOverrides ...TransactionStatusCheckpointHooks,
 ) (promotedThrough uint64, err error) {
+	return promoteRootedBatchedWithEvents(
+		overlay, through, bankhashes, nil, nil, contexts, committer, batchSlots,
+		stakeIdxDir, force, RootedEventHooks{}, hookOverrides...,
+	)
+}
+
+func promoteRootedBatchedWithEvents(
+	overlay *accounts.WorkingSet,
+	through uint64,
+	bankhashes map[uint64][32]byte,
+	parentSlots map[uint64]uint64,
+	transactions map[uint64][]rootedevents.TransactionObservation,
+	contexts map[uint64]*state.ResumeContext,
+	committer batchCommitter,
+	batchSlots int,
+	stakeIdxDir string,
+	force bool,
+	rootedEventHooks RootedEventHooks,
+	hookOverrides ...TransactionStatusCheckpointHooks,
+) (promotedThrough uint64, err error) {
+	if err := validateRootedEventHooks(rootedEventHooks); err != nil {
+		return 0, err
+	}
 	hooks, err := resolveTransactionStatusCheckpointHooks(TransactionStatusCheckpointHooks{}, hookOverrides)
 	if err != nil {
 		return 0, err
@@ -737,6 +988,27 @@ func promoteRootedBatched(
 			selectedCopy := refCopy
 			selectedCheckpoint = &selectedCopy
 		}
+		var selectedRootedEvents *state.RootedEventBatchRef
+		if rootedEventHooks.Install != nil {
+			metadata, metaErr := buildRootedEventMetadata(chunk, chunkBankhashes, parentSlots, transactions)
+			if metaErr != nil {
+				err = fmt.Errorf("promote chunk through slot %d: %w", chunkThrough, metaErr)
+				break
+			}
+			ref, prepareErr := rootedEventHooks.Install(chunk, metadata)
+			if prepareErr != nil {
+				err = fmt.Errorf("promote chunk through slot %d: prepare rooted events: %w", chunkThrough, prepareErr)
+				break
+			}
+			if refErr := validateRootedEventRef(ref, chunk); refErr != nil {
+				err = fmt.Errorf("promote chunk through slot %d: prepared rooted events are invalid: %w", chunkThrough, refErr)
+				break
+			}
+			refCopy := *ref
+			ctx.RootedEventBatch = &refCopy
+			selectedCopy := refCopy
+			selectedRootedEvents = &selectedCopy
+		}
 		ctxJSON, merr := json.Marshal(ctx)
 		if merr != nil {
 			err = fmt.Errorf("promote chunk through slot %d: marshal resume context: %w", chunkThrough, merr)
@@ -765,6 +1037,11 @@ func promoteRootedBatched(
 				mlog.Log.Warnf("promote chunk through slot %d: transaction status checkpoint cleanup failed after durable commit: %v", chunkThrough, gcErr)
 			}
 		}
+		if rootedEventHooks.AfterCommit != nil {
+			if gcErr := rootedEventHooks.AfterCommit(selectedRootedEvents); gcErr != nil {
+				mlog.Log.Warnf("promote chunk through slot %d: rooted-event cleanup failed after durable commit: %v", chunkThrough, gcErr)
+			}
+		}
 		// Publish the exact context selected by the committed manifest. The caller
 		// returns this context into MithrilState after the overlay apply.
 		contexts[chunkThrough] = ctx
@@ -772,6 +1049,8 @@ func promoteRootedBatched(
 		overlay.PromotePrefix(chunkThrough)
 		for _, sd := range chunk {
 			delete(bankhashes, sd.Slot)
+			delete(parentSlots, sd.Slot)
+			delete(transactions, sd.Slot)
 		}
 		promotedThrough = chunkThrough
 	}
@@ -801,6 +1080,57 @@ func validateTransactionStatusCheckpointHooks(hooks TransactionStatusCheckpointH
 	return nil
 }
 
+func validateRootedEventHooks(hooks RootedEventHooks) error {
+	if hooks.AfterCommit != nil && hooks.Install == nil {
+		return errors.New("rooted-event AfterCommit hook requires an Install hook")
+	}
+	return nil
+}
+
+func buildRootedEventMetadata(
+	chunk []accounts.SlotDelta,
+	bankhashes map[uint64][32]byte,
+	parentSlots map[uint64]uint64,
+	transactions map[uint64][]rootedevents.TransactionObservation,
+) (map[uint64]rootedevents.SlotMeta, error) {
+	metadata := make(map[uint64]rootedevents.SlotMeta, len(chunk))
+	for _, delta := range chunk {
+		bankhash, ok := bankhashes[delta.Slot]
+		if !ok {
+			return nil, fmt.Errorf("rooted events: no bankhash recorded for slot %d", delta.Slot)
+		}
+		parentSlot, ok := parentSlots[delta.Slot]
+		if !ok {
+			return nil, fmt.Errorf("rooted events: no parent slot recorded for slot %d", delta.Slot)
+		}
+		observations, ok := transactions[delta.Slot]
+		if !ok {
+			return nil, fmt.Errorf("rooted events: no transaction capture recorded for slot %d", delta.Slot)
+		}
+		metadata[delta.Slot] = rootedevents.SlotMeta{
+			Slot:         delta.Slot,
+			ParentSlot:   parentSlot,
+			Bankhash:     bankhash,
+			Transactions: observations,
+		}
+	}
+	return metadata, nil
+}
+
+func validateRootedEventRef(ref *state.RootedEventBatchRef, chunk []accounts.SlotDelta) error {
+	if err := rootedevents.ValidateSidecarRef(ref); err != nil {
+		return err
+	}
+	if len(chunk) == 0 {
+		return errors.New("rooted-event reference has no fold chunk")
+	}
+	if ref.FromSlot != chunk[0].Slot || ref.ThroughSlot != chunk[len(chunk)-1].Slot {
+		return fmt.Errorf("rooted-event range %d..%d does not match fold chunk %d..%d",
+			ref.FromSlot, ref.ThroughSlot, chunk[0].Slot, chunk[len(chunk)-1].Slot)
+	}
+	return nil
+}
+
 func cloneResumeContextForFold(ctx *state.ResumeContext) *state.ResumeContext {
 	if ctx == nil {
 		return nil
@@ -815,6 +1145,10 @@ func cloneResumeContextForFold(ctx *state.ResumeContext) *state.ResumeContext {
 	if ctx.TransactionStatusCheckpoint != nil {
 		ref := *ctx.TransactionStatusCheckpoint
 		clone.TransactionStatusCheckpoint = &ref
+	}
+	if ctx.RootedEventBatch != nil {
+		ref := *ctx.RootedEventBatch
+		clone.RootedEventBatch = &ref
 	}
 	return &clone
 }

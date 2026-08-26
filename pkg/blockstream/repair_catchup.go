@@ -117,10 +117,9 @@ func (bs *BlockSource) maybeRescueStalledCatchupSlot() {
 // serves only the trailing verifier. Turbine + repair are the native block
 // path; RPC block fetch exists ONLY for the too-far-behind case (the same
 // threshold, re-evaluated live inside the drive) — never on a stall timer.
-// A fresh boot within the threshold WAITS for turbine to wake (shreds
-// received, repair peers known) with RPC held off the gap entirely — shreds
-// are coming, so the node waits for shreds; if the gap outgrows the
-// threshold while waiting, the far-behind rule releases the hold to RPC.
+// A fresh boot within the threshold WAITS for repair peers and either a
+// verified shred or the confirmed RPC tip with RPC held off the gap entirely;
+// if the gap outgrows the threshold, the far-behind rule releases the hold.
 // The only RPC bridge left is the no-tip-signal edge (RPC tip unknown AND
 // no shreds — nothing to measure the gap against).
 func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.UDPReceiver) {
@@ -197,18 +196,17 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 			(bs.repairCatchupMaxGapSlots > 0 && gap <= bs.repairCatchupMaxGapSlots)
 		eligible := bs.repairCatchupEligible(gapOK)
 
-		// Repair can only fill the gap if turbine is demonstrably alive: shreds
-		// actually received (proves the socket/gossip path) and repair peers
-		// known (proves there is someone to ask). Arming before that just
-		// stalls the drive and burns a re-arm cooldown while RPC is gated off
-		// the gap — the boot-time failure mode this guard exists for.
+		// Repair needs a peer and a usable horizon. A verified shred proves the
+		// live path; the confirmed RPC tip also supplies that horizon when live
+		// shreds are from an epoch whose leader schedule is not cached yet.
+		// Repaired shreds still pass the normal leader/signature verification.
 		turbineReady := false
 		var shredEdge uint64
 		repairPeers := 0
 		if eligible {
 			shredEdge, _ = receiver.ShredEdges()
 			repairPeers = receiver.Stats().Repair.Peers
-			turbineReady = shredEdge > 0 && repairPeers > 0
+			turbineReady = repairCatchupReady(shredEdge, bs.confirmedTip.Load(), repairPeers)
 		}
 
 		if !eligible || !turbineReady {
@@ -276,6 +274,10 @@ func (bs *BlockSource) runRepairCatchup(ctx context.Context, receiver *turbine.U
 		// Stalled and fell back to RPC: loop back to monitoring (cooldown
 		// gates the next arming).
 	}
+}
+
+func repairCatchupReady(shredEdge, confirmedTip uint64, repairPeers int) bool {
+	return repairPeers > 0 && (shredEdge > 0 || confirmedTip > 0)
 }
 
 func (bs *BlockSource) clearSlotStateForLiveRefetch(slot uint64) {

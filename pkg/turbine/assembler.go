@@ -1,6 +1,7 @@
 package turbine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 
 var (
 	ErrDuplicateShred               = errors.New("duplicate data shred")
+	ErrConflictingShred             = errors.New("conflicting data shred")
 	ErrSlotIncomplete               = errors.New("slot incomplete")
 	ErrSlotOverflow                 = errors.New("slot has too many data shreds")
 	ErrNonCanonicalAlpenglowBlockID = errors.New("non-canonical alpenglow block id")
@@ -46,6 +48,7 @@ type SlotAssembler struct {
 	mu                   sync.Mutex
 	slots                map[uint64]*slotState
 	completedSlots       map[uint64]struct{}
+	deadSlots            map[uint64]struct{}
 	knownBlockIDs        map[uint64]solana.Hash
 	rejectedBlockIDs     map[uint64]map[solana.Hash]struct{}
 	protectedKnownIDs    map[uint64]struct{}
@@ -54,8 +57,9 @@ type SlotAssembler struct {
 	priorityRepairOrder  []uint64
 	encoders             map[fecLayout]reedsolomon.Encoder
 	partialShredObs      map[uint64]PartialShredObservation // shreds seen for slots that never became full (retained for skip observability)
-	retentionFloor       uint64                             // when non-zero, slots >= floor are never "too old" (repair catchup holds a window far behind the live edge)
-	edgeScanLag          uint64                             // how far behind the shred edge the freshness-repair scan reaches (0 = repairScanSlotWindow)
+	alpenglowMode        bool
+	retentionFloor       uint64 // when non-zero, slots >= floor are never "too old" (repair catchup holds a window far behind the live edge)
+	edgeScanLag          uint64 // how far behind the shred edge the freshness-repair scan reaches (0 = repairScanSlotWindow)
 	maxObservedSlot      uint64
 	highestFullSlot      uint64 // monotonic: highest slot reconstructed from shreds ("full", Agave SlotMeta/is_full sense)
 	recoveredDataShreds  uint64
@@ -167,6 +171,7 @@ func NewSlotAssembler() *SlotAssembler {
 	return &SlotAssembler{
 		slots:               make(map[uint64]*slotState),
 		completedSlots:      make(map[uint64]struct{}),
+		deadSlots:           make(map[uint64]struct{}),
 		knownBlockIDs:       make(map[uint64]solana.Hash),
 		rejectedBlockIDs:    make(map[uint64]map[solana.Hash]struct{}),
 		protectedKnownIDs:   make(map[uint64]struct{}),
@@ -176,6 +181,15 @@ func NewSlotAssembler() *SlotAssembler {
 		encoders:            make(map[fecLayout]reedsolomon.Encoder),
 		verifyTransactions:  validateBlockTransactionsContext,
 	}
+}
+
+// SetAlpenglowMode enables terminal duplicate handling. Classic replay keeps
+// its existing duplicate behavior because it has no certificate-driven path
+// for reopening a dead slot.
+func (a *SlotAssembler) SetAlpenglowMode(enabled bool) {
+	a.mu.Lock()
+	a.alpenglowMode = enabled
+	a.mu.Unlock()
 }
 
 // recordPartialObsLocked snapshots a never-completed slot's shred arrivals
@@ -256,6 +270,10 @@ func (a *SlotAssembler) addShredFrom(shred *Shred, fromRepair bool) (*slotComple
 		a.ignoredOldShreds++
 		return nil, nil
 	}
+	if _, dead := a.deadSlots[shred.Slot]; dead {
+		a.ignoredOldShreds++
+		return nil, nil
+	}
 
 	state := a.slotState(shred.Slot, shred.Version)
 	if state.completing {
@@ -284,6 +302,12 @@ func (a *SlotAssembler) addShredFrom(shred *Shred, fromRepair bool) (*slotComple
 		if errors.Is(err, ErrDuplicateShred) {
 			return nil, nil
 		}
+		if errors.Is(err, ErrConflictingShred) {
+			if a.handleConflictingShredLocked(state) {
+				return nil, err
+			}
+			return nil, nil
+		}
 		state.noteError(err)
 		return nil, err
 	}
@@ -298,19 +322,37 @@ func (a *SlotAssembler) addShredFrom(shred *Shred, fromRepair bool) (*slotComple
 	}
 	for _, recoveredShred := range recovered {
 		err := state.addDataShred(recoveredShred)
-		if err != nil && !errors.Is(err, ErrDuplicateShred) {
+		if err != nil {
+			if errors.Is(err, ErrDuplicateShred) {
+				continue
+			}
+			if errors.Is(err, ErrConflictingShred) {
+				if a.handleConflictingShredLocked(state) {
+					return nil, err
+				}
+				continue
+			}
 			state.noteError(err)
 			return nil, err
 		}
-		if err == nil {
-			a.recoveredDataShreds++
-		}
+		a.recoveredDataShreds++
 	}
 
 	if !state.complete() {
 		return nil, nil
 	}
 	return a.claimCompletionLocked(state, false), nil
+}
+
+func (a *SlotAssembler) handleConflictingShredLocked(state *slotState) bool {
+	if !a.alpenglowMode {
+		return false
+	}
+	a.recordPartialObsLocked(state)
+	delete(a.slots, state.slot)
+	a.deadSlots[state.slot] = struct{}{}
+	delete(a.priorityRepairSlots, state.slot)
+	return true
 }
 
 func (a *SlotAssembler) claimCompletionLocked(state *slotState, reportNonCanonical bool) *slotCompletionWork {
@@ -544,6 +586,7 @@ func (a *SlotAssembler) ResetSlot(slot uint64) {
 	a.recordPartialObsLocked(a.slots[slot])
 	delete(a.slots, slot)
 	delete(a.completedSlots, slot)
+	delete(a.deadSlots, slot)
 }
 
 func (a *SlotAssembler) PrioritizeRepairSlot(slot uint64) {
@@ -565,7 +608,9 @@ func (a *SlotAssembler) PrioritizeRepairRange(start, end uint64) {
 	defer a.mu.Unlock()
 
 	for slot := start; ; slot++ {
-		if _, completed := a.completedSlots[slot]; !completed {
+		_, completed := a.completedSlots[slot]
+		_, dead := a.deadSlots[slot]
+		if !completed && !dead {
 			if _, exists := a.priorityRepairSlots[slot]; !exists {
 				a.priorityRepairSlots[slot] = struct{}{}
 				a.priorityRepairOrder = append(a.priorityRepairOrder, slot)
@@ -656,6 +701,11 @@ func (a *SlotAssembler) pruneOldSlotsLocked() {
 		for slot := range a.completedSlots {
 			if slot < minSlot {
 				delete(a.completedSlots, slot)
+			}
+		}
+		for slot := range a.deadSlots {
+			if slot < minSlot {
+				delete(a.deadSlots, slot)
 			}
 		}
 		clear(a.protectedKnownIDs)
@@ -770,6 +820,10 @@ func (a *SlotAssembler) prunePriorityRepairSlotsLocked() {
 			delete(a.priorityRepairSlots, slot)
 			continue
 		}
+		if _, dead := a.deadSlots[slot]; dead {
+			delete(a.priorityRepairSlots, slot)
+			continue
+		}
 		filtered = append(filtered, slot)
 	}
 	a.priorityRepairOrder = filtered
@@ -782,8 +836,11 @@ func (a *SlotAssembler) prunePriorityRepairSlotsLocked() {
 }
 
 func (s *slotState) addDataShred(shred *Shred) error {
-	if _, exists := s.shreds[shred.Index]; exists {
-		return ErrDuplicateShred
+	if existing := s.shreds[shred.Index]; existing != nil {
+		if bytes.Equal(existing.Payload, shred.Payload) {
+			return ErrDuplicateShred
+		}
+		return fmt.Errorf("%w: slot %d shred index %d", ErrConflictingShred, shred.Slot, shred.Index)
 	}
 	if shred.Index >= maxDataShredsPerSlot {
 		return fmt.Errorf("%w: slot %d shred index %d", ErrSlotOverflow, shred.Slot, shred.Index)
@@ -1119,6 +1176,16 @@ func (a *SlotAssembler) SlotCompleted(slot uint64) bool {
 	return ok
 }
 
+// SlotDead reports whether leader-valid conflicting data shreds made the slot
+// unsafe to assemble. Dead slots ignore further shreds and generate no repair
+// until a consensus-selected block or skip resets the slot.
+func (a *SlotAssembler) SlotDead(slot uint64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, ok := a.deadSlots[slot]
+	return ok
+}
+
 // SlotAssemblyErrors reports the failure count and latest failure text for a
 // slot's live assembly state (0/"" once the slot completes or is reset).
 func (a *SlotAssembler) SlotAssemblyErrors(slot uint64) (int, string) {
@@ -1205,6 +1272,9 @@ func (a *SlotAssembler) RepairRequestsTiered(maxSlots int, maxMissingPerSlot int
 			return dst
 		}
 		if _, completed := a.completedSlots[slot]; completed {
+			return dst
+		}
+		if _, dead := a.deadSlots[slot]; dead {
 			return dst
 		}
 		if a.slotTooOldLocked(slot) || (!priorityPin && (!haveRepairThrough || slot > repairThrough)) {

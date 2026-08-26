@@ -133,13 +133,13 @@ func ResetChainTip() {
 }
 
 // UpdateChainTipFromSlotCtx refreshes blockprod parent context from replay progress.
-func UpdateChainTipFromSlotCtx(slotCtx *sealevel.SlotCtx, f *features.Features, statuses *TransactionStatusView, identity ChainTipIdentity, readers ...sealevel.AccountReader) {
-	UpdateChainTipFromSlotCtxWithBankMetadata(slotCtx, f, statuses, identity, ChainTipBankMetadata{}, readers...)
+func UpdateChainTipFromSlotCtx(slotCtx *sealevel.SlotCtx, f *features.Features, statuses *TransactionStatusView, identity ChainTipIdentity) {
+	UpdateChainTipFromSlotCtxWithBankMetadata(slotCtx, f, statuses, identity, ChainTipBankMetadata{})
 }
 
 // UpdateChainTipFromSlotCtxWithBankMetadata atomically publishes a complete
 // replay-parent generation for block production.
-func UpdateChainTipFromSlotCtxWithBankMetadata(slotCtx *sealevel.SlotCtx, f *features.Features, statuses *TransactionStatusView, identity ChainTipIdentity, metadata ChainTipBankMetadata, readers ...sealevel.AccountReader) {
+func UpdateChainTipFromSlotCtxWithBankMetadata(slotCtx *sealevel.SlotCtx, f *features.Features, statuses *TransactionStatusView, identity ChainTipIdentity, metadata ChainTipBankMetadata) {
 	if slotCtx == nil {
 		return
 	}
@@ -171,9 +171,7 @@ func UpdateChainTipFromSlotCtxWithBankMetadata(slotCtx *sealevel.SlotCtx, f *fea
 	chainTipNanosecondClockAccount = nil
 	chainTipHasNanosecondClockAccount = false
 	chainTipPrevFeeGovernor = nil
-	if len(readers) > 0 {
-		chainTipUnrootedRead = readers[0]
-	} else if slotCtx.UnrootedRead != nil {
+	if slotCtx.UnrootedRead != nil {
 		chainTipUnrootedRead = slotCtx.UnrootedRead
 	}
 	if slotCtx.AcctsLtHash != nil {

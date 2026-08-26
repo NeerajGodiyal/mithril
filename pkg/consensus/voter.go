@@ -7,10 +7,12 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -60,6 +62,15 @@ type VotingStats struct {
 	LastNetworkLandedVoteType      alpenglow.VoteType        `json:"last_network_landed_vote_type,omitempty"`
 	LastNetworkCertificateType     alpenglow.CertificateType `json:"last_network_certificate_type,omitempty"`
 	LastNetworkLandedAt            time.Time                 `json:"last_network_landed_at,omitempty"`
+	BlockEventLatencyCount         uint64                    `json:"block_event_latency_count"`
+	BlockEventLatencyUS            uint64                    `json:"block_event_latency_us"`
+	BlockEventLatencyMaxUS         uint64                    `json:"block_event_latency_max_us"`
+	HistoryPersistCount            uint64                    `json:"history_persist_count"`
+	HistoryPersistUS               uint64                    `json:"history_persist_us"`
+	HistoryPersistMaxUS            uint64                    `json:"history_persist_max_us"`
+	LocalVoteInjectCount           uint64                    `json:"local_vote_inject_count"`
+	LocalVoteInjectUS              uint64                    `json:"local_vote_inject_us"`
+	LocalVoteInjectMaxUS           uint64                    `json:"local_vote_inject_max_us"`
 	BroadcastMessagesQueued        uint64                    `json:"broadcast_messages_queued"`
 	BroadcastMessagesDropped       uint64                    `json:"broadcast_messages_dropped"`
 	BroadcastPeerSends             uint64                    `json:"broadcast_peer_sends"`
@@ -71,10 +82,42 @@ type VotingStats struct {
 	BroadcastConnectionAttempts    uint64                    `json:"broadcast_connection_attempts"`
 	BroadcastConnectionErrors      uint64                    `json:"broadcast_connection_errors"`
 	BroadcastConnectionJobsDropped uint64                    `json:"broadcast_connection_jobs_dropped"`
+	BroadcastPeerSendJobsDropped   uint64                    `json:"broadcast_peer_send_jobs_dropped"`
+	BroadcastMessagesNoConnections uint64                    `json:"broadcast_messages_no_connections"`
+	BroadcastMessageQueueDepth     int                       `json:"broadcast_message_queue_depth"`
+	BroadcastPeerSendQueueDepth    int                       `json:"broadcast_peer_send_queue_depth"`
+	BroadcastConnectionQueueDepth  int                       `json:"broadcast_connection_queue_depth"`
+	BroadcastMessageQueueWaitCount uint64                    `json:"broadcast_message_queue_wait_count"`
+	BroadcastMessageQueueWaitUS    uint64                    `json:"broadcast_message_queue_wait_us"`
+	BroadcastMessageQueueWaitMaxUS uint64                    `json:"broadcast_message_queue_wait_max_us"`
+	BroadcastPeerSendWaitCount     uint64                    `json:"broadcast_peer_send_wait_count"`
+	BroadcastPeerSendWaitUS        uint64                    `json:"broadcast_peer_send_wait_us"`
+	BroadcastPeerSendWaitMaxUS     uint64                    `json:"broadcast_peer_send_wait_max_us"`
+	BroadcastSendDatagramCount     uint64                    `json:"broadcast_send_datagram_count"`
+	BroadcastSendDatagramUS        uint64                    `json:"broadcast_send_datagram_us"`
+	BroadcastSendDatagramMaxUS     uint64                    `json:"broadcast_send_datagram_max_us"`
 	BroadcastLastPeerSendError     string                    `json:"broadcast_last_peer_send_error,omitempty"`
 	BroadcastLastPeerSendErrorAt   time.Time                 `json:"broadcast_last_peer_send_error_at,omitempty"`
 	BroadcastLastConnectionError   string                    `json:"broadcast_last_connection_error,omitempty"`
 	BroadcastLastConnectionErrorAt time.Time                 `json:"broadcast_last_connection_error_at,omitempty"`
+}
+
+type voteStageLatency struct {
+	count atomic.Uint64
+	total atomic.Uint64
+	max   atomic.Uint64
+}
+
+func (l *voteStageLatency) record(elapsed time.Duration) {
+	micros := uint64(max(elapsed.Microseconds(), 0))
+	l.count.Add(1)
+	l.total.Add(micros)
+	for current := l.max.Load(); micros > current && !l.max.CompareAndSwap(current, micros); current = l.max.Load() {
+	}
+}
+
+func (l *voteStageLatency) snapshot() (count, totalUS, maxUS uint64) {
+	return l.count.Load(), l.total.Load(), l.max.Load()
 }
 
 type voterEventKind uint8
@@ -145,6 +188,9 @@ type alpenglowVoter struct {
 	landingMu       sync.RWMutex
 	landed          map[alpenglow.VoteMessageKey]struct{}
 	stats           VotingStats
+	blockLatency    voteStageLatency
+	historyLatency  voteStageLatency
+	injectLatency   voteStageLatency
 	lastStatsLog    time.Time
 	// beforeVoteGuard is a deterministic test seam for invalidation races. It
 	// is nil in production.
@@ -324,6 +370,9 @@ func (v *alpenglowVoter) loop() {
 }
 
 func (v *alpenglowVoter) handle(event voterEvent) error {
+	if event.kind == voterEventBlock && !event.block.At.IsZero() {
+		v.blockLatency.record(time.Since(event.block.At))
+	}
 	floor := v.admissionFloor()
 	if event.kind == voterEventBlock && v.engine.ensureChain().IsObjectivelyInvalidBlock(event.block.Block) {
 		return nil
@@ -694,14 +743,20 @@ func (v *alpenglowVoter) castTarget(vote alpenglow.Vote, restoring bool, guarded
 		// Pool admission may synchronously assemble and publish a certificate.
 		// Persist the anti-equivocation record first so no externally visible
 		// proof can survive a crash without its signed local history.
-		if err := v.saveHistory(); err != nil {
+		started := time.Now()
+		err := v.saveHistory()
+		v.historyLatency.record(time.Since(started))
+		if err != nil {
 			return false, err
 		}
 		if v.beforeLocalVoteInject != nil {
 			v.beforeLocalVoteInject(vote)
 		}
 	}
-	if err := v.engine.injectLocalVote(message, result); err != nil {
+	started := time.Now()
+	err = v.engine.injectLocalVote(message, result)
+	v.injectLatency.record(time.Since(started))
+	if err != nil {
 		if errors.Is(err, errLocalVoteStale) {
 			v.warnVoteSkipped(vote.Slot, err)
 			return false, nil
@@ -1201,6 +1256,9 @@ func (v *alpenglowVoter) snapshot() VotingStats {
 	stats := v.stats
 	v.landingMu.RUnlock()
 	stats.Enabled = true
+	stats.BlockEventLatencyCount, stats.BlockEventLatencyUS, stats.BlockEventLatencyMaxUS = v.blockLatency.snapshot()
+	stats.HistoryPersistCount, stats.HistoryPersistUS, stats.HistoryPersistMaxUS = v.historyLatency.snapshot()
+	stats.LocalVoteInjectCount, stats.LocalVoteInjectUS, stats.LocalVoteInjectMaxUS = v.injectLatency.snapshot()
 	if v.broadcaster != nil {
 		broadcast := v.broadcaster.Stats()
 		stats.BroadcastMessagesQueued = broadcast.MessagesQueued
@@ -1214,6 +1272,20 @@ func (v *alpenglowVoter) snapshot() VotingStats {
 		stats.BroadcastConnectionAttempts = broadcast.ConnectionAttempts
 		stats.BroadcastConnectionErrors = broadcast.ConnectionErrors
 		stats.BroadcastConnectionJobsDropped = broadcast.ConnectionJobsDropped
+		stats.BroadcastPeerSendJobsDropped = broadcast.PeerSendJobsDropped
+		stats.BroadcastMessagesNoConnections = broadcast.MessagesNoConnections
+		stats.BroadcastMessageQueueDepth = broadcast.MessageQueueDepth
+		stats.BroadcastPeerSendQueueDepth = broadcast.PeerSendQueueDepth
+		stats.BroadcastConnectionQueueDepth = broadcast.ConnectionQueueDepth
+		stats.BroadcastMessageQueueWaitCount = broadcast.MessageQueueWaitCount
+		stats.BroadcastMessageQueueWaitUS = broadcast.MessageQueueWaitUS
+		stats.BroadcastMessageQueueWaitMaxUS = broadcast.MessageQueueWaitMaxUS
+		stats.BroadcastPeerSendWaitCount = broadcast.PeerSendWaitCount
+		stats.BroadcastPeerSendWaitUS = broadcast.PeerSendWaitUS
+		stats.BroadcastPeerSendWaitMaxUS = broadcast.PeerSendWaitMaxUS
+		stats.BroadcastSendDatagramCount = broadcast.SendDatagramCount
+		stats.BroadcastSendDatagramUS = broadcast.SendDatagramUS
+		stats.BroadcastSendDatagramMaxUS = broadcast.SendDatagramMaxUS
 		stats.BroadcastLastPeerSendError = broadcast.LastPeerSendError
 		stats.BroadcastLastPeerSendErrorAt = broadcast.LastPeerSendErrorAt
 		stats.BroadcastLastConnectionError = broadcast.LastConnectionError
@@ -1222,21 +1294,99 @@ func (v *alpenglowVoter) snapshot() VotingStats {
 	return stats
 }
 
+func publishVotingMetrics(stats VotingStats) {
+	stages := []struct {
+		name                     string
+		observations, total, max uint64
+		latency                  bool
+	}{
+		{"votes_cast", stats.VotesCastThisRun, 0, 0, false},
+		{"network_landed", stats.NetworkLandedVotes, 0, 0, false},
+		{"replay_to_voter_event", stats.BlockEventLatencyCount, stats.BlockEventLatencyUS, stats.BlockEventLatencyMaxUS, true},
+		{"history_persist", stats.HistoryPersistCount, stats.HistoryPersistUS, stats.HistoryPersistMaxUS, true},
+		{"local_vote_inject", stats.LocalVoteInjectCount, stats.LocalVoteInjectUS, stats.LocalVoteInjectMaxUS, true},
+		{"message_queue_wait", stats.BroadcastMessageQueueWaitCount, stats.BroadcastMessageQueueWaitUS, stats.BroadcastMessageQueueWaitMaxUS, true},
+		{"peer_send_wait", stats.BroadcastPeerSendWaitCount, stats.BroadcastPeerSendWaitUS, stats.BroadcastPeerSendWaitMaxUS, true},
+		{"send_datagram", stats.BroadcastSendDatagramCount, stats.BroadcastSendDatagramUS, stats.BroadcastSendDatagramMaxUS, true},
+	}
+	for _, stage := range stages {
+		_ = statsd.Gauge(statsd.MithrilVoterStageObservations, float64(stage.observations), []string{stage.name})
+		if !stage.latency {
+			continue
+		}
+		_ = statsd.Gauge(statsd.MithrilVoterStageLatencyUS, float64(stage.total), []string{stage.name, "total"})
+		_ = statsd.Gauge(statsd.MithrilVoterStageLatencyUS, float64(stage.max), []string{stage.name, "max"})
+	}
+
+	for _, connection := range []struct {
+		state string
+		value int
+	}{
+		{"desired", stats.BroadcastDesiredPeers},
+		{"active", stats.BroadcastActiveConnections},
+		{"pending", stats.BroadcastPendingConnections},
+	} {
+		_ = statsd.Gauge(statsd.MithrilVoterPeerConnections, float64(connection.value), []string{connection.state})
+	}
+	for _, event := range []struct {
+		name  string
+		value uint64
+	}{
+		{"messages_queued", stats.BroadcastMessagesQueued},
+		{"messages_dropped", stats.BroadcastMessagesDropped},
+		{"sends", stats.BroadcastPeerSends},
+		{"sends_skipped", stats.BroadcastPeerSendsSkipped},
+		{"send_errors", stats.BroadcastPeerSendErrors},
+		{"connection_attempts", stats.BroadcastConnectionAttempts},
+		{"connection_errors", stats.BroadcastConnectionErrors},
+		{"connection_jobs_dropped", stats.BroadcastConnectionJobsDropped},
+		{"send_jobs_dropped", stats.BroadcastPeerSendJobsDropped},
+		{"messages_no_connections", stats.BroadcastMessagesNoConnections},
+	} {
+		_ = statsd.Gauge(statsd.MithrilVoterPeerEvents, float64(event.value), []string{event.name})
+	}
+	for _, queue := range []struct {
+		name  string
+		depth int
+	}{
+		{"message", stats.BroadcastMessageQueueDepth},
+		{"send", stats.BroadcastPeerSendQueueDepth},
+		{"connection", stats.BroadcastConnectionQueueDepth},
+	} {
+		_ = statsd.Gauge(statsd.MithrilVoterPeerQueueDepth, float64(queue.depth), []string{queue.name})
+	}
+}
+
 func (v *alpenglowVoter) maybeLogStats() {
 	if !v.lastStatsLog.IsZero() && time.Since(v.lastStatsLog) < votorStatsLogInterval {
 		return
 	}
 	v.lastStatsLog = time.Now()
 	stats := v.snapshot()
-	mlog.Log.FileOnlyf("alpenglow voting stats: votes_cast_this_run=%d network_landed=%d last_landed_slot=%d broadcast_queued=%d broadcast_dropped=%d peer_sends=%d peer_sends_skipped=%d peer_send_errors=%d desired_peers=%d active_connections=%d pending_connections=%d connection_attempts=%d connection_errors=%d connection_jobs_dropped=%d",
+	publishVotingMetrics(stats)
+	mlog.Log.FileOnlyf("alpenglow voting stats: votes_cast_this_run=%d network_landed=%d last_landed_slot=%d block_event_latency_count=%d block_event_latency_us=%d block_event_latency_max_us=%d history_persist_count=%d history_persist_us=%d history_persist_max_us=%d local_inject_count=%d local_inject_us=%d local_inject_max_us=%d broadcast_queued=%d broadcast_dropped=%d peer_sends=%d peer_sends_skipped=%d peer_send_errors=%d peer_send_jobs_dropped=%d messages_no_connections=%d message_queue_wait_max_us=%d peer_send_wait_max_us=%d send_datagram_max_us=%d desired_peers=%d active_connections=%d pending_connections=%d connection_attempts=%d connection_errors=%d connection_jobs_dropped=%d",
 		stats.VotesCastThisRun,
 		stats.NetworkLandedVotes,
 		stats.LastNetworkLandedSlot,
+		stats.BlockEventLatencyCount,
+		stats.BlockEventLatencyUS,
+		stats.BlockEventLatencyMaxUS,
+		stats.HistoryPersistCount,
+		stats.HistoryPersistUS,
+		stats.HistoryPersistMaxUS,
+		stats.LocalVoteInjectCount,
+		stats.LocalVoteInjectUS,
+		stats.LocalVoteInjectMaxUS,
 		stats.BroadcastMessagesQueued,
 		stats.BroadcastMessagesDropped,
 		stats.BroadcastPeerSends,
 		stats.BroadcastPeerSendsSkipped,
 		stats.BroadcastPeerSendErrors,
+		stats.BroadcastPeerSendJobsDropped,
+		stats.BroadcastMessagesNoConnections,
+		stats.BroadcastMessageQueueWaitMaxUS,
+		stats.BroadcastPeerSendWaitMaxUS,
+		stats.BroadcastSendDatagramMaxUS,
 		stats.BroadcastDesiredPeers,
 		stats.BroadcastActiveConnections,
 		stats.BroadcastPendingConnections,

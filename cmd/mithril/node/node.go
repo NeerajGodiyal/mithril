@@ -883,17 +883,6 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	if blockSource == "" {
 		blockSource = defaultBlockSourceForMode(alpenglowMode)
 	}
-	// RPC is a catch-up/debug source on Alpenglow, not a live one: RPC blocks
-	// carry no Alpenglow block ids or footer certificates, so certificate
-	// gating cannot adjudicate their identity near tip, and durable folds only
-	// advance if certificates arrive some other way (the Votor QUIC listener).
-	if alpenglowMode && blockSource == "rpc" {
-		if alpenglowObserverBindAddr == "" {
-			mlog.Log.Warnf("block source \"rpc\" with no consensus.alpenglow_observer_bind_addr: no certificate feed exists, so durable folds will NOT advance (fail-closed halt once the in-RAM tail fills); use block source \"turbine\" for live operation")
-		} else {
-			mlog.Log.Warnf("block source \"rpc\" is catch-up/debug only on Alpenglow (RPC blocks carry no block ids or footer certificates); live near-tip operation should use \"turbine\"")
-		}
-	}
 	lightbringerEndpoint = getString("lightbringer-endpoint", "block.lightbringer_endpoint")
 	turbineBindAddr = getString("turbine-bind-addr", "block.turbine_bind_addr")
 	if turbineBindAddr == "" {
@@ -993,6 +982,9 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		}
 	default:
 		return fmt.Errorf("invalid block.source %q - must be 'rpc', 'lightbringer', or 'turbine'", blockSource)
+	}
+	if alpenglowMode && blockSource != "turbine" {
+		return fmt.Errorf("Alpenglow requires block.source=turbine for exact block identity")
 	}
 
 	// Validator mode: enforce the complete block-production and voting shape.
@@ -2498,6 +2490,13 @@ postBootstrap:
 			liveEndSlot = uint64(math.MaxUint64)
 		}
 	}
+	var initialAlpenglowParentID solana.Hash
+	if alpenglowMode {
+		initialAlpenglowParentID, err = replay.InitialAlpenglowParentBlockID(mithrilState, resumeState)
+		if err != nil {
+			klog.Fatalf("Alpenglow startup requires an exact snapshot or rooted parent block identity: %v", err)
+		}
+	}
 
 	// Write replay timings to run-specific log directory
 	replayTimingsPath := filepath.Join(mlog.GetLogDir(), "replay_timings.jsonl")
@@ -2546,15 +2545,12 @@ postBootstrap:
 		if err != nil {
 			klog.Fatalf("unable to create consensus engine: %v", err)
 		}
-		root := alpenglow.BlockID{}
+		root := alpenglow.BlockID{Hash: initialAlpenglowParentID}
 		if startSlot > 0 {
 			root.Slot = uint64(startSlot - 1)
 		}
 		if resumeState != nil {
 			root.Slot = resumeState.ParentSlot
-			if resumeState.HasParentAlpenglowBlockID {
-				root.Hash = resumeState.ParentAlpenglowBlockID
-			}
 		}
 		// Load the same persisted/manifest stake view replay will use before the
 		// receiver or broadcaster can make an admission decision. This is crucial
@@ -2857,8 +2853,9 @@ postBootstrap:
 	}
 
 	consensusOpts := &replay.ConsensusOpts{
-		Alpenglow: alpenglowMode,
-		Engine:    consensusEngine,
+		Alpenglow:     alpenglowMode,
+		RootedDurable: alpenglowMode,
+		Engine:        consensusEngine,
 	}
 	if alpenglowMode {
 		consensusOpts.TransactionStatusCheckpointAfterCommit = func(selected *state.TransactionStatusCheckpointRef) error {

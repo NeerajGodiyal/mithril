@@ -131,10 +131,14 @@ func consensusSignatureStrings(tx *solana.Transaction) []string {
 }
 
 func consensusTxVersion(tx *solana.Transaction) string {
-	if tx.Message.IsVersioned() {
-		return fmt.Sprintf("v%d", tx.Message.GetVersion())
+	switch tx.Message.GetVersion() {
+	case solana.MessageVersionV0:
+		return "v0"
+	case solana.MessageVersionV1:
+		return "v1"
+	default:
+		return "legacy"
 	}
-	return "legacy"
 }
 
 func consensusProgramIDs(tx *solana.Transaction) []string {

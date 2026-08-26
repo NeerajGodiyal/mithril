@@ -46,6 +46,36 @@ func initialReplayEpoch(
 	return epochSchedule.GetEpoch(startSlot)
 }
 
+// InitialAlpenglowParentBlockID returns the exact block identity replay must
+// extend. A resumed root supersedes the snapshot root because it is newer.
+func InitialAlpenglowParentBlockID(mithrilState *state.MithrilState, rs *ResumeState) (solana.Hash, error) {
+	var encoded string
+	source := "snapshot manifest"
+	if rs != nil {
+		if !rs.HasParentAlpenglowBlockID {
+			return solana.Hash{}, fmt.Errorf("rooted resume state is missing its Alpenglow parent block ID")
+		}
+		if rs.ParentAlpenglowBlockID == (solana.Hash{}) {
+			return solana.Hash{}, fmt.Errorf("rooted resume state has an all-zero Alpenglow parent block ID")
+		}
+		return rs.ParentAlpenglowBlockID, nil
+	}
+	if mithrilState != nil {
+		encoded = mithrilState.ManifestParentAlpenglowBlockID
+	}
+	if encoded == "" {
+		return solana.Hash{}, fmt.Errorf("%s is missing its Alpenglow parent block ID", source)
+	}
+	blockID, err := solana.HashFromBase58(encoded)
+	if err != nil {
+		return solana.Hash{}, fmt.Errorf("decode %s Alpenglow parent block ID: %w", source, err)
+	}
+	if blockID == (solana.Hash{}) {
+		return solana.Hash{}, fmt.Errorf("%s has an all-zero Alpenglow parent block ID", source)
+	}
+	return blockID, nil
+}
+
 func DecodeRecentBlockhashes(entries []state.BlockhashEntry) sealevel.SysvarRecentBlockhashes {
 	result := make(sealevel.SysvarRecentBlockhashes, 0, len(entries))
 	dropped := 0

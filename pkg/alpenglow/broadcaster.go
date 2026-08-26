@@ -50,23 +50,53 @@ type VotorBroadcasterStats struct {
 	ConnectionAttempts    uint64
 	ConnectionErrors      uint64
 	ConnectionJobsDropped uint64
+	PeerSendJobsDropped   uint64
+	MessagesNoConnections uint64
+	MessageQueueDepth     int
+	PeerSendQueueDepth    int
+	ConnectionQueueDepth  int
+	MessageQueueWaitCount uint64
+	MessageQueueWaitUS    uint64
+	MessageQueueWaitMaxUS uint64
+	PeerSendWaitCount     uint64
+	PeerSendWaitUS        uint64
+	PeerSendWaitMaxUS     uint64
+	SendDatagramCount     uint64
+	SendDatagramUS        uint64
+	SendDatagramMaxUS     uint64
 	LastPeerSendError     string
 	LastPeerSendErrorAt   time.Time
 	LastConnectionError   string
 	LastConnectionErrorAt time.Time
 }
 
-type votorPeerJobKind uint8
-
-const (
-	votorPeerJobConnect votorPeerJobKind = iota
-	votorPeerJobSend
-)
+type queuedVotorMessage struct {
+	message  Message
+	queuedAt time.Time
+}
 
 type votorPeerJob struct {
-	kind    votorPeerJobKind
-	peer    VotorPeer
-	payload []byte
+	peer     VotorPeer
+	payload  []byte
+	queuedAt time.Time
+}
+
+type votorLatency struct {
+	count atomic.Uint64
+	total atomic.Uint64
+	max   atomic.Uint64
+}
+
+func (l *votorLatency) record(elapsed time.Duration) {
+	micros := uint64(max(elapsed.Microseconds(), 0))
+	l.count.Add(1)
+	l.total.Add(micros)
+	for current := l.max.Load(); micros > current && !l.max.CompareAndSwap(current, micros); current = l.max.Load() {
+	}
+}
+
+func (l *votorLatency) snapshot() (count, totalUS, maxUS uint64) {
+	return l.count.Load(), l.total.Load(), l.max.Load()
 }
 
 type votorConnection struct {
@@ -85,8 +115,9 @@ type VotorBroadcaster struct {
 	quicConfig            *quic.Config
 	ctx                   context.Context
 	cancel                context.CancelFunc
-	queue                 chan Message
-	jobs                  chan votorPeerJob
+	queue                 chan queuedVotorMessage
+	sendJobs              chan votorPeerJob
+	connectJobs           chan VotorPeer
 	done                  chan struct{}
 	closeOnce             sync.Once
 	wg                    sync.WaitGroup
@@ -109,6 +140,11 @@ type VotorBroadcaster struct {
 	connectionAttempts    atomic.Uint64
 	connectionErrors      atomic.Uint64
 	connectionJobsDropped atomic.Uint64
+	peerSendJobsDropped   atomic.Uint64
+	noConnections         atomic.Uint64
+	messageQueueWait      votorLatency
+	peerSendQueueWait     votorLatency
+	sendDatagramLatency   votorLatency
 }
 
 func NewVotorBroadcaster(cfg VotorBroadcasterConfig) (*VotorBroadcaster, error) {
@@ -141,17 +177,19 @@ func NewVotorBroadcaster(cfg VotorBroadcasterConfig) (*VotorBroadcaster, error) 
 		quicConfig:    newVotorQUICConfig(),
 		ctx:           ctx,
 		cancel:        cancel,
-		queue:         make(chan Message, cfg.QueueSize),
-		jobs:          make(chan votorPeerJob, defaultVotorPeerJobQueue),
+		queue:         make(chan queuedVotorMessage, cfg.QueueSize),
+		sendJobs:      make(chan votorPeerJob, defaultVotorPeerJobQueue),
+		connectJobs:   make(chan VotorPeer, defaultVotorPeerJobQueue),
 		done:          make(chan struct{}),
 		desired:       make(map[solana.PublicKey]VotorPeer),
 		conns:         make(map[solana.PublicKey]votorConnection),
 		dialing:       make(map[solana.PublicKey]*votorDial),
 		connectQueued: make(map[solana.PublicKey]struct{}),
 	}
-	b.wg.Add(2 + cfg.Workers)
+	b.wg.Add(2 + 2*cfg.Workers)
 	for range cfg.Workers {
 		go b.sendLoop()
+		go b.connectLoop()
 	}
 	go b.broadcastLoop()
 	// Populate the desired set and queue the first bounded preconnects before
@@ -178,7 +216,7 @@ func (b *VotorBroadcaster) Enqueue(message Message) error {
 	select {
 	case <-b.done:
 		return fmt.Errorf("Votor broadcaster is closed")
-	case b.queue <- message:
+	case b.queue <- queuedVotorMessage{message: message, queuedAt: time.Now()}:
 		b.queued.Add(1)
 		return nil
 	default:
@@ -193,25 +231,37 @@ func (b *VotorBroadcaster) broadcastLoop() {
 		select {
 		case <-b.done:
 			return
-		case message := <-b.queue:
-			payload, err := EncodeMessage(message)
+		case queued := <-b.queue:
+			b.messageQueueWait.record(time.Since(queued.queuedAt))
+			payload, err := EncodeMessage(queued.message)
 			if err != nil {
 				b.recordSendError(VotorPeer{}, fmt.Errorf("encode Votor message: %w", err))
 				continue
 			}
 			peers, skipped := b.connectedPeers()
 			b.sendsSkipped.Add(uint64(skipped))
+			if len(peers) == 0 {
+				b.noConnections.Add(1)
+			}
 			for _, peer := range peers {
-				job := votorPeerJob{kind: votorPeerJobSend, peer: peer, payload: payload}
-				select {
-				case b.jobs <- job:
-				case <-b.done:
+				if !b.queuePeerSend(votorPeerJob{peer: peer, payload: payload, queuedAt: time.Now()}) && b.closed.Load() {
 					return
-				default:
-					b.dropped.Add(1)
 				}
 			}
 		}
+	}
+}
+
+func (b *VotorBroadcaster) queuePeerSend(job votorPeerJob) bool {
+	select {
+	case b.sendJobs <- job:
+		return true
+	case <-b.done:
+		return false
+	default:
+		b.dropped.Add(1)
+		b.peerSendJobsDropped.Add(1)
+		return false
 	}
 }
 
@@ -221,17 +271,25 @@ func (b *VotorBroadcaster) sendLoop() {
 		select {
 		case <-b.done:
 			return
-		case job := <-b.jobs:
-			switch job.kind {
-			case votorPeerJobConnect:
-				b.connectPeer(job.peer.Identity)
-			case votorPeerJobSend:
-				if err := b.send(job.peer, job.payload); err != nil {
-					b.recordSendError(job.peer, err)
-				} else {
-					b.sends.Add(1)
-				}
+		case job := <-b.sendJobs:
+			b.peerSendQueueWait.record(time.Since(job.queuedAt))
+			if err := b.send(job.peer, job.payload); err != nil {
+				b.recordSendError(job.peer, err)
+			} else {
+				b.sends.Add(1)
 			}
+		}
+	}
+}
+
+func (b *VotorBroadcaster) connectLoop() {
+	defer b.wg.Done()
+	for {
+		select {
+		case <-b.done:
+			return
+		case peer := <-b.connectJobs:
+			b.connectPeer(peer.Identity)
 		}
 	}
 }
@@ -242,7 +300,9 @@ func (b *VotorBroadcaster) send(peer VotorPeer, payload []byte) error {
 		b.queueConnect(peer.Identity)
 		return fmt.Errorf("send Votor datagram to %s (%s): no established connection", peer.Identity, peer.Addr)
 	}
+	started := time.Now()
 	err := conn.SendDatagram(payload)
+	b.sendDatagramLatency.record(time.Since(started))
 	if err == nil {
 		return nil
 	}
@@ -349,9 +409,8 @@ func (b *VotorBroadcaster) queueConnectLocked(identity solana.PublicKey) {
 	if _, queued := b.connectQueued[identity]; queued || b.dialing[identity] != nil {
 		return
 	}
-	job := votorPeerJob{kind: votorPeerJobConnect, peer: peer}
 	select {
-	case b.jobs <- job:
+	case b.connectJobs <- peer:
 		b.connectQueued[identity] = struct{}{}
 	default:
 		b.connectionJobsDropped.Add(1)
@@ -513,6 +572,9 @@ func (b *VotorBroadcaster) Stats() VotorBroadcasterStats {
 	lastSendError, lastSendErrorAt := b.lastSendError, b.lastSendErrorAt
 	lastConnectionError, lastConnectionErrorAt := b.lastConnectionError, b.lastConnectionErrorAt
 	b.errorMu.Unlock()
+	messageQueueWaitCount, messageQueueWaitUS, messageQueueWaitMaxUS := b.messageQueueWait.snapshot()
+	peerSendWaitCount, peerSendWaitUS, peerSendWaitMaxUS := b.peerSendQueueWait.snapshot()
+	sendDatagramCount, sendDatagramUS, sendDatagramMaxUS := b.sendDatagramLatency.snapshot()
 	return VotorBroadcasterStats{
 		MessagesQueued:        b.queued.Load(),
 		MessagesDropped:       b.dropped.Load(),
@@ -525,6 +587,20 @@ func (b *VotorBroadcaster) Stats() VotorBroadcasterStats {
 		ConnectionAttempts:    b.connectionAttempts.Load(),
 		ConnectionErrors:      b.connectionErrors.Load(),
 		ConnectionJobsDropped: b.connectionJobsDropped.Load(),
+		PeerSendJobsDropped:   b.peerSendJobsDropped.Load(),
+		MessagesNoConnections: b.noConnections.Load(),
+		MessageQueueDepth:     len(b.queue),
+		PeerSendQueueDepth:    len(b.sendJobs),
+		ConnectionQueueDepth:  len(b.connectJobs),
+		MessageQueueWaitCount: messageQueueWaitCount,
+		MessageQueueWaitUS:    messageQueueWaitUS,
+		MessageQueueWaitMaxUS: messageQueueWaitMaxUS,
+		PeerSendWaitCount:     peerSendWaitCount,
+		PeerSendWaitUS:        peerSendWaitUS,
+		PeerSendWaitMaxUS:     peerSendWaitMaxUS,
+		SendDatagramCount:     sendDatagramCount,
+		SendDatagramUS:        sendDatagramUS,
+		SendDatagramMaxUS:     sendDatagramMaxUS,
 		LastPeerSendError:     lastSendError,
 		LastPeerSendErrorAt:   lastSendErrorAt,
 		LastConnectionError:   lastConnectionError,

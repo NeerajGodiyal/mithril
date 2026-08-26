@@ -215,6 +215,7 @@ func (bs *BlockSource) attachAlpenglowBlockIDHintsToReceiver(receiver *turbine.U
 	if receiver == nil {
 		return
 	}
+	receiver.SetAlpenglowMode(bs.turbineAlpenglowBlockIDHints)
 	// The active-receiver pointer must be set regardless of the hints flag:
 	// staging-eviction marker resets, repair prioritization, and the catchup
 	// diagnostics all reach the receiver through it, and with hints off they
