@@ -501,7 +501,8 @@ func TestWorkingBankCapturesOnlyAcceptedRootedTransactions(t *testing.T) {
 	require.Len(t, observations, 1)
 	require.True(t, observations[0].Succeeded)
 	require.Equal(t, uint32(0), observations[0].Index)
-	require.NotEmpty(t, observations[0].Message)
+	require.NotEmpty(t, observations[0].Transaction)
+	require.NotEmpty(t, observations[0].MessageHash)
 	require.NotEmpty(t, observations[0].AccountKeys)
 
 	result, reason = env.Bank.Forge(wire)
@@ -510,9 +511,9 @@ func TestWorkingBankCapturesOnlyAcceptedRootedTransactions(t *testing.T) {
 	afterDrop, _ := env.Bank.RootedEventObservations()
 	require.Len(t, afterDrop, 1, "rejected transactions must not enter the rooted stream")
 
-	observations[0].Message[0] ^= 0xff
+	observations[0].Transaction[0] ^= 0xff
 	owned, _ := env.Bank.RootedEventObservations()
-	require.NotEqual(t, observations[0].Message, owned[0].Message)
+	require.NotEqual(t, observations[0].Transaction, owned[0].Transaction)
 }
 
 func TestWorkingBankSkipsRootedCaptureWhenDisabled(t *testing.T) {

@@ -11,10 +11,27 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/rootedevents"
 	"github.com/Overclock-Validator/mithril/pkg/state"
+	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func testRootedEventIdentity(slot, parent uint64) rootedevents.SlotIdentity {
+	return rootedevents.SlotIdentity{
+		Slot: slot, ParentSlot: parent, Blockhash: [32]byte{byte(slot + 1)}, ParentBlockhash: [32]byte{byte(parent + 1)},
+	}
+}
+
+func testRootedEventObservation(t testing.TB, index uint32) rootedevents.TransactionObservation {
+	t.Helper()
+	tx, err := solana.TransactionFromBytes(txfixture.MustSignedTransferWire(0))
+	require.NoError(t, err)
+	observation, err := PrepareRootedTransactionObservation(tx, index)
+	require.NoError(t, err)
+	observation.Succeeded = true
+	return observation
+}
 
 // slowCommitter delays each CommitBatch so tests can observe the in-flight
 // window; it also records call times to prove the loop was never blocked.
@@ -96,6 +113,7 @@ func TestFoldJobRootedEventsRideManifest(t *testing.T) {
 	tail := asyncTestTail(fc, 5, 6)
 	afterCommitCalled := false
 	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
+		FinalitySource: rootedevents.FinalityRPCFinalized,
 		Install: func(deltas []accounts.SlotDelta, metadata map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 			return rootedevents.PrepareSidecar(rootDir, deltas, metadata)
 		},
@@ -106,11 +124,8 @@ func TestFoldJobRootedEventsRideManifest(t *testing.T) {
 			return nil
 		},
 	}))
-	require.NoError(t, tail.RecordRootedEventSlot(5, 4, []rootedevents.TransactionObservation{{
-		Index: 0, Signature: solana.Signature{1}.String(), Message: []byte{1},
-		AccountKeys: []string{solana.PublicKey{1}.String()}, Succeeded: true,
-	}}))
-	require.NoError(t, tail.RecordRootedEventSlot(6, 5, nil))
+	require.NoError(t, tail.RecordRootedEventSlot(testRootedEventIdentity(5, 4), []rootedevents.TransactionObservation{testRootedEventObservation(t, 0)}))
+	require.NoError(t, tail.RecordRootedEventSlot(testRootedEventIdentity(6, 5), nil))
 
 	job, err := tail.buildFoldJob(6, false)
 	require.NoError(t, err)
@@ -132,7 +147,7 @@ func TestFoldJobRootedEventsRideManifest(t *testing.T) {
 	require.Equal(t, rootedevents.SlotRooted, events[len(events)-1].Kind)
 
 	tail.applyFoldJob(job)
-	require.Empty(t, tail.parentSlots)
+	require.Empty(t, tail.identities)
 	require.Empty(t, tail.transactions)
 	require.Zero(t, tail.transactionBytes)
 }
@@ -141,13 +156,14 @@ func TestFoldJobRootedEventsRequireEverySlotCapture(t *testing.T) {
 	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
 	tail := asyncTestTail(fc, 5, 6)
 	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
+		FinalitySource: rootedevents.FinalityRPCFinalized,
 		Install: func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 			t.Fatal("install must not run when a slot was never captured")
 			return nil, nil
 		},
 	}))
-	require.NoError(t, tail.RecordRootedEventSlot(5, 4, nil))
-	tail.parentSlots[6] = 5 // isolate the missing-capture guard from lineage validation
+	require.NoError(t, tail.RecordRootedEventSlot(testRootedEventIdentity(5, 4), nil))
+	tail.identities[6] = testRootedEventIdentity(6, 5) // isolate the missing-capture guard from lineage validation
 
 	job, err := tail.buildFoldJob(6, false)
 	require.ErrorContains(t, err, "no transaction capture recorded for slot 6")
@@ -162,14 +178,12 @@ func TestForcedFoldSelectsRootedEvents(t *testing.T) {
 	tail.Add(5, []*accounts.Account{testAccount(1, 5)}, testHashBytes(5))
 	tail.SetContext(5, &state.ResumeContext{Slot: 5})
 	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
+		FinalitySource: rootedevents.FinalityRPCFinalized,
 		Install: func(deltas []accounts.SlotDelta, metadata map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 			return rootedevents.PrepareSidecar(rootDir, deltas, metadata)
 		},
 	}))
-	require.NoError(t, tail.RecordRootedEventSlot(5, 4, []rootedevents.TransactionObservation{{
-		Index: 0, Signature: solana.Signature{2}.String(), Message: []byte{2},
-		AccountKeys: []string{solana.PublicKey{2}.String()}, Succeeded: true,
-	}}))
+	require.NoError(t, tail.RecordRootedEventSlot(testRootedEventIdentity(5, 4), []rootedevents.TransactionObservation{testRootedEventObservation(t, 0)}))
 
 	promoted, ctx, err := tail.flush(5)
 	require.NoError(t, err)
@@ -203,6 +217,7 @@ func TestFoldJobSidecarOrderAndReferences(t *testing.T) {
 		},
 	}))
 	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
+		FinalitySource: rootedevents.FinalityRPCFinalized,
 		Install: func(deltas []accounts.SlotDelta, metadata map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 			order = append(order, "events-install")
 			return rootedevents.PrepareSidecar(rootDir, deltas, metadata)
@@ -212,8 +227,8 @@ func TestFoldJobSidecarOrderAndReferences(t *testing.T) {
 			return errors.New("advisory cleanup failure")
 		},
 	}))
-	require.NoError(t, tail.RecordRootedEventSlot(5, 4, nil))
-	require.NoError(t, tail.RecordRootedEventSlot(6, 5, nil))
+	require.NoError(t, tail.RecordRootedEventSlot(testRootedEventIdentity(5, 4), nil))
+	require.NoError(t, tail.RecordRootedEventSlot(testRootedEventIdentity(6, 5), nil))
 
 	job, err := tail.buildFoldJob(6, false)
 	require.NoError(t, err)
@@ -230,12 +245,13 @@ func TestFoldJobRootedEventInstallFailureCannotCommitOrPrune(t *testing.T) {
 	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
 	tail := asyncTestTail(fc, 5, 6)
 	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
+		FinalitySource: rootedevents.FinalityRPCFinalized,
 		Install: func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 			return nil, errors.New("sidecar fsync failed")
 		},
 	}))
-	require.NoError(t, tail.RecordRootedEventSlot(5, 4, nil))
-	require.NoError(t, tail.RecordRootedEventSlot(6, 5, nil))
+	require.NoError(t, tail.RecordRootedEventSlot(testRootedEventIdentity(5, 4), nil))
+	require.NoError(t, tail.RecordRootedEventSlot(testRootedEventIdentity(6, 5), nil))
 
 	job, err := tail.buildFoldJob(6, false)
 	require.NoError(t, err)

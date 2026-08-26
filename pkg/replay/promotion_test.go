@@ -157,26 +157,27 @@ func TestPromoteRootedHappyPath(t *testing.T) {
 func TestRootedEventObservationsOwnDataAndRespectForkTailBudget(t *testing.T) {
 	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 512, 2, "")
 	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
+		FinalitySource: rootedevents.FinalityRPCFinalized,
 		Install: func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 			return nil, nil
 		},
 	}))
-	observation := []rootedevents.TransactionObservation{{Message: make([]byte, 200)}}
+	observation := []rootedevents.TransactionObservation{{Transaction: make([]byte, 200)}}
 
-	require.ErrorContains(t, tail.recordRootedEventSlotWithLimit(5, 4, observation, 100), "fork-tail limit")
+	require.ErrorContains(t, tail.recordRootedEventSlotWithLimit(testRootedEventIdentity(5, 4), observation, 100), "fork-tail limit")
 	require.Empty(t, tail.transactions)
 	require.Zero(t, tail.transactionBytes)
 
-	require.NoError(t, tail.recordRootedEventSlotWithLimit(5, 4, observation, 1024))
+	require.NoError(t, tail.recordRootedEventSlotWithLimit(testRootedEventIdentity(5, 4), observation, 1024))
 	require.NotZero(t, tail.transactionBytes)
-	observation[0].Message[0] = 9
-	require.Zero(t, tail.transactions[5][0].Message[0], "tail retained caller-owned observation bytes")
+	observation[0].Transaction[0] = 9
+	require.Zero(t, tail.transactions[5][0].Transaction[0], "tail retained caller-owned observation bytes")
 
 	tail.Add(5, nil, testHashBytes(5))
 	tail.SetContext(5, &state.ResumeContext{Slot: 5}, testUnwindBankSysvars(t, 5, 50))
 	tail.Add(7, nil, testHashBytes(7))
 	tail.SetContext(7, &state.ResumeContext{Slot: 7}, testUnwindBankSysvars(t, 7, 70))
-	require.NoError(t, tail.recordRootedEventSlotWithLimit(7, 5, nil, 1024))
+	require.NoError(t, tail.recordRootedEventSlotWithLimit(testRootedEventIdentity(7, 5), nil, 1024))
 
 	ctx, bankSysvars := tail.unwind(7)
 	require.NotNil(t, ctx)

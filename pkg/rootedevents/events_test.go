@@ -6,9 +6,43 @@ import (
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/require"
 )
+
+func testTransactionObservation(t testing.TB) TransactionObservation {
+	t.Helper()
+	tx := &solana.Transaction{
+		Signatures: []solana.Signature{{1}},
+		Message: solana.Message{
+			Header:          solana.MessageHeader{NumRequiredSignatures: 1},
+			AccountKeys:     []solana.PublicKey{{1}},
+			RecentBlockhash: solana.Hash{2},
+		},
+	}
+	return testTransactionObservationFromTransaction(t, tx)
+}
+
+func testTransactionObservationFromTransaction(t testing.TB, tx *solana.Transaction) TransactionObservation {
+	t.Helper()
+	wire, err := tx.MarshalBinary()
+	require.NoError(t, err)
+	hash, err := txstatus.TransactionMessageHash(tx)
+	require.NoError(t, err)
+	return TransactionObservation{
+		Signature: tx.Signatures[0].String(), Transaction: wire,
+		MessageHash: solana.Hash(hash).String(), AccountKeys: []string{solana.PublicKey{1}.String()}, Succeeded: true,
+	}
+}
+
+func testSlotMeta(slot, parent uint64) SlotMeta {
+	return SlotMeta{
+		Slot: slot, ParentSlot: parent, Blockhash: [32]byte{byte(slot + 1)},
+		ParentBlockhash: [32]byte{byte(parent + 1)}, Bankhash: [32]byte{byte(slot + 2)},
+		FinalitySource: FinalityRPCFinalized,
+	}
+}
 
 func TestBuildEventsDeterministicAndOwned(t *testing.T) {
 	keyA := solana.PublicKey{1}
@@ -22,17 +56,14 @@ func TestBuildEventsDeterministicAndOwned(t *testing.T) {
 		}},
 		{Slot: 12},
 	}
-	metadata := map[uint64]SlotMeta{
-		10: {
-			Slot: 10, ParentSlot: 9, Bankhash: [32]byte{10},
-			Transactions: []TransactionObservation{{
-				Index: 0, Signature: solana.Signature{1}.String(), Message: []byte{1},
-				AccountKeys: []string{keyA.String()}, Succeeded: true,
-				ComputeUnits: 12, Logs: []string{"Program log: rooted"},
-			}},
-		},
-		12: {Slot: 12, ParentSlot: 10, Bankhash: [32]byte{12}},
-	}
+	meta10 := testSlotMeta(10, 9)
+	transaction := testTransactionObservation(t)
+	transaction.AccountKeys = []string{keyA.String()}
+	transaction.ComputeUnits = 12
+	transaction.Logs = []string{"Program log: rooted"}
+	meta10.Transactions = []TransactionObservation{transaction}
+	meta12 := testSlotMeta(12, 10)
+	metadata := map[uint64]SlotMeta{10: meta10, 12: meta12}
 
 	events, err := BuildEvents(deltas, metadata)
 	require.NoError(t, err)
@@ -50,7 +81,11 @@ func TestBuildEventsDeterministicAndOwned(t *testing.T) {
 	require.Equal(t, keyB.String(), events[2].Account.Pubkey)
 	require.True(t, events[2].Account.Tombstone)
 	require.Equal(t, Cursor{Slot: 10, Ordinal: 3}, events[3].Cursor)
-	require.Equal(t, &RootedSlot{ParentSlot: 9, Bankhash: solana.Hash{10}.String(), TransactionCount: 1, AccountCount: 2}, events[3].Root)
+	require.Equal(t, &RootedSlot{
+		ParentSlot: 9, Blockhash: solana.Hash(meta10.Blockhash).String(), ParentBlockhash: solana.Hash(meta10.ParentBlockhash).String(),
+		Bankhash: solana.Hash(meta10.Bankhash).String(), FinalitySource: FinalityRPCFinalized,
+		TransactionCount: 1, AccountCount: 2,
+	}, events[3].Root)
 	require.Equal(t, Cursor{Slot: 12, Ordinal: 0}, events[4].Cursor)
 	require.Equal(t, uint32(0), events[4].Root.AccountCount)
 
@@ -67,7 +102,7 @@ func TestBuildEventsDeterministicAndOwned(t *testing.T) {
 
 func TestCloneTransactionObservationsOwnsNestedData(t *testing.T) {
 	input := []TransactionObservation{{
-		Message:     []byte{1},
+		Transaction: []byte{1},
 		AccountKeys: []string{"key"},
 		Logs:        []string{"log"},
 		Inner: []InnerInstructions{{Instructions: []CompiledInstruction{{
@@ -76,14 +111,14 @@ func TestCloneTransactionObservationsOwnsNestedData(t *testing.T) {
 		ReturnData: &ReturnData{ProgramID: "program", Data: []byte{4}},
 	}}
 	got := CloneTransactionObservations(input)
-	input[0].Message[0] = 9
+	input[0].Transaction[0] = 9
 	input[0].AccountKeys[0] = "changed"
 	input[0].Logs[0] = "changed"
 	input[0].Inner[0].Instructions[0].Accounts[0] = 9
 	input[0].Inner[0].Instructions[0].Data[0] = 9
 	input[0].ReturnData.Data[0] = 9
 
-	if got[0].Message[0] != 1 || got[0].AccountKeys[0] != "key" || got[0].Logs[0] != "log" ||
+	if got[0].Transaction[0] != 1 || got[0].AccountKeys[0] != "key" || got[0].Logs[0] != "log" ||
 		got[0].Inner[0].Instructions[0].Accounts[0] != 2 || got[0].Inner[0].Instructions[0].Data[0] != 3 ||
 		got[0].ReturnData.Data[0] != 4 {
 		t.Fatalf("clone shares nested storage: %+v", got[0])
@@ -91,29 +126,17 @@ func TestCloneTransactionObservationsOwnsNestedData(t *testing.T) {
 }
 
 func TestBuildEventsRejectsMalformedTransaction(t *testing.T) {
-	metadata := map[uint64]SlotMeta{10: {
-		Slot: 10, ParentSlot: 9, Bankhash: [32]byte{10},
-		Transactions: []TransactionObservation{{
-			Index: 1, Signature: "invalid", Message: []byte{1}, Succeeded: true,
-		}},
-	}}
+	meta := testSlotMeta(10, 9)
+	meta.Transactions = []TransactionObservation{{Index: 1, Signature: "invalid", Transaction: []byte{1}, Succeeded: true}}
+	metadata := map[uint64]SlotMeta{10: meta}
 	_, err := BuildEvents([]accounts.SlotDelta{{Slot: 10}}, metadata)
 	require.Error(t, err)
 }
 
 func TestValidateTransactionEnforcesWireBounds(t *testing.T) {
 	valid := func() TransactionObservation {
-		return TransactionObservation{
-			Index:       0,
-			Signature:   solana.Signature{1}.String(),
-			Message:     []byte{1},
-			AccountKeys: []string{solana.PublicKey{1}.String()},
-			Succeeded:   true,
-		}
+		return testTransactionObservation(t)
 	}
-	atLimit := valid()
-	atLimit.Message = make([]byte, maxTransactionMessageBytes)
-	require.NoError(t, validateTransaction(1, 0, atLimit))
 
 	tests := []struct {
 		name   string
@@ -121,11 +144,11 @@ func TestValidateTransactionEnforcesWireBounds(t *testing.T) {
 		want   string
 	}{
 		{
-			name: "oversized message",
+			name: "oversized transaction",
 			change: func(tx *TransactionObservation) {
-				tx.Message = make([]byte, maxTransactionMessageBytes+1)
+				tx.Transaction = make([]byte, solana.MaxTransactionSizeV1+1)
 			},
-			want: "message size",
+			want: "wire size",
 		},
 		{
 			name: "missing account keys",
@@ -172,11 +195,35 @@ func TestValidateTransactionEnforcesWireBounds(t *testing.T) {
 	}
 }
 
+func TestValidateTransactionUsesVersionSpecificWireLimit(t *testing.T) {
+	makeTransaction := func(version solana.MessageVersion) *solana.Transaction {
+		message := solana.Message{
+			Header:          solana.MessageHeader{NumRequiredSignatures: 1, NumReadonlyUnsignedAccounts: 1},
+			AccountKeys:     []solana.PublicKey{{1}, {2}},
+			RecentBlockhash: solana.Hash{3},
+			Instructions:    []solana.CompiledInstruction{{ProgramIDIndex: 1, Data: make([]byte, 1300)}},
+		}
+		if version != solana.MessageVersionLegacy {
+			_, err := message.SetVersion(version)
+			require.NoError(t, err)
+		}
+		return &solana.Transaction{Signatures: []solana.Signature{{1}}, Message: message}
+	}
+
+	legacy := testTransactionObservationFromTransaction(t, makeTransaction(solana.MessageVersionLegacy))
+	require.Greater(t, len(legacy.Transaction), maxLegacyTransactionBytes)
+	require.ErrorContains(t, validateTransaction(10, 0, legacy), "legacy/v0 wire exceeds")
+
+	v1 := testTransactionObservationFromTransaction(t, makeTransaction(solana.MessageVersionV1))
+	require.LessOrEqual(t, len(v1.Transaction), solana.MaxTransactionSizeV1)
+	require.NoError(t, validateTransaction(10, 0, v1))
+}
+
 func TestBuildEventsRejectsOversizedAccountData(t *testing.T) {
 	key := solana.PublicKey{1}
 	_, err := BuildEvents(
 		[]accounts.SlotDelta{{Slot: 10, Delta: []*accounts.Account{{Key: key, Data: make([]byte, maxAccountDataBytes+1)}}}},
-		map[uint64]SlotMeta{10: {Slot: 10, ParentSlot: 9, Bankhash: [32]byte{10}}},
+		map[uint64]SlotMeta{10: testSlotMeta(10, 9)},
 	)
 	require.ErrorContains(t, err, "data exceeds")
 }
@@ -202,23 +249,24 @@ func TestBuildEventsRejectsIncompleteLineage(t *testing.T) {
 			name:   "wrong parent",
 			deltas: []accounts.SlotDelta{{Slot: 10}, {Slot: 12}},
 			metadata: map[uint64]SlotMeta{
-				10: {Slot: 10, ParentSlot: 9, Bankhash: [32]byte{1}},
-				12: {Slot: 12, ParentSlot: 9, Bankhash: [32]byte{2}},
+				10: testSlotMeta(10, 9),
+				12: testSlotMeta(12, 9),
 			},
 		},
 		{
 			name:   "duplicate account",
 			deltas: []accounts.SlotDelta{{Slot: 10, Delta: []*accounts.Account{account, account}}},
 			metadata: map[uint64]SlotMeta{
-				10: {Slot: 10, ParentSlot: 9, Bankhash: [32]byte{1}},
+				10: testSlotMeta(10, 9),
 			},
 		},
 		{
 			name:   "empty bankhash",
 			deltas: []accounts.SlotDelta{{Slot: 10}},
-			metadata: map[uint64]SlotMeta{
-				10: {Slot: 10, ParentSlot: 9},
-			},
+			metadata: map[uint64]SlotMeta{10: {
+				Slot: 10, ParentSlot: 9, Blockhash: [32]byte{11}, ParentBlockhash: [32]byte{10},
+				FinalitySource: FinalityRPCFinalized,
+			}},
 		},
 	}
 	for _, tt := range tests {
@@ -227,6 +275,37 @@ func TestBuildEventsRejectsIncompleteLineage(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestBuildEventsBindsAlpenglowBlockLineage(t *testing.T) {
+	first := testSlotMeta(10, 9)
+	first.FinalitySource = FinalityAlpenglowCertificate
+	first.HasAlpenglowBlockID = true
+	first.HasAlpenglowParentBlockID = true
+	first.AlpenglowBlockID = [32]byte{10}
+	first.AlpenglowParentBlockID = [32]byte{9}
+	second := testSlotMeta(12, 10)
+	second.FinalitySource = FinalityAlpenglowCertificate
+	second.HasAlpenglowBlockID = true
+	second.HasAlpenglowParentBlockID = true
+	second.AlpenglowBlockID = [32]byte{12}
+	second.AlpenglowParentBlockID = first.AlpenglowBlockID
+
+	events, err := BuildEvents(
+		[]accounts.SlotDelta{{Slot: 10}, {Slot: 12}},
+		map[uint64]SlotMeta{10: first, 12: second},
+	)
+	require.NoError(t, err)
+	require.Equal(t, solana.Hash(first.AlpenglowBlockID).String(), events[0].Root.BlockID)
+	require.Equal(t, solana.Hash(first.AlpenglowParentBlockID).String(), events[0].Root.ParentBlockID)
+	require.Equal(t, FinalityAlpenglowCertificate, events[0].Root.FinalitySource)
+
+	second.AlpenglowParentBlockID = [32]byte{99}
+	_, err = BuildEvents(
+		[]accounts.SlotDelta{{Slot: 10}, {Slot: 12}},
+		map[uint64]SlotMeta{10: first, 12: second},
+	)
+	require.ErrorContains(t, err, "parent block ID")
 }
 
 func TestEventsAfterRejectsUnknownCursor(t *testing.T) {

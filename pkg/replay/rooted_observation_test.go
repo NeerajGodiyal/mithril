@@ -8,6 +8,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/rootedevents"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
+	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/require"
 )
@@ -18,7 +19,12 @@ func TestRootedTransactionObservationUsesRuntimeEvidenceAndOwnsBytes(t *testing.
 	observation, err := PrepareRootedTransactionObservation(tx, 3)
 	require.NoError(t, err)
 	require.Equal(t, uint32(3), observation.Index)
-	require.NotEmpty(t, observation.Message)
+	wire, err := tx.MarshalBinary()
+	require.NoError(t, err)
+	require.Equal(t, wire, observation.Transaction)
+	messageHash, err := txstatus.TransactionMessageHash(tx)
+	require.NoError(t, err)
+	require.Equal(t, solana.Hash(messageHash).String(), observation.MessageHash)
 
 	runtimeKey := solana.PublicKey{0x77}
 	returnProgram := solana.PublicKey{0x88}

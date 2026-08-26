@@ -164,7 +164,7 @@ type rejectingRootedEventTail struct {
 	calls int
 }
 
-func (t *rejectingRootedEventTail) RecordRootedEventSlot(uint64, uint64, []rootedevents.TransactionObservation) error {
+func (t *rejectingRootedEventTail) RecordRootedEventSlot(rootedevents.SlotIdentity, []rootedevents.TransactionObservation) error {
 	t.calls++
 	return t.err
 }
@@ -273,6 +273,7 @@ func rootedCaptureTestTail(t *testing.T) *unrootedTail {
 	t.Helper()
 	tail := newUnrootedTail(nil, nil, 512, 2, "")
 	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
+		FinalitySource: rootedevents.FinalityRPCFinalized,
 		Install: func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 			return nil, nil
 		},

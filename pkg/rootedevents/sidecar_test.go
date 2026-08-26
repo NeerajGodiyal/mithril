@@ -10,7 +10,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/state"
-	bin "github.com/gagliardetto/binary"
+	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/require"
 )
@@ -21,16 +21,9 @@ func TestPrepareAndReadSidecar(t *testing.T) {
 		{Slot: 10, Delta: []*accounts.Account{{Key: solana.PublicKey{2}, Lamports: 2}, {Key: solana.PublicKey{1}, Lamports: 1}}},
 		{Slot: 12},
 	}
-	metadata := map[uint64]SlotMeta{
-		10: {
-			Slot: 10, ParentSlot: 9, Bankhash: [32]byte{10},
-			Transactions: []TransactionObservation{{
-				Index: 0, Signature: solana.Signature{1}.String(), Message: []byte{1},
-				AccountKeys: []string{solana.PublicKey{1}.String()}, Succeeded: true,
-			}},
-		},
-		12: {Slot: 12, ParentSlot: 10, Bankhash: [32]byte{12}},
-	}
+	meta10 := testSlotMeta(10, 9)
+	meta10.Transactions = []TransactionObservation{testTransactionObservation(t)}
+	metadata := map[uint64]SlotMeta{10: meta10, 12: testSlotMeta(12, 10)}
 
 	ref, err := PrepareSidecar(root, deltas, metadata)
 	require.NoError(t, err)
@@ -53,7 +46,7 @@ func TestPrepareAndReadSidecar(t *testing.T) {
 	require.Equal(t, ref, retry, "identical preparation must be idempotent")
 }
 
-func TestSidecarRoundTripsV1Message(t *testing.T) {
+func TestSidecarRoundTripsV1Transaction(t *testing.T) {
 	config := solana.TransactionConfig{}.
 		WithPriorityFee(9_001).
 		WithComputeUnitLimit(300_000).
@@ -61,33 +54,34 @@ func TestSidecarRoundTripsV1Message(t *testing.T) {
 		WithHeapSize(64 * 1024)
 	message := solana.Message{
 		Header: solana.MessageHeader{
-			NumRequiredSignatures:       1,
+			NumRequiredSignatures:       2,
 			NumReadonlyUnsignedAccounts: 1,
 		},
-		AccountKeys: []solana.PublicKey{{1}, {2}},
+		AccountKeys: []solana.PublicKey{{1}, {2}, {3}},
 		Instructions: []solana.CompiledInstruction{{
-			ProgramIDIndex: 1,
-			Accounts:       []uint16{0},
+			ProgramIDIndex: 2,
+			Accounts:       []uint16{0, 1},
 		}},
 		TransactionConfig: config,
 	}
 	_, err := message.SetVersion(solana.MessageVersionV1)
 	require.NoError(t, err)
-	wire, err := message.MarshalBinary()
+	tx := &solana.Transaction{Signatures: []solana.Signature{{1}, {2}}, Message: message}
+	wire, err := tx.MarshalBinary()
+	require.NoError(t, err)
+	messageHash, err := txstatus.TransactionMessageHash(tx)
 	require.NoError(t, err)
 
 	root := t.TempDir()
+	meta := testSlotMeta(10, 9)
+	meta.Transactions = []TransactionObservation{{
+		Signature: tx.Signatures[0].String(), Transaction: wire,
+		MessageHash: solana.Hash(messageHash).String(),
+		AccountKeys: []string{solana.PublicKey{1}.String(), solana.PublicKey{2}.String(), solana.PublicKey{3}.String()}, Succeeded: true,
+	}}
 	ref, err := PrepareSidecar(root,
 		[]accounts.SlotDelta{{Slot: 10}},
-		map[uint64]SlotMeta{10: {
-			Slot: 10, ParentSlot: 9, Bankhash: [32]byte{10},
-			Transactions: []TransactionObservation{{
-				Signature:   solana.Signature{1}.String(),
-				Message:     wire,
-				AccountKeys: []string{solana.PublicKey{1}.String(), solana.PublicKey{2}.String()},
-				Succeeded:   true,
-			}},
-		}},
+		map[uint64]SlotMeta{10: meta},
 	)
 	require.NoError(t, err)
 
@@ -99,18 +93,17 @@ func TestSidecarRoundTripsV1Message(t *testing.T) {
 		return nil
 	}))
 	require.NotNil(t, record)
-	var decoded solana.Message
-	decoder := bin.NewBinDecoder(record.Message)
-	require.NoError(t, decoded.UnmarshalWithDecoder(decoder))
-	require.False(t, decoder.HasRemaining())
-	require.Equal(t, solana.MessageVersionV1, decoded.GetVersion())
-	require.Equal(t, config, decoded.TransactionConfig)
+	decoded, err := solana.TransactionFromBytes(record.Transaction)
+	require.NoError(t, err)
+	require.Equal(t, solana.MessageVersionV1, decoded.Message.GetVersion())
+	require.Equal(t, config, decoded.Message.TransactionConfig)
+	require.Equal(t, tx.Signatures, decoded.Signatures)
 }
 
 func TestReadSidecarRejectsTamperAndSymlink(t *testing.T) {
 	root := t.TempDir()
 	deltas := []accounts.SlotDelta{{Slot: 10}}
-	metadata := map[uint64]SlotMeta{10: {Slot: 10, ParentSlot: 9, Bankhash: [32]byte{10}}}
+	metadata := map[uint64]SlotMeta{10: testSlotMeta(10, 9)}
 	ref, err := PrepareSidecar(root, deltas, metadata)
 	require.NoError(t, err)
 	path := filepath.Join(root, SidecarDirectory, ref.File)
@@ -156,7 +149,7 @@ func TestSidecarOperationsRejectSymlinkDirectory(t *testing.T) {
 
 	_, err := PrepareSidecar(root,
 		[]accounts.SlotDelta{{Slot: 10}},
-		map[uint64]SlotMeta{10: {Slot: 10, ParentSlot: 9, Bankhash: [32]byte{10}}},
+		map[uint64]SlotMeta{10: testSlotMeta(10, 9)},
 	)
 	require.ErrorContains(t, err, "non-symlink directory")
 	require.ErrorContains(t, ReadSidecar(root, ref, nil), "non-symlink directory")
@@ -170,7 +163,7 @@ func TestReadSidecarRejectsUnknownFields(t *testing.T) {
 	root := t.TempDir()
 	ref, err := PrepareSidecar(root,
 		[]accounts.SlotDelta{{Slot: 10}},
-		map[uint64]SlotMeta{10: {Slot: 10, ParentSlot: 9, Bankhash: [32]byte{10}}},
+		map[uint64]SlotMeta{10: testSlotMeta(10, 9)},
 	)
 	require.NoError(t, err)
 	dir := filepath.Join(root, SidecarDirectory)
@@ -232,7 +225,7 @@ func TestValidateSidecarRefRejectsTraversal(t *testing.T) {
 	root := t.TempDir()
 	ref, err := PrepareSidecar(root,
 		[]accounts.SlotDelta{{Slot: 10}},
-		map[uint64]SlotMeta{10: {Slot: 10, ParentSlot: 9, Bankhash: [32]byte{10}}},
+		map[uint64]SlotMeta{10: testSlotMeta(10, 9)},
 	)
 	require.NoError(t, err)
 	ref.File = "../" + ref.File
@@ -256,10 +249,10 @@ func TestStreamValidatorRejectsTransactionAfterAccount(t *testing.T) {
 		Cursor:        Cursor{Slot: 10, Ordinal: 1},
 		Kind:          TransactionExecuted,
 		Transaction: &TransactionRecord{
-			Index:     0,
-			Signature: solana.Signature{1}.String(),
-			Message:   []byte{1},
-			Succeeded: true,
+			Index:       0,
+			Signature:   solana.Signature{1}.String(),
+			Transaction: []byte{1},
+			Succeeded:   true,
 		},
 	})
 	require.ErrorContains(t, err, "malformed transaction event")
@@ -270,7 +263,7 @@ func TestCleanupSidecarsKeepsSelectedAndUnknownFiles(t *testing.T) {
 	prepare := func(slot uint64) *state.RootedEventBatchRef {
 		ref, err := PrepareSidecar(root,
 			[]accounts.SlotDelta{{Slot: slot}},
-			map[uint64]SlotMeta{slot: {Slot: slot, ParentSlot: slot - 1, Bankhash: [32]byte{byte(slot)}}},
+			map[uint64]SlotMeta{slot: testSlotMeta(slot, slot-1)},
 		)
 		require.NoError(t, err)
 		return ref
