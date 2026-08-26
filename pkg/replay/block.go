@@ -2212,7 +2212,15 @@ func ReplayBlocks(
 			return result
 		}
 		if consensusOpts != nil && consensusOpts.RootedEvents {
+			finalitySource := rootedevents.FinalityRPCFinalized
+			if consensusOpts.Alpenglow {
+				finalitySource = rootedevents.FinalityAlpenglowDelegated
+				if consensusOpts.Engine != nil {
+					finalitySource = rootedevents.FinalityAlpenglowCertificate
+				}
+			}
 			if hookErr := unrootedTailState.SetRootedEventHooks(RootedEventHooks{
+				FinalitySource: finalitySource,
 				Install: func(deltas []accounts.SlotDelta, metadata map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 					return rootedevents.PrepareSidecar(acctsDbPath, deltas, metadata)
 				},
@@ -4630,7 +4638,7 @@ func ProcessBlock(
 			block,
 			func() error { return transactionStatuses.commitBlockWithPlan(block, executionPlan) },
 			func() error {
-				return tail.RecordRootedEventSlot(slotCtx.Slot, block.ParentSlot, rootedTransactionObservations)
+				return tail.RecordRootedEventSlot(rootedEventSlotIdentity(block), rootedTransactionObservations)
 			},
 		)
 		metrics.GlobalBlockReplay.TransactionStatusCommit.AddTimingSince(statusCommitStart)

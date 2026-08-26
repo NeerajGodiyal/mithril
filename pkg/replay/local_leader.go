@@ -136,7 +136,7 @@ func adoptLocalLeaderBlock(
 			block,
 			func() error { return transactionStatuses.CommitBlock(block) },
 			func() error {
-				return tail.RecordRootedEventSlot(block.Slot, block.ParentSlot, commit.TransactionObservations)
+				return tail.RecordRootedEventSlot(rootedEventSlotIdentity(block), commit.TransactionObservations)
 			},
 		); err != nil {
 			return nil, fmt.Errorf("adopt local leader block slot %d: %w", block.Slot, err)

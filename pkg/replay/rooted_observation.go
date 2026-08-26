@@ -3,9 +3,10 @@ package replay
 import (
 	"fmt"
 
+	"github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/rootedevents"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
-	"github.com/Overclock-Validator/mithril/pkg/txverify"
+	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -16,17 +17,35 @@ func PrepareRootedTransactionObservation(tx *solana.Transaction, index uint32) (
 	if tx == nil || len(tx.Signatures) == 0 {
 		return rootedevents.TransactionObservation{}, fmt.Errorf("rooted transaction observation %d: transaction or signature is missing", index)
 	}
-	message, err := txverify.MessageBytes(tx)
+	wire, err := tx.MarshalBinary()
 	if err != nil {
-		return rootedevents.TransactionObservation{}, fmt.Errorf("rooted transaction observation %d: marshal signed message: %w", index, err)
+		return rootedevents.TransactionObservation{}, fmt.Errorf("rooted transaction observation %d: marshal transaction: %w", index, err)
+	}
+	messageHash, err := txstatus.TransactionMessageHash(tx)
+	if err != nil {
+		return rootedevents.TransactionObservation{}, fmt.Errorf("rooted transaction observation %d: hash message: %w", index, err)
 	}
 	observation := rootedevents.TransactionObservation{
-		Index:     index,
-		Signature: tx.Signatures[0].String(),
-		Message:   append([]byte(nil), message...),
+		Index:       index,
+		Signature:   tx.Signatures[0].String(),
+		Transaction: append([]byte(nil), wire...),
+		MessageHash: solana.Hash(messageHash).String(),
 	}
 	observation.AccountKeys = publicKeyStrings(tx.Message.AccountKeys)
 	return observation, nil
+}
+
+func rootedEventSlotIdentity(block *block.Block) rootedevents.SlotIdentity {
+	return rootedevents.SlotIdentity{
+		Slot:                      block.Slot,
+		ParentSlot:                block.ParentSlot,
+		Blockhash:                 block.Blockhash,
+		ParentBlockhash:           block.LastBlockhash,
+		AlpenglowBlockID:          block.AlpenglowBlockID,
+		HasAlpenglowBlockID:       block.HasAlpenglowBlockID,
+		AlpenglowParentBlockID:    block.AlpenglowParentBlockID,
+		HasAlpenglowParentBlockID: block.HasAlpenglowParentBlockID,
+	}
 }
 
 func publicKeyStrings(keys []solana.PublicKey) []string {

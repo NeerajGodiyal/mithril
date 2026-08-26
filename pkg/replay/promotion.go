@@ -62,8 +62,9 @@ type TransactionStatusCheckpointHooks struct {
 // RootedEventHooks installs immutable per-slot transaction and account events
 // before the fold manifest selects them.
 type RootedEventHooks struct {
-	Install     func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error)
-	AfterCommit func(*state.RootedEventBatchRef) error
+	FinalitySource rootedevents.FinalitySource
+	Install        func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error)
+	AfterCommit    func(*state.RootedEventBatchRef) error
 }
 
 // defaultFoldBatchSlots is the fold chunk size K when none is configured:
@@ -136,7 +137,7 @@ type unrootedState interface {
 	Add(slot uint64, delta []*accounts.Account, bankhash []byte)
 	SetContext(slot uint64, ctx *state.ResumeContext, bankSysvars ...*sealevel.BankSysvars)
 	CapturesRootedEvents() bool
-	RecordRootedEventSlot(slot, parentSlot uint64, observations []rootedevents.TransactionObservation) error
+	RecordRootedEventSlot(identity rootedevents.SlotIdentity, observations []rootedevents.TransactionObservation) error
 	promote(through uint64) (uint64, *state.ResumeContext, error)
 	// flush force-folds the trailing partial chunk <= through. Epoch-boundary
 	// scans use it to settle the durable AccountsDB view; graceful shutdown uses
@@ -154,7 +155,7 @@ type unrootedTail struct {
 	asyncCommitter    batchCommitter     // raw committer; async admission advances durableGeneration on the loop thread
 	durableGeneration atomic.Uint64
 	bankhashes        map[uint64][32]byte
-	parentSlots       map[uint64]uint64
+	identities        map[uint64]rootedevents.SlotIdentity
 	transactions      map[uint64][]rootedevents.TransactionObservation
 	transactionSizes  map[uint64]uint64
 	transactionBytes  uint64
@@ -231,7 +232,7 @@ func newUnrootedTail(durable blockAccountSource, committer batchCommitter, haltC
 		overlay:          accounts.NewWorkingSet(),
 		durable:          durable,
 		bankhashes:       make(map[uint64][32]byte),
-		parentSlots:      make(map[uint64]uint64),
+		identities:       make(map[uint64]rootedevents.SlotIdentity),
 		transactions:     make(map[uint64][]rootedevents.TransactionObservation),
 		transactionSizes: make(map[uint64]uint64),
 		batchSlots:       batchSlots,
@@ -273,24 +274,25 @@ func (t *unrootedTail) CapturesRootedEvents() bool {
 
 // RecordRootedEventSlot attaches owned execution observations and lineage to a
 // held slot. The data follows that slot through promotion or unwind.
-func (t *unrootedTail) RecordRootedEventSlot(slot, parentSlot uint64, observations []rootedevents.TransactionObservation) error {
-	return t.recordRootedEventSlotWithLimit(slot, parentSlot, observations, rootedEventObservationBytesLimit)
+func (t *unrootedTail) RecordRootedEventSlot(identity rootedevents.SlotIdentity, observations []rootedevents.TransactionObservation) error {
+	return t.recordRootedEventSlotWithLimit(identity, observations, rootedEventObservationBytesLimit)
 }
 
 func (t *unrootedTail) recordRootedEventSlotWithLimit(
-	slot, parentSlot uint64,
+	identity rootedevents.SlotIdentity,
 	observations []rootedevents.TransactionObservation,
 	limit uint64,
 ) error {
 	if !t.CapturesRootedEvents() {
 		return nil
 	}
+	slot := identity.Slot
 	size := transactionObservationsSize(observations)
 	retained := t.transactionBytes - t.transactionSizes[slot]
 	if size > limit || retained > limit-size {
 		return fmt.Errorf("rooted transaction observations exceed the %d-byte fork-tail limit at slot %d", limit, slot)
 	}
-	t.parentSlots[slot] = parentSlot
+	t.identities[slot] = identity
 	t.transactions[slot] = rootedevents.CloneTransactionObservations(observations)
 	t.transactionSizes[slot] = size
 	t.transactionBytes = retained + size
@@ -308,7 +310,7 @@ func transactionObservationsSize(observations []rootedevents.TransactionObservat
 	}
 	for _, observation := range observations {
 		add(256)
-		add(uint64(len(observation.Signature) + len(observation.Message) + len(observation.Failure)))
+		add(uint64(len(observation.Signature) + len(observation.Transaction) + len(observation.MessageHash) + len(observation.Failure)))
 		for _, key := range observation.AccountKeys {
 			add(16 + uint64(len(key)))
 		}
@@ -482,7 +484,7 @@ func (t *unrootedTail) flush(through uint64) (uint64, *state.ResumeContext, erro
 
 func (t *unrootedTail) promoteChunked(through uint64, force bool) (uint64, *state.ResumeContext, error) {
 	promotedThrough, err := promoteRootedBatchedWithEvents(
-		t.overlay, through, t.bankhashes, t.parentSlots, t.transactions, t.contexts,
+		t.overlay, through, t.bankhashes, t.identities, t.transactions, t.contexts,
 		t.committer, t.batchSlots, t.stakeIdxDir, force, t.rootedEventHooks,
 		t.transactionStatusCheckpointHooks,
 	)
@@ -505,9 +507,9 @@ func (t *unrootedTail) promoteChunked(through uint64, force bool) (uint64, *stat
 }
 
 func (t *unrootedTail) dropRootedEventSlotsThrough(through uint64) {
-	for slot := range t.parentSlots {
+	for slot := range t.identities {
 		if slot <= through {
-			delete(t.parentSlots, slot)
+			delete(t.identities, slot)
 		}
 	}
 	for slot, size := range t.transactionSizes {
@@ -617,7 +619,7 @@ func (t *unrootedTail) buildFoldJob(through uint64, force bool, hookOverrides ..
 	}
 	var rootedEventMetadata map[uint64]rootedevents.SlotMeta
 	if t.rootedEventHooks.Install != nil {
-		rootedEventMetadata, err = buildRootedEventMetadata(chunk, bankhashes, t.parentSlots, t.transactions)
+		rootedEventMetadata, err = buildRootedEventMetadata(chunk, bankhashes, t.identities, t.transactions, t.rootedEventHooks.FinalitySource)
 		if err != nil {
 			return nil, fmt.Errorf("fold chunk through slot %d: %w", through, err)
 		}
@@ -820,9 +822,9 @@ func (t *unrootedTail) unwind(fromSlot uint64) (*state.ResumeContext, *sealevel.
 			delete(t.bankhashes, s)
 		}
 	}
-	for slot := range t.parentSlots {
+	for slot := range t.identities {
 		if slot >= fromSlot {
-			delete(t.parentSlots, slot)
+			delete(t.identities, slot)
 		}
 	}
 	for slot, size := range t.transactionSizes {
@@ -911,7 +913,7 @@ func promoteRootedBatchedWithEvents(
 	overlay *accounts.WorkingSet,
 	through uint64,
 	bankhashes map[uint64][32]byte,
-	parentSlots map[uint64]uint64,
+	identities map[uint64]rootedevents.SlotIdentity,
 	transactions map[uint64][]rootedevents.TransactionObservation,
 	contexts map[uint64]*state.ResumeContext,
 	committer batchCommitter,
@@ -990,7 +992,7 @@ func promoteRootedBatchedWithEvents(
 		}
 		var selectedRootedEvents *state.RootedEventBatchRef
 		if rootedEventHooks.Install != nil {
-			metadata, metaErr := buildRootedEventMetadata(chunk, chunkBankhashes, parentSlots, transactions)
+			metadata, metaErr := buildRootedEventMetadata(chunk, chunkBankhashes, identities, transactions, rootedEventHooks.FinalitySource)
 			if metaErr != nil {
 				err = fmt.Errorf("promote chunk through slot %d: %w", chunkThrough, metaErr)
 				break
@@ -1049,7 +1051,7 @@ func promoteRootedBatchedWithEvents(
 		overlay.PromotePrefix(chunkThrough)
 		for _, sd := range chunk {
 			delete(bankhashes, sd.Slot)
-			delete(parentSlots, sd.Slot)
+			delete(identities, sd.Slot)
 			delete(transactions, sd.Slot)
 		}
 		promotedThrough = chunkThrough
@@ -1084,14 +1086,22 @@ func validateRootedEventHooks(hooks RootedEventHooks) error {
 	if hooks.AfterCommit != nil && hooks.Install == nil {
 		return errors.New("rooted-event AfterCommit hook requires an Install hook")
 	}
+	if hooks.Install != nil {
+		switch hooks.FinalitySource {
+		case rootedevents.FinalityAlpenglowCertificate, rootedevents.FinalityAlpenglowDelegated, rootedevents.FinalityRPCFinalized:
+		default:
+			return fmt.Errorf("rooted-event Install hook requires a valid finality source, got %q", hooks.FinalitySource)
+		}
+	}
 	return nil
 }
 
 func buildRootedEventMetadata(
 	chunk []accounts.SlotDelta,
 	bankhashes map[uint64][32]byte,
-	parentSlots map[uint64]uint64,
+	identities map[uint64]rootedevents.SlotIdentity,
 	transactions map[uint64][]rootedevents.TransactionObservation,
+	finalitySource rootedevents.FinalitySource,
 ) (map[uint64]rootedevents.SlotMeta, error) {
 	metadata := make(map[uint64]rootedevents.SlotMeta, len(chunk))
 	for _, delta := range chunk {
@@ -1099,19 +1109,26 @@ func buildRootedEventMetadata(
 		if !ok {
 			return nil, fmt.Errorf("rooted events: no bankhash recorded for slot %d", delta.Slot)
 		}
-		parentSlot, ok := parentSlots[delta.Slot]
+		identity, ok := identities[delta.Slot]
 		if !ok {
-			return nil, fmt.Errorf("rooted events: no parent slot recorded for slot %d", delta.Slot)
+			return nil, fmt.Errorf("rooted events: no block identity recorded for slot %d", delta.Slot)
 		}
 		observations, ok := transactions[delta.Slot]
 		if !ok {
 			return nil, fmt.Errorf("rooted events: no transaction capture recorded for slot %d", delta.Slot)
 		}
 		metadata[delta.Slot] = rootedevents.SlotMeta{
-			Slot:         delta.Slot,
-			ParentSlot:   parentSlot,
-			Bankhash:     bankhash,
-			Transactions: observations,
+			Slot:                      identity.Slot,
+			ParentSlot:                identity.ParentSlot,
+			Blockhash:                 identity.Blockhash,
+			ParentBlockhash:           identity.ParentBlockhash,
+			Bankhash:                  bankhash,
+			AlpenglowBlockID:          identity.AlpenglowBlockID,
+			HasAlpenglowBlockID:       identity.HasAlpenglowBlockID,
+			AlpenglowParentBlockID:    identity.AlpenglowParentBlockID,
+			HasAlpenglowParentBlockID: identity.HasAlpenglowParentBlockID,
+			FinalitySource:            finalitySource,
+			Transactions:              observations,
 		}
 	}
 	return metadata, nil

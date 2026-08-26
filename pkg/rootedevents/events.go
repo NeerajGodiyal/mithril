@@ -12,6 +12,7 @@ import (
 	"sort"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -19,10 +20,9 @@ const (
 	// SchemaVersion is the current rooted-event wire schema.
 	SchemaVersion uint32 = 3
 
-	// These limits mirror the runtime values that can reach schema v3. Message
-	// bytes are opaque canonical Solana messages, including v1.
+	// These limits mirror the runtime values that can reach schema v3.
 	maxAccountDataBytes          = 10 << 20
-	maxTransactionMessageBytes   = solana.MaxTransactionSizeV1
+	maxLegacyTransactionBytes    = 1232
 	maxTransactionAccountKeys    = 256
 	maxTransactionLogBytes       = 10_064
 	maxInnerInstructions         = 64
@@ -43,6 +43,15 @@ const (
 	SlotRooted Kind = "slot_rooted"
 )
 
+// FinalitySource names the mechanism that selected a terminal rooted slot.
+type FinalitySource string
+
+const (
+	FinalityAlpenglowCertificate FinalitySource = "alpenglow_certificate"
+	FinalityAlpenglowDelegated   FinalitySource = "alpenglow_delegated"
+	FinalityRPCFinalized         FinalitySource = "rpc_finalized"
+)
+
 // Cursor identifies one record in the rooted stream. Consumers resume after
 // their last acknowledged cursor. Slot alone is insufficient because a slot
 // can update many accounts.
@@ -53,10 +62,29 @@ type Cursor struct {
 
 // SlotMeta is the rooted identity supplied by replay for one SlotDelta.
 type SlotMeta struct {
-	Slot         uint64
-	ParentSlot   uint64
-	Bankhash     [32]byte
-	Transactions []TransactionObservation
+	Slot                      uint64
+	ParentSlot                uint64
+	Blockhash                 [32]byte
+	ParentBlockhash           [32]byte
+	Bankhash                  [32]byte
+	AlpenglowBlockID          [32]byte
+	HasAlpenglowBlockID       bool
+	AlpenglowParentBlockID    [32]byte
+	HasAlpenglowParentBlockID bool
+	FinalitySource            FinalitySource
+	Transactions              []TransactionObservation
+}
+
+// SlotIdentity is replay's fork-local identity for one terminal rooted slot.
+type SlotIdentity struct {
+	Slot                      uint64
+	ParentSlot                uint64
+	Blockhash                 [32]byte
+	ParentBlockhash           [32]byte
+	AlpenglowBlockID          [32]byte
+	HasAlpenglowBlockID       bool
+	AlpenglowParentBlockID    [32]byte
+	HasAlpenglowParentBlockID bool
 }
 
 // CompiledInstruction preserves one instruction's canonical message indexes.
@@ -83,7 +111,8 @@ type ReturnData struct {
 type TransactionObservation struct {
 	Index         uint32
 	Signature     string
-	Message       []byte
+	Transaction   []byte
+	MessageHash   string
 	AccountKeys   []string
 	Succeeded     bool
 	Failure       string
@@ -99,7 +128,7 @@ type TransactionObservation struct {
 func CloneTransactionObservations(values []TransactionObservation) []TransactionObservation {
 	out := append([]TransactionObservation(nil), values...)
 	for i := range out {
-		out[i].Message = append([]byte(nil), values[i].Message...)
+		out[i].Transaction = append([]byte(nil), values[i].Transaction...)
 		out[i].AccountKeys = append([]string(nil), values[i].AccountKeys...)
 		out[i].Logs = append([]string(nil), values[i].Logs...)
 		out[i].Inner = append([]InnerInstructions(nil), values[i].Inner...)
@@ -120,12 +149,13 @@ func CloneTransactionObservations(values []TransactionObservation) []Transaction
 }
 
 // TransactionRecord is one transaction and the result observed by local
-// replay. Message is the canonical Solana message bytes; AccountKeys includes
+// replay. Transaction is the full canonical signed wire; AccountKeys includes
 // address-table-resolved keys for direct indexing.
 type TransactionRecord struct {
 	Index         uint32              `json:"index"`
 	Signature     string              `json:"signature"`
-	Message       []byte              `json:"message"`
+	Transaction   []byte              `json:"transaction"`
+	MessageHash   string              `json:"message_hash"`
 	AccountKeys   []string            `json:"account_keys"`
 	Succeeded     bool                `json:"succeeded"`
 	Failure       string              `json:"failure,omitempty"`
@@ -149,10 +179,15 @@ type AccountUpdate struct {
 
 // RootedSlot is the terminal lineage marker for one complete slot.
 type RootedSlot struct {
-	ParentSlot       uint64 `json:"parent_slot"`
-	Bankhash         string `json:"bankhash"`
-	TransactionCount uint32 `json:"transaction_count"`
-	AccountCount     uint32 `json:"account_count"`
+	ParentSlot       uint64         `json:"parent_slot"`
+	Blockhash        string         `json:"blockhash"`
+	ParentBlockhash  string         `json:"parent_blockhash"`
+	Bankhash         string         `json:"bankhash"`
+	BlockID          string         `json:"block_id,omitempty"`
+	ParentBlockID    string         `json:"parent_block_id,omitempty"`
+	FinalitySource   FinalitySource `json:"finality_source"`
+	TransactionCount uint32         `json:"transaction_count"`
+	AccountCount     uint32         `json:"account_count"`
 }
 
 // Event is one transaction result, one final account value, or a rooted slot's
@@ -203,6 +238,19 @@ func walkEvents(deltas []accounts.SlotDelta, metadata map[uint64]SlotMeta, emit 
 		if i > 0 && meta.ParentSlot != deltas[i-1].Slot {
 			return fmt.Errorf("rooted slot %d parent is %d, want previous rooted slot %d", delta.Slot, meta.ParentSlot, deltas[i-1].Slot)
 		}
+		if i > 0 {
+			previous := metadata[deltas[i-1].Slot]
+			if meta.ParentBlockhash != previous.Blockhash {
+				return fmt.Errorf("rooted slot %d parent blockhash does not match previous rooted slot %d", delta.Slot, deltas[i-1].Slot)
+			}
+			if meta.HasAlpenglowParentBlockID != previous.HasAlpenglowBlockID ||
+				(meta.HasAlpenglowParentBlockID && meta.AlpenglowParentBlockID != previous.AlpenglowBlockID) {
+				return fmt.Errorf("rooted slot %d parent block ID does not match previous rooted slot %d", delta.Slot, deltas[i-1].Slot)
+			}
+			if meta.FinalitySource != previous.FinalitySource {
+				return fmt.Errorf("rooted slot %d finality source %q differs from previous rooted slot %d source %q", delta.Slot, meta.FinalitySource, deltas[i-1].Slot, previous.FinalitySource)
+			}
+		}
 		if err := validateEventCount(delta.Slot, uint64(len(meta.Transactions)), uint64(len(delta.Delta))); err != nil {
 			return err
 		}
@@ -213,8 +261,9 @@ func walkEvents(deltas []accounts.SlotDelta, metadata map[uint64]SlotMeta, emit 
 			}
 			record := cloneTransactionRecord(TransactionRecord{
 				Index: transaction.Index, Signature: transaction.Signature,
-				Message: transaction.Message, AccountKeys: transaction.AccountKeys,
-				Succeeded: transaction.Succeeded, Failure: transaction.Failure,
+				Transaction: transaction.Transaction, MessageHash: transaction.MessageHash,
+				AccountKeys: transaction.AccountKeys,
+				Succeeded:   transaction.Succeeded, Failure: transaction.Failure,
 				ComputeUnits: transaction.ComputeUnits, Logs: transaction.Logs,
 				LogsTruncated: transaction.LogsTruncated,
 				Inner:         transaction.Inner, ReturnData: transaction.ReturnData,
@@ -256,16 +305,24 @@ func walkEvents(deltas []accounts.SlotDelta, metadata map[uint64]SlotMeta, emit 
 				return err
 			}
 		}
+		root := &RootedSlot{
+			ParentSlot:       meta.ParentSlot,
+			Blockhash:        solana.Hash(meta.Blockhash).String(),
+			ParentBlockhash:  solana.Hash(meta.ParentBlockhash).String(),
+			Bankhash:         solana.Hash(meta.Bankhash).String(),
+			FinalitySource:   meta.FinalitySource,
+			TransactionCount: transactionCount,
+			AccountCount:     uint32(len(ordered)),
+		}
+		if meta.HasAlpenglowBlockID {
+			root.BlockID = solana.Hash(meta.AlpenglowBlockID).String()
+			root.ParentBlockID = solana.Hash(meta.AlpenglowParentBlockID).String()
+		}
 		if err := emit(Event{
 			SchemaVersion: SchemaVersion,
 			Cursor:        Cursor{Slot: delta.Slot, Ordinal: transactionCount + uint32(len(ordered))},
 			Kind:          SlotRooted,
-			Root: &RootedSlot{
-				ParentSlot:       meta.ParentSlot,
-				Bankhash:         solana.Hash(meta.Bankhash).String(),
-				TransactionCount: transactionCount,
-				AccountCount:     uint32(len(ordered)),
-			},
+			Root:          root,
 		}); err != nil {
 			return err
 		}
@@ -293,8 +350,22 @@ func validateTransaction(slot uint64, index uint32, transaction TransactionObser
 	if _, err := solana.SignatureFromBase58(transaction.Signature); err != nil {
 		return fmt.Errorf("rooted slot %d transaction %d has invalid signature: %w", slot, index, err)
 	}
-	if len(transaction.Message) == 0 || len(transaction.Message) > maxTransactionMessageBytes {
-		return fmt.Errorf("rooted slot %d transaction %d message size is outside allowed range 1..%d", slot, index, maxTransactionMessageBytes)
+	if len(transaction.Transaction) == 0 || len(transaction.Transaction) > solana.MaxTransactionSizeV1 {
+		return fmt.Errorf("rooted slot %d transaction %d wire size is outside allowed range 1..%d", slot, index, solana.MaxTransactionSizeV1)
+	}
+	decoded, err := solana.TransactionFromBytes(transaction.Transaction)
+	if err != nil {
+		return fmt.Errorf("rooted slot %d transaction %d wire is invalid: %w", slot, index, err)
+	}
+	if decoded.Message.GetVersion() != solana.MessageVersionV1 && len(transaction.Transaction) > maxLegacyTransactionBytes {
+		return fmt.Errorf("rooted slot %d transaction %d legacy/v0 wire exceeds %d bytes", slot, index, maxLegacyTransactionBytes)
+	}
+	if len(decoded.Signatures) == 0 || decoded.Signatures[0].String() != transaction.Signature {
+		return fmt.Errorf("rooted slot %d transaction %d signature does not match wire", slot, index)
+	}
+	messageHash, err := txstatus.TransactionMessageHash(decoded)
+	if err != nil || solana.Hash(messageHash).String() != transaction.MessageHash {
+		return fmt.Errorf("rooted slot %d transaction %d message hash does not match wire", slot, index)
 	}
 	if len(transaction.AccountKeys) == 0 || len(transaction.AccountKeys) > maxTransactionAccountKeys {
 		return fmt.Errorf("rooted slot %d transaction %d account count is outside allowed range 1..%d", slot, index, maxTransactionAccountKeys)
@@ -353,7 +424,7 @@ func validateTransaction(slot uint64, index uint32, transaction TransactionObser
 }
 
 func cloneTransactionRecord(record TransactionRecord) TransactionRecord {
-	record.Message = append([]byte(nil), record.Message...)
+	record.Transaction = append([]byte(nil), record.Transaction...)
 	record.AccountKeys = append([]string(nil), record.AccountKeys...)
 	record.Logs = append([]string(nil), record.Logs...)
 	record.Inner = append([]InnerInstructions(nil), record.Inner...)
@@ -385,6 +456,30 @@ func validateSlotMeta(meta SlotMeta, slot uint64) error {
 	}
 	if meta.Bankhash == ([32]byte{}) {
 		return fmt.Errorf("rooted slot %d has an empty bankhash", slot)
+	}
+	if meta.Blockhash == ([32]byte{}) {
+		return fmt.Errorf("rooted slot %d has an empty blockhash", slot)
+	}
+	if slot > 0 && meta.ParentBlockhash == ([32]byte{}) {
+		return fmt.Errorf("rooted slot %d has an empty parent blockhash", slot)
+	}
+	if meta.HasAlpenglowBlockID != meta.HasAlpenglowParentBlockID {
+		return fmt.Errorf("rooted slot %d has incomplete Alpenglow block identity", slot)
+	}
+	if meta.HasAlpenglowBlockID && (meta.AlpenglowBlockID == ([32]byte{}) || meta.AlpenglowParentBlockID == ([32]byte{})) {
+		return fmt.Errorf("rooted slot %d has an empty Alpenglow block identity", slot)
+	}
+	switch meta.FinalitySource {
+	case FinalityAlpenglowCertificate, FinalityAlpenglowDelegated:
+		if !meta.HasAlpenglowBlockID {
+			return fmt.Errorf("rooted slot %d Alpenglow finality has no block identity", slot)
+		}
+	case FinalityRPCFinalized:
+		if meta.HasAlpenglowBlockID {
+			return fmt.Errorf("rooted slot %d RPC finality unexpectedly carries Alpenglow block identity", slot)
+		}
+	default:
+		return fmt.Errorf("rooted slot %d has invalid finality source %q", slot, meta.FinalitySource)
 	}
 	return nil
 }

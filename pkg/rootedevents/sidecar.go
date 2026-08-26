@@ -322,6 +322,9 @@ type streamValidator struct {
 	slotClosed       bool
 	lastRoot         uint64
 	haveRoot         bool
+	lastBlockhash    solana.Hash
+	lastBlockID      solana.Hash
+	haveLastBlockID  bool
 }
 
 func newStreamValidator(ref *state.RootedEventBatchRef) *streamValidator {
@@ -366,8 +369,9 @@ func (v *streamValidator) accept(event Event) error {
 		}
 		observation := TransactionObservation{
 			Index: event.Transaction.Index, Signature: event.Transaction.Signature,
-			Message: event.Transaction.Message, AccountKeys: event.Transaction.AccountKeys,
-			Succeeded: event.Transaction.Succeeded, Failure: event.Transaction.Failure,
+			Transaction: event.Transaction.Transaction, MessageHash: event.Transaction.MessageHash,
+			AccountKeys: event.Transaction.AccountKeys,
+			Succeeded:   event.Transaction.Succeeded, Failure: event.Transaction.Failure,
 			ComputeUnits: event.Transaction.ComputeUnits, Logs: event.Transaction.Logs,
 			LogsTruncated: event.Transaction.LogsTruncated,
 			Inner:         event.Transaction.Inner, ReturnData: event.Transaction.ReturnData,
@@ -417,9 +421,50 @@ func (v *streamValidator) accept(event Event) error {
 		if bankhash == (solana.Hash{}) {
 			return fmt.Errorf("slot %d has an empty bankhash", v.slot)
 		}
+		blockhash, err := solana.HashFromBase58(event.Root.Blockhash)
+		if err != nil || blockhash == (solana.Hash{}) {
+			return fmt.Errorf("slot %d has invalid or empty blockhash", v.slot)
+		}
+		parentBlockhash, err := solana.HashFromBase58(event.Root.ParentBlockhash)
+		if err != nil || (v.slot > 0 && parentBlockhash == (solana.Hash{})) {
+			return fmt.Errorf("slot %d has invalid or empty parent blockhash", v.slot)
+		}
+		hasBlockID := event.Root.BlockID != "" || event.Root.ParentBlockID != ""
+		var blockID, parentBlockID solana.Hash
+		if hasBlockID {
+			if event.Root.BlockID == "" || event.Root.ParentBlockID == "" {
+				return fmt.Errorf("slot %d has incomplete Alpenglow block identity", v.slot)
+			}
+			blockID, err = solana.HashFromBase58(event.Root.BlockID)
+			if err != nil || blockID == (solana.Hash{}) {
+				return fmt.Errorf("slot %d has invalid or empty Alpenglow block ID", v.slot)
+			}
+			parentBlockID, err = solana.HashFromBase58(event.Root.ParentBlockID)
+			if err != nil || parentBlockID == (solana.Hash{}) {
+				return fmt.Errorf("slot %d has invalid or empty Alpenglow parent block ID", v.slot)
+			}
+		}
+		switch event.Root.FinalitySource {
+		case FinalityAlpenglowCertificate, FinalityAlpenglowDelegated:
+			if !hasBlockID {
+				return fmt.Errorf("slot %d Alpenglow finality has no block identity", v.slot)
+			}
+		case FinalityRPCFinalized:
+			if hasBlockID {
+				return fmt.Errorf("slot %d RPC finality unexpectedly carries Alpenglow block identity", v.slot)
+			}
+		default:
+			return fmt.Errorf("slot %d has invalid finality source %q", v.slot, event.Root.FinalitySource)
+		}
 		if v.haveRoot {
 			if event.Root.ParentSlot != v.lastRoot {
 				return fmt.Errorf("slot %d parent %d does not match previous root %d", v.slot, event.Root.ParentSlot, v.lastRoot)
+			}
+			if parentBlockhash != v.lastBlockhash {
+				return fmt.Errorf("slot %d parent blockhash does not match previous root", v.slot)
+			}
+			if hasBlockID != v.haveLastBlockID || (hasBlockID && parentBlockID != v.lastBlockID) {
+				return fmt.Errorf("slot %d parent block ID does not match previous root", v.slot)
 			}
 		} else if v.slot > 0 && event.Root.ParentSlot >= v.slot {
 			return fmt.Errorf("slot %d has invalid parent %d", v.slot, event.Root.ParentSlot)
@@ -427,6 +472,9 @@ func (v *streamValidator) accept(event Event) error {
 		v.slotClosed = true
 		v.lastRoot = v.slot
 		v.haveRoot = true
+		v.lastBlockhash = blockhash
+		v.lastBlockID = blockID
+		v.haveLastBlockID = hasBlockID
 	default:
 		return fmt.Errorf("slot %d has unknown event kind %q", v.slot, event.Kind)
 	}
