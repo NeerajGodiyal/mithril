@@ -18,7 +18,11 @@ const HistoryFileName = "mithril_state.history.jsonl"
 // Increment this when making breaking changes to the state file structure.
 // Version 3 requires computed epoch-stake metadata to retain vote-account
 // balances; older checkpoints cannot prove SIMD-0357 VAT admission on resume.
-const CurrentStateSchemaVersion uint32 = 3
+// Version 4 binds an AccountsDB lineage to either legacy per-slot persistence
+// or rooted-durable folds. The bump is intentional: a v3 binary must refuse a
+// classic rooted-durable store instead of silently reopening it in per-slot
+// mode. LoadState safely infers the profile for existing v3 stores.
+const CurrentStateSchemaVersion uint32 = 4
 
 // MithrilState tracks the current state of the mithril node.
 // The state file serves as an atomic marker of validity - AccountsDB is valid
@@ -55,6 +59,10 @@ type MithrilState struct {
 	BuildMode      string        `json:"build_mode,omitempty"`         // "auto", "snapshot", "new-snapshot", "accountsdb"
 	Cluster        string        `json:"cluster,omitempty"`            // "mainnet-beta", "testnet", "devnet"
 	GenesisHash    string        `json:"genesis_hash,omitempty"`       // Base58 genesis hash from RPC
+	// RootedDurable binds this AccountsDB lineage to manifest-backed fold
+	// semantics. A classic per-slot store may not be reopened in rooted mode (or
+	// vice versa) after it has advanced beyond its snapshot.
+	RootedDurable bool `json:"rooted_durable,omitempty"`
 
 	// Corruption tracking - set when integrity check fails
 	CorruptionReason     string    `json:"corruption_reason,omitempty"`
@@ -259,6 +267,17 @@ type TransactionStatusCheckpointRef struct {
 	SHA256  string `json:"sha256"`
 }
 
+// RootedEventBatchRef identifies an immutable account-event sidecar selected
+// by the rooted fold manifest carrying the enclosing ResumeContext.
+type RootedEventBatchRef struct {
+	Version     uint32 `json:"version"`
+	FromSlot    uint64 `json:"from_slot"`
+	ThroughSlot uint64 `json:"through_slot"`
+	File        string `json:"file"`
+	Size        uint64 `json:"size"`
+	SHA256      string `json:"sha256"`
+}
+
 type ResumeContext struct {
 	Slot                       uint64           `json:"slot"`
 	Bankhash                   string           `json:"bankhash"`                                // base58
@@ -293,6 +312,7 @@ type ResumeContext struct {
 	// Startup and rewind consume it before replay; ResumeState intentionally does
 	// not copy it into the bank execution context.
 	TransactionStatusCheckpoint *TransactionStatusCheckpointRef `json:"transaction_status_checkpoint,omitempty"`
+	RootedEventBatch            *RootedEventBatchRef            `json:"rooted_event_batch,omitempty"`
 }
 
 // SnapshotInfo contains metadata about a downloaded snapshot file.
@@ -321,9 +341,16 @@ func LoadState(accountsDbDir string) (*MithrilState, error) {
 		return nil, fmt.Errorf("failed to parse state file: %w", err)
 	}
 
-	// Require schema version 2 - no migration from older versions
-	if state.StateSchemaVersion != CurrentStateSchemaVersion {
-		return nil, fmt.Errorf("state file schema version %d is not supported (requires v%d). Delete AccountsDB and rebuild from snapshot", state.StateSchemaVersion, CurrentStateSchemaVersion)
+	switch state.StateSchemaVersion {
+	case 3:
+		// Before classic finalized publication existed, every rooted-durable
+		// store was Alpenglow (or already carried a rooted watermark). Classic
+		// v3 stores without a rooted watermark therefore remain per-slot.
+		state.RootedDurable = state.Cluster == "alpenglow" || state.LastRootedSlot > 0
+		state.StateSchemaVersion = CurrentStateSchemaVersion
+	case CurrentStateSchemaVersion:
+	default:
+		return nil, fmt.Errorf("state file schema version %d is not supported (requires v%d); preserve this AccountsDB and rebuild from snapshot into a distinct empty root", state.StateSchemaVersion, CurrentStateSchemaVersion)
 	}
 
 	return &state, nil
@@ -562,8 +589,11 @@ func (s *MithrilState) getWriterCommit() string {
 // rooted slot in rooted-durable mode (the in-RAM slots above the last rooted slot
 // are lost on restart), else LastSlot+1, else SnapshotSlot+1.
 func (s *MithrilState) GetResumeSlot() uint64 {
-	if s.LastRootedSlot > 0 {
-		return s.LastRootedSlot + 1
+	if s.RootedDurable {
+		if s.LastRootedSlot > 0 {
+			return s.LastRootedSlot + 1
+		}
+		return s.SnapshotSlot + 1
 	}
 	if s.LastSlot > 0 {
 		return s.LastSlot + 1
@@ -574,8 +604,11 @@ func (s *MithrilState) GetResumeSlot() uint64 {
 // DurableHighWater returns the highest slot durably committed: the rooted watermark
 // in rooted-durable mode, else the replayed/snapshot slot (legacy).
 func (s *MithrilState) DurableHighWater() uint64 {
-	if s.LastRootedSlot > 0 {
-		return s.LastRootedSlot
+	if s.RootedDurable {
+		if s.LastRootedSlot > 0 {
+			return s.LastRootedSlot
+		}
+		return s.SnapshotSlot
 	}
 	return s.GetCurrentSlot()
 }
@@ -609,7 +642,10 @@ func (s *MithrilState) ValidateAgainstBankhashDB(bankhashDb BankhashGetter) erro
 	// Bankhash rows BEYOND R are legal: fold bankhashes are written NoSync and
 	// batches can carry rows for slots above a partially-advanced state file.
 	// The only hard check left is that R itself matches.
-	if s.LastRootedSlot > 0 {
+	if s.RootedDurable {
+		if s.LastRootedSlot == 0 {
+			return nil
+		}
 		rootedBankhash, err := bankhashDb.GetBankHashForSlot(s.LastRootedSlot)
 		if err != nil || len(rootedBankhash) == 0 {
 			return fmt.Errorf("state file shows last_rooted_slot=%d, but no bankhash found in bankhash_db", s.LastRootedSlot)

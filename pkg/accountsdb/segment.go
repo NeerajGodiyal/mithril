@@ -349,6 +349,10 @@ func ReadSegmentManifestContext(path string) (*SegmentManifest, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return readSegmentManifestContext(f, false)
+}
+
+func readSegmentManifestContext(f *os.File, verifyCRC bool) (*SegmentManifest, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -411,7 +415,33 @@ func ReadSegmentManifestContext(path string) (*SegmentManifest, error) {
 	if expectedSize != uint64(info.Size()) {
 		return nil, ErrTornManifest
 	}
+	if verifyCRC {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return nil, ErrTornManifest
+		}
+		bodySize := info.Size() - 4
+		digest := crc32.NewIEEE()
+		if read, err := io.CopyN(digest, f, bodySize); err != nil || read != bodySize {
+			return nil, ErrTornManifest
+		}
+		var tail [4]byte
+		if _, err := io.ReadFull(f, tail[:]); err != nil || digest.Sum32() != binary.LittleEndian.Uint32(tail[:]) {
+			return nil, ErrTornManifest
+		}
+	}
 	return m, nil
+}
+
+// ReadSegmentManifestContextVerified returns the cheap context-only view after
+// streaming the whole immutable manifest through its trailing CRC. It avoids
+// allocating account records while preserving the manifest's commit proof.
+func ReadSegmentManifestContextVerified(path string) (*SegmentManifest, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readSegmentManifestContext(f, true)
 }
 
 // readManifestHeader parses only the fixed prefix — no CRC validation.

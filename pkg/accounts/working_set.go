@@ -33,6 +33,13 @@ type slotLayer struct {
 	undo []undoPtr
 }
 
+// WorkingSetView is an immutable bank view over retained slot layers. The
+// layer maps are append-complete before publication and remain alive through
+// this reference even if the mutable WorkingSet later promotes or unwinds them.
+type WorkingSetView struct {
+	layers []*slotLayer
+}
+
 type undoPtr struct {
 	key      [32]byte
 	prevSlot uint64 // meaningful when existed
@@ -101,6 +108,58 @@ func (w *WorkingSet) Lookup(pubkey [32]byte) (*Account, bool) {
 	return nil, false
 }
 
+// LookupAt returns the newest held value written at or before slot. It keeps a
+// captured bank from observing a later unrooted write published concurrently.
+func (w *WorkingSet) LookupAt(slot uint64, pubkey [32]byte) (*Account, bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.lookupAtLocked(slot, pubkey)
+}
+
+// ViewAt captures the held layers visible to slot without copying account
+// maps. It is safe to retain across later Add, PromotePrefix, or EvictFrom.
+func (w *WorkingSet) ViewAt(slot uint64) *WorkingSetView {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	layers := make([]*slotLayer, 0, len(w.order))
+	for _, layerSlot := range w.order {
+		if layerSlot > slot {
+			break
+		}
+		layers = append(layers, w.bySlot[layerSlot])
+	}
+	return &WorkingSetView{layers: layers}
+}
+
+// Lookup returns the newest value retained by this exact bank view.
+func (v *WorkingSetView) Lookup(pubkey [32]byte) (*Account, bool) {
+	if v == nil {
+		return nil, false
+	}
+	for i := len(v.layers) - 1; i >= 0; i-- {
+		if acct, ok := v.layers[i].writes[pubkey]; ok {
+			return acct, true
+		}
+	}
+	return nil, false
+}
+
+func (w *WorkingSet) lookupAtLocked(slot uint64, pubkey [32]byte) (*Account, bool) {
+	if e, ok := w.flat[pubkey]; ok && e.slot <= slot {
+		return e.acct, true
+	}
+	for i := len(w.order) - 1; i >= 0; i-- {
+		layerSlot := w.order[i]
+		if layerSlot > slot {
+			continue
+		}
+		if acct, ok := w.bySlot[layerSlot].writes[pubkey]; ok {
+			return acct, true
+		}
+	}
+	return nil, false
+}
+
 // LookupBatch fills out with the newest unrooted value for every matching
 // pubkey. Misses are left nil. The returned accounts are retained immutable
 // WorkingSet values; callers must copy-on-write before mutation.
@@ -118,6 +177,18 @@ func (w *WorkingSet) LookupBatch(pubkeys []solana.PublicKey, out []*Account) {
 		if e, ok := w.flat[[32]byte(pubkey)]; ok {
 			out[i] = e.acct
 		}
+	}
+}
+
+// LookupBatchAt is LookupAt under one read lock for a captured bank.
+func (w *WorkingSet) LookupBatchAt(slot uint64, pubkeys []solana.PublicKey, out []*Account) {
+	if len(pubkeys) != len(out) {
+		panic("working set batch lookup length mismatch")
+	}
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	for i, pubkey := range pubkeys {
+		out[i], _ = w.lookupAtLocked(slot, [32]byte(pubkey))
 	}
 }
 
