@@ -315,6 +315,91 @@ func TestPerfectEquivocationMarksSlotDeadUntilConsensusReset(t *testing.T) {
 	}
 }
 
+func TestAlpenglowConflictingTerminalIndicesMarkSlotDead(t *testing.T) {
+	const slot = uint64(82)
+	assembler := NewSlotAssembler()
+	assembler.SetAlpenglowMode(true)
+	for _, index := range []uint32{4, 5} {
+		_, err := assembler.AddShred(&Shred{
+			Variant: legacyDataVariant, Type: ShredTypeData,
+			Slot: slot, Index: index, Version: 1, ParentOffset: 1,
+			Flags: shredFlagLastShredInSlot, Payload: []byte{byte(index)},
+		})
+		if index == 4 && err != nil {
+			t.Fatalf("add first terminal shred: %v", err)
+		}
+		if index == 5 && !errors.Is(err, ErrConflictingShredMetadata) {
+			t.Fatalf("second terminal error = %v, want metadata conflict", err)
+		}
+	}
+	if !assembler.SlotDead(slot) {
+		t.Fatal("conflicting terminal indices did not mark slot dead")
+	}
+}
+
+func TestAlpenglowCodingConflictsMarkSlotDead(t *testing.T) {
+	raw := localnetMerkleShreds(t, "c")
+	if len(raw) < 2 {
+		t.Fatal("fixture needs at least two coding shreds")
+	}
+	first, err := ParseShred(raw[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var second *Shred
+	for _, packet := range raw[1:] {
+		candidate, parseErr := ParseShred(packet)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		if candidate.FECSetIndex == first.FECSetIndex && candidate.Position != first.Position {
+			second = candidate
+			break
+		}
+	}
+	if second == nil {
+		t.Fatal("fixture needs two coding positions in one FEC set")
+	}
+
+	t.Run("same position", func(t *testing.T) {
+		assembler := NewSlotAssembler()
+		assembler.SetAlpenglowMode(true)
+		if _, err := assembler.AddShred(first); err != nil {
+			t.Fatal(err)
+		}
+		repeat := *first
+		repeat.Payload = append([]byte(nil), first.Payload...)
+		if _, err := assembler.AddShred(&repeat); err != nil || assembler.SlotDead(first.Slot) {
+			t.Fatalf("exact coding repeat changed slot state: err=%v dead=%t", err, assembler.SlotDead(first.Slot))
+		}
+		conflict := *first
+		conflict.Payload = append([]byte(nil), first.Payload...)
+		conflict.Payload[codingHeaderSize] ^= 1
+		if _, err := assembler.AddShred(&conflict); !errors.Is(err, ErrConflictingShredMetadata) {
+			t.Fatalf("coding conflict error = %v, want metadata conflict", err)
+		}
+		if !assembler.SlotDead(first.Slot) {
+			t.Fatal("coding conflict did not mark slot dead")
+		}
+	})
+
+	t.Run("layout", func(t *testing.T) {
+		assembler := NewSlotAssembler()
+		assembler.SetAlpenglowMode(true)
+		if _, err := assembler.AddShred(first); err != nil {
+			t.Fatal(err)
+		}
+		conflict := *second
+		conflict.NumDataShreds++
+		if _, err := assembler.AddShred(&conflict); !errors.Is(err, ErrConflictingShredMetadata) {
+			t.Fatalf("layout conflict error = %v, want metadata conflict", err)
+		}
+		if !assembler.SlotDead(first.Slot) {
+			t.Fatal("layout conflict did not mark slot dead")
+		}
+	})
+}
+
 func TestClassicConflictingShredKeepsDuplicateBehavior(t *testing.T) {
 	const slot = uint64(81)
 	assembler := NewSlotAssembler()
