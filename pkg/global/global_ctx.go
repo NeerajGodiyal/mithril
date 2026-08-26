@@ -511,9 +511,11 @@ func FlushPendingStakePubkeys(accountsDbDir string) (int, error) {
 // Returns the number of entries flushed.
 func FlushPendingStakePubkeysThrough(accountsDbDir string, through uint64) (int, error) {
 	instance.pendingStakeMutex.Lock()
+	selected := make(map[uint64][]accountsdb.StakeIndexEntry)
 	var pending []accountsdb.StakeIndexEntry
 	for slot, entries := range instance.pendingStakeBySlot {
 		if slot <= through {
+			selected[slot] = entries
 			pending = append(pending, entries...)
 			delete(instance.pendingStakeBySlot, slot)
 		}
@@ -522,13 +524,24 @@ func FlushPendingStakePubkeysThrough(accountsDbDir string, through uint64) (int,
 		instance.pendingStakeMutex.Unlock()
 		return 0, nil
 	}
-	instance.cachedStakeEntries = nil // file is changing, invalidate cache
 	instance.pendingStakeMutex.Unlock()
+	restore := func() {
+		instance.pendingStakeMutex.Lock()
+		defer instance.pendingStakeMutex.Unlock()
+		if instance.pendingStakeBySlot == nil {
+			instance.pendingStakeBySlot = make(map[uint64][]accountsdb.StakeIndexEntry)
+		}
+		for slot, entries := range selected {
+			instance.pendingStakeBySlot[slot] = append(entries, instance.pendingStakeBySlot[slot]...)
+		}
+	}
 
-	// Append to index file (don't hold lock during I/O)
+	// Detach the selected buckets while writing so new slots can keep enqueueing.
+	// Any failure restores them for the natural fold retry.
 	indexPath := filepath.Join(accountsDbDir, StakePubkeyIndexFileName)
-	f, err := os.OpenFile(indexPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(indexPath, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
+		restore()
 		return 0, fmt.Errorf("opening stake pubkey index for append: %w", err)
 	}
 	defer f.Close()
@@ -536,14 +549,32 @@ func FlushPendingStakePubkeysThrough(accountsDbDir string, through uint64) (int,
 	// If file is empty/new, write header first to avoid a headerless file
 	info, err := f.Stat()
 	if err != nil {
+		restore()
 		return 0, fmt.Errorf("stat stake pubkey index: %w", err)
 	}
-	if info.Size() == 0 {
+	originalSize := info.Size()
+	rollback := func(cause error) error {
+		truncateErr := f.Truncate(originalSize)
+		syncErr := f.Sync()
+		restore()
+		if truncateErr != nil {
+			return fmt.Errorf("%w; rolling back stake pubkey index: %v", cause, truncateErr)
+		}
+		if syncErr != nil {
+			return fmt.Errorf("%w; syncing stake pubkey index rollback: %v", cause, syncErr)
+		}
+		return cause
+	}
+	if _, err := f.Seek(0, 2); err != nil {
+		restore()
+		return 0, fmt.Errorf("seeking stake pubkey index: %w", err)
+	}
+	if originalSize == 0 {
 		var header [8]byte
 		copy(header[0:4], accountsdb.StakeIndexMagic[:])
 		binary.LittleEndian.PutUint32(header[4:8], accountsdb.StakeIndexVersion)
 		if _, err := f.Write(header[:]); err != nil {
-			return 0, fmt.Errorf("writing stake index header: %w", err)
+			return 0, rollback(fmt.Errorf("writing stake index header: %w", err))
 		}
 	}
 
@@ -553,17 +584,18 @@ func FlushPendingStakePubkeysThrough(accountsDbDir string, through uint64) (int,
 		binary.LittleEndian.PutUint64(record[32:40], e.FileId)
 		binary.LittleEndian.PutUint64(record[40:48], e.Offset)
 		if _, err := f.Write(record[:]); err != nil {
-			return 0, fmt.Errorf("writing stake index entry: %w", err)
+			return 0, rollback(fmt.Errorf("writing stake index entry: %w", err))
 		}
 	}
 
 	// Ensure data is flushed to disk before returning.
 	// This is critical: the index must be at least as current as the state file.
 	if err := f.Sync(); err != nil {
-		return 0, fmt.Errorf("syncing stake pubkey index: %w", err)
+		return 0, rollback(fmt.Errorf("syncing stake pubkey index: %w", err))
 	}
 
 	instance.pendingStakeMutex.Lock()
+	instance.cachedStakeEntries = nil
 	instance.entriesFlushedSinceCompact += len(pending)
 	instance.pendingStakeMutex.Unlock()
 
@@ -638,6 +670,25 @@ func LoadStakePubkeyIndex(accountsDbDir string) ([]accountsdb.StakeIndexEntry, e
 
 	// Detect format: current format starts with "STKI" magic
 	if len(data) >= 8 && string(data[0:4]) == "STKI" {
+		if rem := (len(data) - 8) % accountsdb.StakeIndexRecordSize; rem != 0 {
+			validSize := int64(len(data) - rem)
+			f, err := os.OpenFile(indexPath, os.O_WRONLY, 0)
+			if err != nil {
+				return nil, fmt.Errorf("opening partial stake pubkey index record: %w", err)
+			}
+			if err := f.Truncate(validSize); err != nil {
+				f.Close()
+				return nil, fmt.Errorf("recovering partial stake pubkey index record: %w", err)
+			}
+			if err := f.Sync(); err != nil {
+				f.Close()
+				return nil, fmt.Errorf("syncing recovered stake pubkey index: %w", err)
+			}
+			if err := f.Close(); err != nil {
+				return nil, fmt.Errorf("closing recovered stake pubkey index: %w", err)
+			}
+			data = data[:validSize]
+		}
 		entries, err = loadStakePubkeyIndexCurrent(data)
 	} else {
 		entries, err = loadStakePubkeyIndexLegacy(data)
