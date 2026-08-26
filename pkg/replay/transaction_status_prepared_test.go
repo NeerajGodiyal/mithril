@@ -127,3 +127,62 @@ func TestConcurrentPreparedSiblingCommitsPublishExactlyOne(t *testing.T) {
 		t.Fatalf("published sibling statuses: left=%t right=%t; want exactly one", leftVisible, rightVisible)
 	}
 }
+
+func TestCommitRootedStatusAndEventsStopsBeforeEventsOnStatusFailure(t *testing.T) {
+	cache := NewTransactionStatusCache()
+	if err := cache.CommitBlock(statusCacheTestBlock(10)); err != nil {
+		t.Fatal(err)
+	}
+	candidate := statusCacheTestBlock(12)
+	candidate.ParentSlot = 11
+	recorded := false
+
+	err := commitRootedStatusAndEvents(
+		cache,
+		candidate,
+		func() error { return cache.CommitBlock(candidate) },
+		func() error {
+			recorded = true
+			return nil
+		},
+	)
+	if err == nil {
+		t.Fatal("rooted status commit unexpectedly succeeded")
+	}
+	if recorded {
+		t.Fatal("rooted events were recorded after status commit failed")
+	}
+	if tip, ok := cache.TipSlot(); !ok || tip != 10 {
+		t.Fatalf("status tip = %d (present=%t), want parent 10", tip, ok)
+	}
+}
+
+func TestCommitRootedStatusAndEventsUnwindsRejectedEvents(t *testing.T) {
+	cache := NewTransactionStatusCache()
+	if err := cache.CommitBlock(statusCacheTestBlock(10)); err != nil {
+		t.Fatal(err)
+	}
+	candidateTx := statusCacheTestTransaction(9, 8, 7)
+	candidate := statusCacheTestBlock(11, candidateTx)
+	recordErr := errors.New("rooted event limit")
+
+	err := commitRootedStatusAndEvents(
+		cache,
+		candidate,
+		func() error { return cache.CommitBlock(candidate) },
+		func() error { return recordErr },
+	)
+	if !errors.Is(err, recordErr) {
+		t.Fatalf("commit error = %v, want rooted event error", err)
+	}
+	if tip, ok := cache.TipSlot(); !ok || tip != 10 {
+		t.Fatalf("status tip = %d (present=%t), want restored parent 10", tip, ok)
+	}
+	visible, visibleErr := cache.View().ContainsTransaction(candidateTx)
+	if visibleErr != nil {
+		t.Fatal(visibleErr)
+	}
+	if visible {
+		t.Fatal("transaction from rejected rooted-event slot remains visible")
+	}
+}

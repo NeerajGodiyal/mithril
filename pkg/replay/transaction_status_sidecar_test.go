@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/state"
@@ -26,6 +27,9 @@ func TestTransactionStatusCheckpointPrepareReadAndIdempotence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, payload, got)
 	require.NoError(t, VerifyTransactionStatusCheckpoint(rootDir, ref, 4431122))
+	info, err := os.Stat(filepath.Join(rootDir, TransactionStatusCheckpointDirectory, ref.File))
+	require.NoError(t, err)
+	require.Zero(t, info.Mode().Perm()&0o222, "committed checkpoint must be immutable")
 
 	// Preparing identical content converges on the immutable existing inode.
 	retryRef, err := PrepareTransactionStatusCheckpoint(rootDir, 4431122, payload)
@@ -51,6 +55,7 @@ func TestTransactionStatusCheckpointRejectsTraversalTamperAndSymlink(t *testing.
 	path := filepath.Join(rootDir, TransactionStatusCheckpointDirectory, ref.File)
 	tampered := []byte("authoritative-status-windox") // same length, different digest
 	require.Equal(t, int(ref.Size), len(tampered))
+	require.NoError(t, os.Chmod(path, 0o644))
 	require.NoError(t, os.WriteFile(path, tampered, 0o644))
 	_, err = ReadTransactionStatusCheckpoint(rootDir, ref)
 	require.ErrorContains(t, err, "SHA-256 mismatch")
@@ -62,6 +67,34 @@ func TestTransactionStatusCheckpointRejectsTraversalTamperAndSymlink(t *testing.
 	require.NoError(t, os.Symlink(target, path))
 	_, err = ReadTransactionStatusCheckpoint(rootDir, ref)
 	require.ErrorContains(t, err, "non-symlink")
+}
+
+func TestTransactionStatusCheckpointOperationsRejectSymlinkDirectory(t *testing.T) {
+	root := t.TempDir()
+	external := t.TempDir()
+	require.NoError(t, os.Symlink(external, filepath.Join(root, TransactionStatusCheckpointDirectory)))
+
+	digest := strings.Repeat("0", 64)
+	ref := &state.TransactionStatusCheckpointRef{
+		Version: TransactionStatusCheckpointVersion,
+		Root:    10,
+		File:    transactionStatusCheckpointBasename(10, digest),
+		Size:    1,
+		SHA256:  digest,
+	}
+	externalCheckpoint := filepath.Join(external, ref.File)
+	sentinel := filepath.Join(external, "sentinel")
+	require.NoError(t, os.WriteFile(externalCheckpoint, []byte{1}, 0o644))
+	require.NoError(t, os.WriteFile(sentinel, []byte("keep"), 0o644))
+
+	_, err := PrepareTransactionStatusCheckpoint(root, 10, []byte{1})
+	require.ErrorContains(t, err, "non-symlink directory")
+	_, err = ReadTransactionStatusCheckpoint(root, ref)
+	require.ErrorContains(t, err, "non-symlink directory")
+	_, err = CleanupTransactionStatusCheckpoints(root, nil)
+	require.ErrorContains(t, err, "non-symlink directory")
+	require.FileExists(t, externalCheckpoint)
+	require.FileExists(t, sentinel)
 }
 
 func TestTransactionStatusCheckpointCleanupKeepsOnlySelectedRefs(t *testing.T) {

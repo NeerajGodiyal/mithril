@@ -94,6 +94,7 @@ func TestValidateDurableResumeContextChecksSidecarCoverageRootTipAndIdentity(t *
 	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 7, &incomplete), "incomplete retained-root coverage")
 
 	payload[len(payload)-1] ^= 0xff
+	require.NoError(t, os.Chmod(checkpointPath, 0o644))
 	require.NoError(t, os.WriteFile(checkpointPath, payload, 0o644))
 	assert.ErrorContains(t, validateDurableResumeContext(accountsDbPath, 7, ctx), "SHA-256 mismatch")
 }
