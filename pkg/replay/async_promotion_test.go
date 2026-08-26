@@ -113,7 +113,7 @@ func TestFoldJobRootedEventsRideManifest(t *testing.T) {
 	tail := asyncTestTail(fc, 5, 6)
 	afterCommitCalled := false
 	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
-		FinalitySource: rootedevents.FinalityRPCFinalized,
+		FinalitySourceForSlot: fixedRootedEventFinality(rootedevents.FinalityRPCFinalized),
 		Install: func(deltas []accounts.SlotDelta, metadata map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 			return rootedevents.PrepareSidecar(rootDir, deltas, metadata)
 		},
@@ -156,7 +156,7 @@ func TestFoldJobRootedEventsRequireEverySlotCapture(t *testing.T) {
 	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
 	tail := asyncTestTail(fc, 5, 6)
 	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
-		FinalitySource: rootedevents.FinalityRPCFinalized,
+		FinalitySourceForSlot: fixedRootedEventFinality(rootedevents.FinalityRPCFinalized),
 		Install: func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 			t.Fatal("install must not run when a slot was never captured")
 			return nil, nil
@@ -178,7 +178,7 @@ func TestForcedFoldSelectsRootedEvents(t *testing.T) {
 	tail.Add(5, []*accounts.Account{testAccount(1, 5)}, testHashBytes(5))
 	tail.SetContext(5, &state.ResumeContext{Slot: 5})
 	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
-		FinalitySource: rootedevents.FinalityRPCFinalized,
+		FinalitySourceForSlot: fixedRootedEventFinality(rootedevents.FinalityRPCFinalized),
 		Install: func(deltas []accounts.SlotDelta, metadata map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 			return rootedevents.PrepareSidecar(rootDir, deltas, metadata)
 		},
@@ -217,7 +217,7 @@ func TestFoldJobSidecarOrderAndReferences(t *testing.T) {
 		},
 	}))
 	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
-		FinalitySource: rootedevents.FinalityRPCFinalized,
+		FinalitySourceForSlot: fixedRootedEventFinality(rootedevents.FinalityRPCFinalized),
 		Install: func(deltas []accounts.SlotDelta, metadata map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 			order = append(order, "events-install")
 			return rootedevents.PrepareSidecar(rootDir, deltas, metadata)
@@ -245,7 +245,7 @@ func TestFoldJobRootedEventInstallFailureCannotCommitOrPrune(t *testing.T) {
 	fc := &fakeCommitter{durable: accounts.NewMemAccounts()}
 	tail := asyncTestTail(fc, 5, 6)
 	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
-		FinalitySource: rootedevents.FinalityRPCFinalized,
+		FinalitySourceForSlot: fixedRootedEventFinality(rootedevents.FinalityRPCFinalized),
 		Install: func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 			return nil, errors.New("sidecar fsync failed")
 		},

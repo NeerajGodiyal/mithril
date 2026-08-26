@@ -2228,15 +2228,8 @@ func ReplayBlocks(
 			return result
 		}
 		if consensusOpts != nil && consensusOpts.RootedEvents {
-			finalitySource := rootedevents.FinalityRPCFinalized
-			if consensusOpts.Alpenglow {
-				finalitySource = rootedevents.FinalityAlpenglowDelegated
-				if consensusOpts.Engine != nil {
-					finalitySource = rootedevents.FinalityAlpenglowCertificate
-				}
-			}
 			if hookErr := unrootedTailState.SetRootedEventHooks(RootedEventHooks{
-				FinalitySource: finalitySource,
+				FinalitySourceForSlot: unrootedTailState.rootedEventFinalitySource,
 				Install: func(deltas []accounts.SlotDelta, metadata map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 					return rootedevents.PrepareSidecar(acctsDbPath, deltas, metadata)
 				},
@@ -2986,8 +2979,10 @@ func ReplayBlocks(
 			// throttled (the RPC round-trip is slow).
 			if alpenglowMode {
 				rooted, ok := uint64(0), false
+				finalitySource := rootedevents.FinalityAlpenglowDelegated
 				if certRooted, certOk := alpenglowRootedSlot(consensusEngine); certOk {
 					rooted, ok = certRooted, true
+					finalitySource = rootedevents.FinalityAlpenglowCertificate
 				} else {
 					if time.Since(delegatedFinalizedAt) > 2*time.Second {
 						// Record the attempt time regardless of outcome, so an RPC
@@ -3002,6 +2997,11 @@ func ReplayBlocks(
 					}
 				}
 				if ok && rooted > lastRootedWatermark {
+					if err := unrootedTailState.RecordRootedEventFinality(lastRootedWatermark+1, rooted, finalitySource); err != nil {
+						result.Error = err
+						mlog.Log.Errorf("%v", err)
+						break
+					}
 					lastRootedWatermark = rooted
 					statsd.Gauge(statsd.MithrilFinalitySlot, float64(rooted), nil)
 					// Terminal-quiet: the 100-slot summary's "consensus:
@@ -3012,6 +3012,11 @@ func ReplayBlocks(
 			} else if finalizedRPC && block != nil && block.Slot > lastRootedWatermark {
 				// Classic rooted publication receives only finalized RPC blocks and
 				// finalized skip proofs, so the observed slot is its finality watermark.
+				if err := unrootedTailState.RecordRootedEventFinality(lastRootedWatermark+1, block.Slot, rootedevents.FinalityRPCFinalized); err != nil {
+					result.Error = err
+					mlog.Log.Errorf("%v", err)
+					break
+				}
 				lastRootedWatermark = block.Slot
 				statsd.Gauge(statsd.MithrilFinalitySlot, float64(block.Slot), nil)
 			}

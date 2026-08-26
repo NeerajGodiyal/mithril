@@ -247,9 +247,6 @@ func walkEvents(deltas []accounts.SlotDelta, metadata map[uint64]SlotMeta, emit 
 				(meta.HasAlpenglowParentBlockID && meta.AlpenglowParentBlockID != previous.AlpenglowBlockID) {
 				return fmt.Errorf("rooted slot %d parent block ID does not match previous rooted slot %d", delta.Slot, deltas[i-1].Slot)
 			}
-			if meta.FinalitySource != previous.FinalitySource {
-				return fmt.Errorf("rooted slot %d finality source %q differs from previous rooted slot %d source %q", delta.Slot, meta.FinalitySource, deltas[i-1].Slot, previous.FinalitySource)
-			}
 		}
 		if err := validateEventCount(delta.Slot, uint64(len(meta.Transactions)), uint64(len(delta.Delta))); err != nil {
 			return err

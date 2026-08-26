@@ -62,9 +62,14 @@ type TransactionStatusCheckpointHooks struct {
 // RootedEventHooks installs immutable per-slot transaction and account events
 // before the fold manifest selects them.
 type RootedEventHooks struct {
-	FinalitySource rootedevents.FinalitySource
-	Install        func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error)
-	AfterCommit    func(*state.RootedEventBatchRef) error
+	FinalitySourceForSlot func(uint64) (rootedevents.FinalitySource, bool)
+	Install               func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error)
+	AfterCommit           func(*state.RootedEventBatchRef) error
+}
+
+type rootedEventFinalityRange struct {
+	from, through uint64
+	source        rootedevents.FinalitySource
 }
 
 // defaultFoldBatchSlots is the fold chunk size K when none is configured:
@@ -159,6 +164,7 @@ type unrootedTail struct {
 	transactions      map[uint64][]rootedevents.TransactionObservation
 	transactionSizes  map[uint64]uint64
 	transactionBytes  uint64
+	finalityRanges    []rootedEventFinalityRange
 	batchSlots        int    // fold chunk size K
 	stakeIdxDir       string // directory of stake_pubkeys.idx; pending stake entries flush here at fold time
 	// contexts holds the deep-copied end-of-slot resume context per held slot,
@@ -270,6 +276,34 @@ func (t *unrootedTail) SetRootedEventHooks(hooks RootedEventHooks) error {
 
 func (t *unrootedTail) CapturesRootedEvents() bool {
 	return t != nil && t.rootedEventHooks.Install != nil
+}
+
+// RecordRootedEventFinality records which decision path first finalized each
+// newly rooted range. Ranges also cover slots that have not replayed yet.
+func (t *unrootedTail) RecordRootedEventFinality(from, through uint64, source rootedevents.FinalitySource) error {
+	if !t.CapturesRootedEvents() || from > through {
+		return nil
+	}
+	if !validRootedEventFinalitySource(source) {
+		return fmt.Errorf("rooted events: invalid finality source %q", source)
+	}
+	if len(t.finalityRanges) > 0 {
+		previous := t.finalityRanges[len(t.finalityRanges)-1]
+		if previous.through == ^uint64(0) || from != previous.through+1 {
+			return fmt.Errorf("rooted events: finality range %d..%d does not follow %d..%d", from, through, previous.from, previous.through)
+		}
+	}
+	t.finalityRanges = append(t.finalityRanges, rootedEventFinalityRange{from: from, through: through, source: source})
+	return nil
+}
+
+func (t *unrootedTail) rootedEventFinalitySource(slot uint64) (rootedevents.FinalitySource, bool) {
+	for _, span := range t.finalityRanges {
+		if slot >= span.from && slot <= span.through {
+			return span.source, true
+		}
+	}
+	return "", false
 }
 
 // RecordRootedEventSlot attaches owned execution observations and lineage to a
@@ -519,6 +553,12 @@ func (t *unrootedTail) dropRootedEventSlotsThrough(through uint64) {
 			t.transactionBytes -= size
 		}
 	}
+	for len(t.finalityRanges) > 0 && t.finalityRanges[0].through <= through {
+		t.finalityRanges = t.finalityRanges[1:]
+	}
+	if len(t.finalityRanges) > 0 && t.finalityRanges[0].from <= through {
+		t.finalityRanges[0].from = through + 1
+	}
 }
 
 // ── Async promotion ─────────────────────────────────────────────────────────
@@ -619,7 +659,7 @@ func (t *unrootedTail) buildFoldJob(through uint64, force bool, hookOverrides ..
 	}
 	var rootedEventMetadata map[uint64]rootedevents.SlotMeta
 	if t.rootedEventHooks.Install != nil {
-		rootedEventMetadata, err = buildRootedEventMetadata(chunk, bankhashes, t.identities, t.transactions, t.rootedEventHooks.FinalitySource)
+		rootedEventMetadata, err = buildRootedEventMetadata(chunk, bankhashes, t.identities, t.transactions, t.rootedEventHooks.FinalitySourceForSlot)
 		if err != nil {
 			return nil, fmt.Errorf("fold chunk through slot %d: %w", through, err)
 		}
@@ -992,7 +1032,7 @@ func promoteRootedBatchedWithEvents(
 		}
 		var selectedRootedEvents *state.RootedEventBatchRef
 		if rootedEventHooks.Install != nil {
-			metadata, metaErr := buildRootedEventMetadata(chunk, chunkBankhashes, identities, transactions, rootedEventHooks.FinalitySource)
+			metadata, metaErr := buildRootedEventMetadata(chunk, chunkBankhashes, identities, transactions, rootedEventHooks.FinalitySourceForSlot)
 			if metaErr != nil {
 				err = fmt.Errorf("promote chunk through slot %d: %w", chunkThrough, metaErr)
 				break
@@ -1086,14 +1126,19 @@ func validateRootedEventHooks(hooks RootedEventHooks) error {
 	if hooks.AfterCommit != nil && hooks.Install == nil {
 		return errors.New("rooted-event AfterCommit hook requires an Install hook")
 	}
-	if hooks.Install != nil {
-		switch hooks.FinalitySource {
-		case rootedevents.FinalityAlpenglowCertificate, rootedevents.FinalityAlpenglowDelegated, rootedevents.FinalityRPCFinalized:
-		default:
-			return fmt.Errorf("rooted-event Install hook requires a valid finality source, got %q", hooks.FinalitySource)
-		}
+	if hooks.Install != nil && hooks.FinalitySourceForSlot == nil {
+		return errors.New("rooted-event Install hook requires a finality source resolver")
 	}
 	return nil
+}
+
+func validRootedEventFinalitySource(source rootedevents.FinalitySource) bool {
+	switch source {
+	case rootedevents.FinalityAlpenglowCertificate, rootedevents.FinalityAlpenglowDelegated, rootedevents.FinalityRPCFinalized:
+		return true
+	default:
+		return false
+	}
 }
 
 func buildRootedEventMetadata(
@@ -1101,7 +1146,7 @@ func buildRootedEventMetadata(
 	bankhashes map[uint64][32]byte,
 	identities map[uint64]rootedevents.SlotIdentity,
 	transactions map[uint64][]rootedevents.TransactionObservation,
-	finalitySource rootedevents.FinalitySource,
+	finalitySourceForSlot func(uint64) (rootedevents.FinalitySource, bool),
 ) (map[uint64]rootedevents.SlotMeta, error) {
 	metadata := make(map[uint64]rootedevents.SlotMeta, len(chunk))
 	for _, delta := range chunk {
@@ -1116,6 +1161,10 @@ func buildRootedEventMetadata(
 		observations, ok := transactions[delta.Slot]
 		if !ok {
 			return nil, fmt.Errorf("rooted events: no transaction capture recorded for slot %d", delta.Slot)
+		}
+		finalitySource, ok := finalitySourceForSlot(delta.Slot)
+		if !ok || !validRootedEventFinalitySource(finalitySource) {
+			return nil, fmt.Errorf("rooted events: no valid finality source recorded for slot %d", delta.Slot)
 		}
 		metadata[delta.Slot] = rootedevents.SlotMeta{
 			Slot:                      identity.Slot,

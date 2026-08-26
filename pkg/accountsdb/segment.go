@@ -505,6 +505,29 @@ func ListFoldManifests(acctsDir string) ([]ManifestHeader, error) {
 	return out, nil
 }
 
+// CurrentFoldManifest returns the manifest selected by the durable fold
+// watermark. The manifest remains the authority; callers may use this header
+// as a cheap discovery hint.
+func (db *AccountsDb) CurrentFoldManifest() (ManifestHeader, bool, error) {
+	if db == nil {
+		return ManifestHeader{}, false, errors.New("accountsdb: current fold manifest: nil database")
+	}
+	meta, ok, err := db.readFoldMeta()
+	if err != nil || !ok {
+		return ManifestHeader{}, ok, err
+	}
+	path := segmentManifestPath(db.AcctsDir, meta.ThroughSlot, meta.FileId)
+	header, err := readManifestHeader(path)
+	if err != nil {
+		return ManifestHeader{}, false, err
+	}
+	if header.Kind != ManifestKindFold || header.BatchSeq != meta.BatchSeq ||
+		header.ThroughSlot != meta.ThroughSlot || header.FileId != meta.FileId {
+		return ManifestHeader{}, false, errors.New("accountsdb: current fold manifest does not match durable watermark")
+	}
+	return header, true, nil
+}
+
 // listAllManifestFileIds returns the fileId of every manifest-backed data file
 // (fold and compact, including rewound manifests) for orphan classification.
 func listAllManifestFileIds(acctsDir string) (map[uint64]struct{}, error) {

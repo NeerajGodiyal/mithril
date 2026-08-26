@@ -17,6 +17,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func fixedRootedEventFinality(source rootedevents.FinalitySource) func(uint64) (rootedevents.FinalitySource, bool) {
+	return func(uint64) (rootedevents.FinalitySource, bool) { return source, true }
+}
+
 // fakeDurable is a blockAccountSource: known keys return their value, unknown
 // keys return a placeholder (mirroring AccountsDb.GetAccountsBatch). batchCalls
 // counts GetAccountsBatch invocations so tests can assert misses are batched.
@@ -157,7 +161,7 @@ func TestPromoteRootedHappyPath(t *testing.T) {
 func TestRootedEventObservationsOwnDataAndRespectForkTailBudget(t *testing.T) {
 	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 512, 2, "")
 	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
-		FinalitySource: rootedevents.FinalityRPCFinalized,
+		FinalitySourceForSlot: fixedRootedEventFinality(rootedevents.FinalityRPCFinalized),
 		Install: func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 			return nil, nil
 		},
@@ -187,6 +191,30 @@ func TestRootedEventObservationsOwnDataAndRespectForkTailBudget(t *testing.T) {
 	require.NotContains(t, tail.transactions, uint64(7))
 	require.Contains(t, tail.bankSysvars, uint64(5))
 	require.NotContains(t, tail.bankSysvars, uint64(7))
+}
+
+func TestRootedEventFinalitySourceFollowsWatermarkDecision(t *testing.T) {
+	tail := newUnrootedTail(&fakeDurable{}, &fakeCommitter{}, 512, 2, "")
+	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
+		FinalitySourceForSlot: tail.rootedEventFinalitySource,
+		Install: func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
+			return nil, nil
+		},
+	}))
+	require.NoError(t, tail.RecordRootedEventFinality(5, 5, rootedevents.FinalityAlpenglowDelegated))
+	require.NoError(t, tail.RecordRootedEventFinality(6, 6, rootedevents.FinalityAlpenglowCertificate))
+
+	chunk := []accounts.SlotDelta{{Slot: 5}, {Slot: 6}}
+	metadata, err := buildRootedEventMetadata(
+		chunk,
+		map[uint64][32]byte{5: testHash(5), 6: testHash(6)},
+		map[uint64]rootedevents.SlotIdentity{5: testRootedEventIdentity(5, 4), 6: testRootedEventIdentity(6, 5)},
+		map[uint64][]rootedevents.TransactionObservation{5: {}, 6: {}},
+		tail.rootedEventFinalitySource,
+	)
+	require.NoError(t, err)
+	require.Equal(t, rootedevents.FinalityAlpenglowDelegated, metadata[5].FinalitySource)
+	require.Equal(t, rootedevents.FinalityAlpenglowCertificate, metadata[6].FinalitySource)
 }
 
 // Partial failure: a mid-batch commit error must promote ONLY through the last

@@ -100,6 +100,12 @@ func TestCommitBatchReadsBackAndDedupes(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, foldMeta{BatchSeq: 1, ThroughSlot: 104, FileId: res.FileId}, meta)
+	head, ok, err := db.CurrentFoldManifest()
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, res.BatchSeq, head.BatchSeq)
+	assert.Equal(t, res.ThroughSlot, head.ThroughSlot)
+	assert.Equal(t, res.FileId, head.FileId)
 
 	// Undo pointers for a second batch must name the first batch's entries.
 	newest := foldAcct(1, 1234, []byte("v3"))

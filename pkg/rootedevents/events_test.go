@@ -285,7 +285,7 @@ func TestBuildEventsBindsAlpenglowBlockLineage(t *testing.T) {
 	first.AlpenglowBlockID = [32]byte{10}
 	first.AlpenglowParentBlockID = [32]byte{9}
 	second := testSlotMeta(12, 10)
-	second.FinalitySource = FinalityAlpenglowCertificate
+	second.FinalitySource = FinalityAlpenglowDelegated
 	second.HasAlpenglowBlockID = true
 	second.HasAlpenglowParentBlockID = true
 	second.AlpenglowBlockID = [32]byte{12}
@@ -299,6 +299,7 @@ func TestBuildEventsBindsAlpenglowBlockLineage(t *testing.T) {
 	require.Equal(t, solana.Hash(first.AlpenglowBlockID).String(), events[0].Root.BlockID)
 	require.Equal(t, solana.Hash(first.AlpenglowParentBlockID).String(), events[0].Root.ParentBlockID)
 	require.Equal(t, FinalityAlpenglowCertificate, events[0].Root.FinalitySource)
+	require.Equal(t, FinalityAlpenglowDelegated, events[len(events)-1].Root.FinalitySource)
 
 	second.AlpenglowParentBlockID = [32]byte{99}
 	_, err = BuildEvents(

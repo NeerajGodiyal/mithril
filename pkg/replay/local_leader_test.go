@@ -278,7 +278,7 @@ func rootedCaptureTestTail(t *testing.T) *unrootedTail {
 	t.Helper()
 	tail := newUnrootedTail(nil, nil, 512, 2, "")
 	require.NoError(t, tail.SetRootedEventHooks(RootedEventHooks{
-		FinalitySource: rootedevents.FinalityRPCFinalized,
+		FinalitySourceForSlot: fixedRootedEventFinality(rootedevents.FinalityRPCFinalized),
 		Install: func([]accounts.SlotDelta, map[uint64]rootedevents.SlotMeta) (*state.RootedEventBatchRef, error) {
 			return nil, nil
 		},
