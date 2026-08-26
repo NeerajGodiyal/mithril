@@ -17,7 +17,7 @@ type manifestEpochStakeSeed struct {
 
 func prepareManifestEpochStakesForRuntime(mithrilState *state.MithrilState, currentEpoch uint64, snapshotEpoch uint64) ([]manifestEpochStakeSeed, bool, error) {
 	if mithrilState == nil || len(mithrilState.ManifestEpochStakes) == 0 {
-		return nil, false, fmt.Errorf("state file missing manifest_epoch_stakes - delete AccountsDB and rebuild from snapshot")
+		return nil, false, fmt.Errorf("state file missing manifest_epoch_stakes - preserve this AccountsDB and rebuild from snapshot into a distinct empty root")
 	}
 	if snapshotEpoch == 0 {
 		snapshotEpoch = currentEpoch

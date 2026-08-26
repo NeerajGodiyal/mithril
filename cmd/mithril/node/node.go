@@ -2,7 +2,6 @@ package node
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -13,7 +12,6 @@ import (
 	"math"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -58,6 +56,7 @@ import (
 	solrpc "github.com/gagliardetto/solana-go/rpc"
 	"github.com/mr-tron/base58"
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 	"k8s.io/klog/v2"
 )
 
@@ -1238,6 +1237,11 @@ func buildSnapshotConfig(rpcEndpoints []string) snapshotdl.SnapshotConfig {
 
 func runLive(c *cobra.Command, args []string) {
 	alpenglowMode := cluster == "alpenglow"
+	accountsLock, err := acquireAccountsDBLock(accountsPath)
+	if err != nil {
+		klog.Fatalf("FATAL: %v", err)
+	}
+	defer accountsLock.release()
 	if pprofPort != -1 {
 		if err := startPprofHandlers(int(pprofPort)); err != nil {
 			klog.Errorf("pprof server unavailable: %v", err)
@@ -1311,11 +1315,6 @@ func runLive(c *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "warning: failed to initialize file logging: %v\n", err)
 	}
 	defer mlog.Shutdown()
-
-	// Kill any existing mithril processes to prevent zombie accumulation
-	if killed := killExistingMithrilProcesses(); killed > 0 {
-		fmt.Printf("  ⚠ Killed %d existing mithril process(es)\n\n", killed)
-	}
 
 	// Discover once, before constructing any turbine, consensus, or production
 	// component. Gossip clients can discover a missing version internally, but
@@ -3835,59 +3834,61 @@ func downloadAndBuildFromSnapshot(ctx context.Context, rpcEndpoints []string, sn
 	return accountsDb, manifest, nil
 }
 
-// killExistingMithrilProcesses finds and kills any other running mithril processes.
-// This prevents zombie processes from accumulating and holding disk space.
-// Returns the number of processes killed.
-func killExistingMithrilProcesses() int {
-	myPID := os.Getpid()
-	myPPID := os.Getppid()
+const accountsDBLockFileName = ".mithril_node.lock"
 
-	// Use pgrep to find mithril processes by executable name (not full command line)
-	// This avoids matching sudo or shell processes that have "mithril" in args
-	cmd := exec.Command("pgrep", "-x", "mithril")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	err := cmd.Run()
+type accountsDBLock struct {
+	file *os.File
+}
+
+func acquireAccountsDBLock(accountsDir string) (*accountsDBLock, error) {
+	if accountsDir == "" {
+		return nil, errors.New("AccountsDB path is required")
+	}
+	if err := os.MkdirAll(accountsDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create AccountsDB directory: %w", err)
+	}
+	path := filepath.Join(accountsDir, accountsDBLockFileName)
+	fd, err := unix.Open(path, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
 	if err != nil {
-		// No processes found or pgrep not available
-		return 0
+		return nil, fmt.Errorf("open AccountsDB lock: %w", err)
 	}
-
-	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	killed := 0
-
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(line))
-		if err != nil {
-			continue
-		}
-
-		// Don't kill ourselves or our parent (sudo)
-		if pid == myPID || pid == myPPID {
-			continue
-		}
-
-		// Try to kill the process
-		proc, err := os.FindProcess(pid)
-		if err != nil {
-			continue
-		}
-
-		// Send SIGKILL
-		if err := proc.Signal(syscall.SIGKILL); err == nil {
-			killed++
-		} else {
-			// A survivor competes for ports AND doubles our repair/gossip
-			// traffic against the cluster (peer-side rate limiting then
-			// throttles BOTH instances) — never skip one silently.
-			fmt.Printf("  ⚠ could not kill existing mithril process %d: %v — kill it manually before continuing\n", pid, err)
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("open AccountsDB lock: invalid file descriptor")
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("stat AccountsDB lock: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, errors.New("AccountsDB lock is not a regular file")
+	}
+	for {
+		err = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
+		if !errors.Is(err, unix.EINTR) {
+			break
 		}
 	}
+	if err != nil {
+		_ = file.Close()
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return nil, errors.New("another Mithril process is already using this AccountsDB; refusing startup")
+		}
+		return nil, fmt.Errorf("lock AccountsDB: %w", err)
+	}
+	return &accountsDBLock{file: file}, nil
+}
 
-	return killed
+func (lock *accountsDBLock) release() {
+	if lock == nil || lock.file == nil {
+		return
+	}
+	_ = unix.Flock(int(lock.file.Fd()), unix.LOCK_UN)
+	_ = lock.file.Close()
+	lock.file = nil
 }
 
 // decodeRecentBlockhashes converts state.BlockhashEntry list to sealevel.SysvarRecentBlockhashes

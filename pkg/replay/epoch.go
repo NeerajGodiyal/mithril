@@ -101,7 +101,7 @@ func newReplayCtx(mithrilState *state.MithrilState, resumeState *ResumeState) (*
 			FoundationTerm: mithrilState.ManifestInflationFoundationTerm,
 		}
 	} else {
-		return nil, fmt.Errorf("state file missing manifest_capitalization - delete AccountsDB and rebuild from snapshot")
+		return nil, fmt.Errorf("state file missing manifest_capitalization - preserve this AccountsDB and rebuild from snapshot into a distinct empty root")
 	}
 
 	// Epoch account hash from state file (required)

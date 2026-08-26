@@ -4,9 +4,12 @@
 
 Always use `Ctrl+C` to stop Mithril cleanly rather than killing the terminal or closing the SSH session. This allows Mithril to flush data and exit gracefully, preventing data corruption and ensuring file handles are properly released.
 
-## Zombie Processes and Phantom Disk Usage
+## Live Processes and Phantom Disk Usage
 
-If Mithril processes are terminated abruptly (e.g., by closing SSH or killing the terminal), they may become zombie processes that hold deleted files open. This can cause "phantom" disk usage where `df` shows the disk as full but `du` shows less data than expected.
+A live or stopped process can keep a deleted file open, making `df` report more
+used space than `du`. A zombie cannot hold file descriptors. Mithril takes a
+lifetime lock inside its AccountsDB root and refuses a second writer; startup
+never kills another process.
 
 **Symptoms:**
 - `df -h` shows disk at 100% usage
@@ -14,17 +17,30 @@ If Mithril processes are terminated abruptly (e.g., by closing SSH or killing th
 - SIGBUS errors during AccountsDB flush operations
 
 **Prevention:**
-- Mithril automatically detects and kills existing mithril processes at startup
 - Always use `Ctrl+C` to stop Mithril cleanly
+- Run each node with a distinct AccountsDB root
+- Keep the service supervisor's stop timeout long enough for clean shutdown
 
 **Recovery:**
-1. Check for zombie mithril processes: `ps aux | grep mithril`
-2. Kill any stopped/zombie processes: `pkill -9 -f mithril`
-3. Unmount and remount the affected disk to release file handles:
+1. List exact processes and open deleted files with `pgrep -ax mithril` and
+   `sudo lsof +L1`. Do not use `pkill -f`.
+2. Verify the exact PID, executable, configuration, and storage root. Send that
+   PID `SIGINT` and wait for it to exit. Escalate to a stronger signal only
+   after recording why clean shutdown failed; never target unrelated nodes.
+3. Inspect the retained state before changing storage:
    ```bash
-   sudo umount -l /mnt/mithril-accounts
-   sudo mount /dev/nvme1n1p1 /mnt/mithril-accounts
+   mithril state --accounts /absolute/accounts/root show
+   mithril state --accounts /absolute/accounts/root history
+   mithril state --accounts /absolute/accounts/root validate
    ```
+4. If startup reports a checkpoint-valid retained fold boundary, run the node
+   once with its normal configuration plus `--rewind-to-slot SLOT`. If no
+   retained boundary validates, stop. Rename or copy the old root for review,
+   configure a distinct empty AccountsDB root, and only then use
+   `--bootstrap snapshot`; snapshot bootstrap cleans its configured root.
+5. Unmount only after every process using the exact mount has stopped. Confirm
+   the source and target with `findmnt`; do not use a lazy unmount or assume a
+   device name.
 
 ## Slow Snapshot Downloads
 

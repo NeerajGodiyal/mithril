@@ -1080,10 +1080,9 @@ func setupInitialVoteAcctsAndStakeAccts(acctsDb *accountsdb.AccountsDb, block *b
 		mlog.Log.Errorf("This file is required when resuming from existing AccountsDB.")
 		mlog.Log.Errorf("If this is a fresh start, the index should have been created during snapshot loading.")
 		mlog.Log.Errorf("")
-		mlog.Log.Errorf("To fix, delete AccountsDB and restart from snapshot:")
-		mlog.Log.Errorf("  rm -rf %s", acctsDbDir)
-		mlog.Log.Errorf("")
-		mlog.Log.Errorf("Then set bootstrap.mode = 'new-snapshot' in config.toml")
+		mlog.Log.Errorf("To recover, stop Mithril and preserve this AccountsDB for inspection.")
+		mlog.Log.Errorf("Configure a distinct empty AccountsDB root, then restart from snapshot.")
+		mlog.Log.Errorf("See docs/TROUBLESHOOTING.md for the safe recovery sequence.")
 		mlog.Log.Errorf("=======================================================")
 		os.Exit(1)
 	}
@@ -1204,7 +1203,7 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 
 	// Read from state file manifest_* fields (required)
 	if mithrilState.ManifestParentBankhash == "" {
-		return fmt.Errorf("state file missing manifest_parent_bankhash - delete AccountsDB and rebuild from snapshot")
+		return fmt.Errorf("state file missing manifest_parent_bankhash - preserve this AccountsDB and rebuild from snapshot into a distinct empty root")
 	}
 
 	parentBankhash, err := base58.DecodeFromString(mithrilState.ManifestParentBankhash)
@@ -1225,13 +1224,13 @@ func configureInitialBlock(acctsDb *accountsdb.AccountsDb,
 
 	block.PrevFeeRateGovernor = reconstructFeeRateGovernor(mithrilState)
 	if block.PrevFeeRateGovernor == nil {
-		return fmt.Errorf("state file missing manifest_fee_rate_governor - delete AccountsDB and rebuild from snapshot")
+		return fmt.Errorf("state file missing manifest_fee_rate_governor - preserve this AccountsDB and rebuild from snapshot into a distinct empty root")
 	}
 	block.PrevNumSignatures = mithrilState.ManifestSignatureCount
 	block.InitialPreviousLamportsPerSignature = mithrilState.ManifestLamportsPerSignature
 
 	if mithrilState.ManifestEvictedBlockhash == "" {
-		return fmt.Errorf("state file missing manifest_evicted_blockhash - delete AccountsDB and rebuild from snapshot")
+		return fmt.Errorf("state file missing manifest_evicted_blockhash - preserve this AccountsDB and rebuild from snapshot into a distinct empty root")
 	}
 	evictedHash, err := base58.DecodeFromString(mithrilState.ManifestEvictedBlockhash)
 	if err != nil {
@@ -1357,7 +1356,7 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 	// Reconstruct PrevFeeRateGovernor from state file static fields + resume dynamic fields
 	prevFeeRateGovernor := reconstructFeeRateGovernor(mithrilState)
 	if prevFeeRateGovernor == nil {
-		return fmt.Errorf("cannot resume: state file missing manifest_fee_rate_governor (rebuild AccountsDB required)")
+		return fmt.Errorf("cannot resume: state file missing manifest_fee_rate_governor; preserve this AccountsDB and rebuild from snapshot into a distinct empty root")
 	}
 	prevFeeRateGovernor.LamportsPerSignature = resumeState.LamportsPerSignature
 	prevFeeRateGovernor.PrevLamportsPerSignature = resumeState.PrevLamportsPerSignature
@@ -1399,12 +1398,12 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		var zeroHash [32]byte
 		if resumeState.EvictedBlockhash == zeroHash {
 			mlog.Log.Errorf("FATAL: blockhash context has RecentBlockhashes but EvictedBlockhash is zero")
-			mlog.Log.Errorf("State file may be corrupted. Delete AccountsDB directory and restart from snapshot.")
+			mlog.Log.Errorf("State file may be corrupted. Preserve this AccountsDB and rebuild from snapshot into a distinct empty root.")
 			panic("cannot resume with zero EvictedBlockhash")
 		}
 		if resumeState.LastBlockhash == zeroHash {
 			mlog.Log.Errorf("FATAL: blockhash context has RecentBlockhashes but LastBlockhash is zero")
-			mlog.Log.Errorf("State file may be corrupted. Delete AccountsDB directory and restart from snapshot.")
+			mlog.Log.Errorf("State file may be corrupted. Preserve this AccountsDB and rebuild from snapshot into a distinct empty root.")
 			panic("cannot resume with zero LastBlockhash")
 		}
 
@@ -1444,7 +1443,7 @@ func configureInitialBlockFromResume(acctsDb *accountsdb.AccountsDb,
 		// 3. RecentBlockhashes sysvar data in AccountsDB may be stale
 		mlog.Log.Errorf("FATAL: no blockhash context in state file - cannot safely resume")
 		mlog.Log.Errorf("This state file was created before blockhash tracking was added.")
-		mlog.Log.Errorf("Please delete the AccountsDB directory and restart from snapshot.")
+		mlog.Log.Errorf("Preserve this AccountsDB and rebuild from snapshot into a distinct empty root.")
 		panic("cannot resume without blockhash context in state file")
 	}
 
@@ -1553,7 +1552,7 @@ func LoadInitialEpochStakesCache(mithrilState *state.MithrilState, resumeState *
 	if resumeState != nil {
 		epochsCrossed := startEpoch > snapshotEpoch
 		if epochsCrossed && len(resumeState.ComputedEpochStakes) == 0 {
-			return fmt.Errorf("resume at epoch %d (snapshot epoch %d) but no persisted epoch stakes found - cannot use stale manifest stakes (need fresh snapshot)", startEpoch, snapshotEpoch)
+			return fmt.Errorf("resume at epoch %d (snapshot epoch %d) but no persisted epoch stakes found - cannot use stale manifest stakes; preserve this AccountsDB and rebuild from snapshot into a distinct empty root", startEpoch, snapshotEpoch)
 		}
 		if len(resumeState.ComputedEpochStakes) > 0 {
 			// Once replay has crossed a boundary, only its persisted effective
@@ -1566,7 +1565,7 @@ func LoadInitialEpochStakesCache(mithrilState *state.MithrilState, resumeState *
 				mlog.Log.Debugf("loaded persisted epoch stakes for epoch %d from state file", loadedEpoch)
 			}
 			if !global.HasEpochStakes(startEpoch) {
-				return fmt.Errorf("missing required epoch stakes for current epoch %d - cannot resume (need fresh snapshot)", startEpoch)
+				return fmt.Errorf("missing required epoch stakes for current epoch %d - cannot resume; preserve this AccountsDB and rebuild from snapshot into a distinct empty root", startEpoch)
 			}
 			return nil
 		}
