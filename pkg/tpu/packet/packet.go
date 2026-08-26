@@ -1,6 +1,6 @@
 package packet
 
-const DataSize = 1232
+const DataSize = 4096
 
 // Packet is a received TPU transaction payload moving through the pipeline.
 type Packet struct {

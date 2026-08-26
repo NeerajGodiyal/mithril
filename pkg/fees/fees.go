@@ -37,7 +37,7 @@ func calculatePriorityFee(computeBudgetLimits *sealevel.ComputeBudgetLimits) uin
 
 // There are currently two aspects of the tx fee cost model on Solana
 // 1) fee per signature (5k lamports/sig)
-// 2) prioritization fees set via a SetComputeUnitPrice instruction
+// 2) prioritization fees set by a legacy/v0 instruction or v1 inline config
 
 const feePayerIdx = 0
 
@@ -72,6 +72,16 @@ func (txFeeAccumulator *TxFeeInfoAccumulator) Add(txFeeInfo *TxFeeInfo) {
 	}
 }
 
+func prioritizationFee(computeBudgetLimits *sealevel.ComputeBudgetLimits) uint64 {
+	if computeBudgetLimits.PrioritizationFeeLamports != 0 {
+		return computeBudgetLimits.PrioritizationFeeLamports
+	}
+	if computeBudgetLimits.ComputeUnitPrice != 0 {
+		return calculatePriorityFee(computeBudgetLimits)
+	}
+	return 0
+}
+
 // LeaderReward is the lamports credited to the slot leader for a transaction:
 // full priority fee plus the unburned half of the signature (execution) fee.
 func LeaderReward(feeInfo *TxFeeInfo) uint64 {
@@ -100,10 +110,7 @@ func CalculateTxFees(tx *solana.Transaction, instrs []sealevel.Instruction, comp
 	baseTxFee := numSignatures * 5000
 
 	// prioritization fees
-	var priorityFee uint64
-	if computeBudgetLimits.ComputeUnitPrice != 0 {
-		priorityFee = calculatePriorityFee(computeBudgetLimits)
-	}
+	priorityFee := prioritizationFee(computeBudgetLimits)
 
 	totalTxFee := safemath.SaturatingAddU64(baseTxFee, priorityFee)
 	return &TxFeeInfo{ExecutionFee: baseTxFee, PriorityFee: priorityFee, TotalFee: totalTxFee}
@@ -144,10 +151,7 @@ func CalculateAndDeductTxFees(tx *solana.Transaction, txMeta *rpc.TransactionMet
 	baseTxFee := numSignatures * 5000
 
 	// prioritization fees
-	var priorityFee uint64
-	if computeBudgetLimits.ComputeUnitPrice != 0 {
-		priorityFee = calculatePriorityFee(computeBudgetLimits)
-	}
+	priorityFee := prioritizationFee(computeBudgetLimits)
 
 	totalTxFee := safemath.SaturatingAddU64(baseTxFee, priorityFee)
 	feeInfo := &TxFeeInfo{ExecutionFee: baseTxFee, PriorityFee: priorityFee, TotalFee: totalTxFee}

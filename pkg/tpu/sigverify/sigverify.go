@@ -4,7 +4,7 @@ import (
 	"errors"
 
 	"github.com/Overclock-Validator/mithril/pkg/txverify"
-	"github.com/gagliardetto/binary"
+	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -15,9 +15,13 @@ func ParseTx(p []byte) (tx *solana.Transaction, err error) {
 		}
 	}()
 
-	tx, err = solana.TransactionFromDecoder(bin.NewBinDecoder(p))
+	decoder := bin.NewBinDecoder(p)
+	tx, err = solana.TransactionFromDecoder(decoder)
 	if err != nil {
 		return nil, err
+	}
+	if decoder.HasRemaining() {
+		return nil, errors.New("transaction has trailing bytes")
 	}
 	return
 }
@@ -40,10 +44,7 @@ func VerifyTransaction(tx *solana.Transaction) bool {
 	if !admissible(tx) {
 		return false
 	}
-	// Signature checking goes through txverify rather than being reimplemented
-	// here. This path used to marshal the message itself and so omitted the
-	// version-byte fixup, which meant a correctly signed versioned transaction
-	// was dropped at ingest.
+	// Keep all supported message versions on the shared canonical verifier.
 	return txverify.VerifyTransaction(tx) == nil
 }
 

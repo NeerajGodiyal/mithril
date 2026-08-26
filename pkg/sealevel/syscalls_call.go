@@ -53,7 +53,7 @@ func SyscallGetReturnDataImpl(vm sbpf.VM, returnDataAddr, length, programIdAddr 
 			return syscallErr(err)
 		}
 
-		if len(returnData) != len(returnDataResult) {
+		if uint64(len(returnDataResult)) != length {
 			return syscallErr(SyscallErrInvalidLength)
 		}
 

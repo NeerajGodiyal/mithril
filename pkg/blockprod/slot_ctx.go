@@ -42,9 +42,29 @@ type ParentContext struct {
 	TransactionStatuses        *replay.TransactionStatusView
 }
 
+type parentSlotAccountReader struct {
+	slot   uint64
+	reader sealevel.AccountReader
+}
+
+func (r parentSlotAccountReader) GetAccount(_ uint64, pubkey solana.PublicKey) (*accounts.Account, error) {
+	return r.reader.GetAccount(r.slot, pubkey)
+}
+
+func (r parentSlotAccountReader) ValidateAccountRead() error {
+	if validator, ok := r.reader.(sealevel.AccountReadValidator); ok {
+		return validator.ValidateAccountRead()
+	}
+	return nil
+}
+
 // NewLeaderSlotCtx builds a forge-ready slot context at the chain tip.
 func NewLeaderSlotCtx(slot, parentSlot uint64, acctsDb *accountsdb.AccountsDb, parent ParentContext, epochSchedule *sealevel.SysvarEpochSchedule) (*sealevel.SlotCtx, error) {
 	feats := leaderFeatures(parent.Features)
+	var parentReader sealevel.AccountReader
+	if parent.UnrootedRead != nil {
+		parentReader = parentSlotAccountReader{slot: parentSlot, reader: parent.UnrootedRead}
+	}
 
 	if parent.BankSysvars != nil {
 		if bankEpochSchedule, ok := parent.BankSysvars.EpochSchedule(); ok {
@@ -74,11 +94,12 @@ func NewLeaderSlotCtx(slot, parentSlot uint64, acctsDb *accountsdb.AccountsDb, p
 	slotCtx := &sealevel.SlotCtx{
 		Slot:                   slot,
 		ParentSlot:             parentSlot,
+		BlockHeight:            parent.ParentBlockHeight + 1,
 		Epoch:                  epoch,
 		Accounts:               accounts.NewMemAccounts(),
 		ParentAccts:            accounts.NewMemAccounts(),
 		AccountsDb:             acctsDb,
-		UnrootedRead:           parent.UnrootedRead,
+		UnrootedRead:           parentReader,
 		Features:               feats,
 		FeeRateGovernor:        feeGovernor,
 		LastBlockhash:          lastBlockhash,

@@ -10,14 +10,20 @@ import (
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
-func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclient.RpcClient) *Block {
+func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclient.RpcClient) (*Block, error) {
+	if blockResult == nil {
+		return nil, fmt.Errorf("slot %d: nil getBlock result", slot)
+	}
 	block := new(Block)
 	block.Slot = slot
 
-	for _, tx := range blockResult.Transactions {
+	for index, tx := range blockResult.Transactions {
+		if tx.Transaction == nil {
+			return nil, fmt.Errorf("slot %d transaction %d: missing encoded transaction", slot, index)
+		}
 		txParsed, err := tx.GetTransaction()
 		if err != nil {
-			panic(fmt.Sprintf("parsing tx from rpc returned err: %s", err))
+			return nil, fmt.Errorf("slot %d transaction %d: parse encoded transaction: %w", slot, index, err)
 		}
 		block.Transactions = append(block.Transactions, txParsed)
 		block.TxMetas = append(block.TxMetas, tx.Meta)
@@ -60,7 +66,7 @@ func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclie
 		block.NumSignatures += uint64(tx.Message.Header.NumRequiredSignatures)
 	}
 
-	return block
+	return block, nil
 }
 
 func blockRewardRewards(rewards []rpc.BlockReward) *rpc.BlockReward {

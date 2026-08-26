@@ -172,7 +172,7 @@ func (s *Scheduler) Cleanup(bank *blockprod.WorkingBank) int {
 	}
 	var expired, already uint64
 	dropped := s.buffer.Cleanup(func(e *entry) bool {
-		switch bank.ClassifyBuffered(e.blockhash, e.messageHash) {
+		switch bank.ClassifyBuffered(e.tx, e.messageHash) {
 		case blockprod.BufferedExpired:
 			expired++
 			return true

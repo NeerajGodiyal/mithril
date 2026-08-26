@@ -10,32 +10,13 @@ import (
 // MessageBytes returns the exact bytes a transaction's signatures are computed
 // over.
 //
-// The version-byte fixup is load-bearing and easy to omit. solana-go's
-// MarshalV0 writes versionNum+127, i.e. 0x7f for a v0 message, which is not the
-// Solana wire encoding; the signed prefix is 0x80. Marshalling without this
-// correction produces bytes that no honest signature will ever verify against,
-// so every verifier must come through here rather than calling MarshalBinary
-// directly.
+// solana-go owns the canonical legacy, v0, and v1 message encodings. Keeping
+// the call here gives every verifier the same nil check and error path.
 func MessageBytes(tx *solana.Transaction) ([]byte, error) {
 	if tx == nil {
 		return nil, fmt.Errorf("nil transaction")
 	}
-	msg, err := tx.Message.MarshalBinary()
-	if err != nil {
-		return nil, err
-	}
-	if tx.Message.IsVersioned() {
-		if len(msg) == 0 {
-			return nil, fmt.Errorf("empty versioned message")
-		}
-		version := byte(tx.Message.GetVersion())
-		if version == 0 {
-			msg[0] = 0x80
-		} else {
-			msg[0] = 0x7f + version
-		}
-	}
-	return msg, nil
+	return tx.Message.MarshalBinary()
 }
 
 // VerifyTransaction verifies one transaction's signatures.

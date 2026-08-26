@@ -1,17 +1,55 @@
 package replay
 
 import (
+	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"sync/atomic"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 )
+
+type accountSourceError struct{ err error }
+
+func (e *accountSourceError) Error() string { return e.err.Error() }
+func (e *accountSourceError) Unwrap() error { return e.err }
+
+func newAccountSourceError(context string, err error) error {
+	return &accountSourceError{err: fmt.Errorf("%s: %w", context, err)}
+}
+
+type loadedAccountsSizeError struct {
+	size uint32
+	err  error
+}
+
+func (e *loadedAccountsSizeError) Error() string { return e.err.Error() }
+func (e *loadedAccountsSizeError) Unwrap() error { return e.err }
+
+func loadedAccountsSizeOnError(err error) uint32 {
+	var sizeErr *loadedAccountsSizeError
+	if errors.As(err, &sizeErr) {
+		return sizeErr.size
+	}
+	return 0
+}
+
+func loadedAccountsLimitError(size, limit uint64) error {
+	if size > limit {
+		size = limit
+	}
+	if size > math.MaxUint32 {
+		size = math.MaxUint32
+	}
+	return &loadedAccountsSizeError{size: uint32(size), err: TxErrMaxLoadedAccountsDataSizeExceeded}
+}
 
 // Account clone tracking for profiling copy-on-write optimization potential
 var (
@@ -114,7 +152,7 @@ func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, txAcctMetas []*solana.Acc
 		if !isInstructionsSysvarAcct {
 			loadedBytesAccumulator = safemath.SaturatingAddU32(loadedBytesAccumulator, uint32(len(acct.Data)))
 			if loadedBytesAccumulator > loadedAcctBytesLimit {
-				return nil, nil, TxErrMaxLoadedAccountsDataSizeExceeded
+				return nil, nil, loadedAccountsLimitError(uint64(loadedBytesAccumulator), uint64(loadedAcctBytesLimit))
 			}
 		}
 
@@ -144,15 +182,15 @@ func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, txAcctMetas []*solana.Acc
 
 		programAcct, err := slotCtx.GetAccountShared(instr.ProgramId)
 		if err != nil {
-			return nil, nil, TxErrProgramAccountNotFound
+			return transactionAccts, txAcctMetas, TxErrProgramAccountNotFound
 		}
 
 		if programAcct.Lamports == 0 {
-			return nil, nil, TxErrProgramAccountNotFound
+			return transactionAccts, txAcctMetas, TxErrProgramAccountNotFound
 		}
 
 		if !removeAcctsExecutableFlagChecks && !programAcct.Executable {
-			return nil, nil, TxErrInvalidProgramForExecution
+			return transactionAccts, txAcctMetas, TxErrInvalidProgramForExecution
 		}
 
 		owner := programAcct.Owner
@@ -167,22 +205,27 @@ func loadAndValidateTxAccts(slotCtx *sealevel.SlotCtx, txAcctMetas []*solana.Acc
 			if err != nil {
 				ownerAcct, err = slotCtx.GetAccountFromAccountsDb(owner)
 				if err != nil {
-					return nil, nil, TxErrInvalidProgramForExecution
+					if !errors.Is(err, accountsdb.ErrNoAccount) {
+						return transactionAccts, txAcctMetas, newAccountSourceError("load program owner", err)
+					}
+					return transactionAccts, txAcctMetas, TxErrInvalidProgramForExecution
 				}
 			}
 
 			if ownerAcct.Owner != addresses.NativeLoaderAddr || (!removeAcctsExecutableFlagChecks && !ownerAcct.Executable) {
-				return nil, nil, TxErrInvalidProgramForExecution
+				return transactionAccts, txAcctMetas, TxErrInvalidProgramForExecution
 			}
 
 			loadedBytesAccumulator = safemath.SaturatingAddU32(loadedBytesAccumulator, uint32(len(ownerAcct.Data)))
 			if loadedBytesAccumulator > loadedAcctBytesLimit {
-				return nil, nil, TxErrMaxLoadedAccountsDataSizeExceeded
+				transactionAccts.LoadedAccountsDataSize = loadedBytesAccumulator
+				return transactionAccts, txAcctMetas, loadedAccountsLimitError(uint64(loadedBytesAccumulator), uint64(loadedAcctBytesLimit))
 			}
 
 			validatedLoaders[owner] = struct{}{}
 		}
 	}
+	transactionAccts.LoadedAccountsDataSize = loadedBytesAccumulator
 
 	return transactionAccts, txAcctMetas, nil
 }
@@ -243,14 +286,17 @@ func (accum *loadedAcctSizeAccumulatorSimd186) collectAcct(acct *accounts.Accoun
 
 	if acct.Owner == addresses.BpfLoaderUpgradeableAddr {
 		acctState, err := sealevel.UnmarshalUpgradeableLoaderState(acct.Data)
-		programDataAddr := acctState.Program.ProgramDataAddress
-		if err == nil && acctState.Type == sealevel.UpgradeableLoaderStateTypeProgram {
+		if err == nil && acctState != nil && acctState.Type == sealevel.UpgradeableLoaderStateTypeProgram {
+			programDataAddr := acctState.Program.ProgramDataAddress
 			if !accum.wasAlreadyCounted(programDataAddr) {
 				// program data account not being found is not an error. Agave instead ignores it.
 				programDataAcct, err := accum.slotCtx.GetAccountShared(programDataAddr)
 				if err != nil {
 					programDataAcct, err = accum.slotCtx.GetAccountFromAccountsDb(programDataAddr)
 					if err != nil {
+						if !errors.Is(err, accountsdb.ErrNoAccount) {
+							return newAccountSourceError("load program data", err)
+						}
 						return nil
 					}
 				}
@@ -290,7 +336,7 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, txAcctMetas []*sol
 	addrTableLookupCost := safemath.SaturatingMulU64(uint64(len(tx.Message.AddressTableLookups)), addrLookupTableBaseSize)
 	err := accumulator.add(addrTableLookupCost)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, loadedAccountsLimitError(accumulator.accumulator, accumulator.limit)
 	}
 
 	// Memoize accounts loaded in Pass 1
@@ -303,12 +349,15 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, txAcctMetas []*sol
 			acct = instrsAcct
 		} else {
 			acct, err = slotCtx.GetAccountShared(pubkey)
-			if err != nil && slotCtx.AccountsDb != nil {
+			if err != nil && (slotCtx.AccountsDb != nil || slotCtx.UnrootedRead != nil) {
 				// Fall back to full accountsdb so native programs
 				// (System, BPF Loader, etc.) and other always-on
 				// accounts are loaded even when the per-slot
 				// MemAccounts didn't reference them.
 				acct, err = slotCtx.GetAccountFromAccountsDb(pubkey)
+				if err != nil && !errors.Is(err, accountsdb.ErrNoAccount) {
+					return nil, nil, newAccountSourceError("load transaction account", err)
+				}
 			}
 			if err != nil {
 				// Empty default for genuinely absent pubkeys; matches
@@ -323,7 +372,11 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, txAcctMetas []*sol
 		acctCache[i] = acct // Cache by index for reuse in Pass 2
 		err = accumulator.collectAcct(acct)
 		if err != nil {
-			return nil, nil, err
+			var sourceErr *accountSourceError
+			if errors.As(err, &sourceErr) {
+				return nil, nil, sourceErr
+			}
+			return nil, nil, loadedAccountsLimitError(accumulator.accumulator, accumulator.limit)
 		}
 	}
 
@@ -377,6 +430,7 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, txAcctMetas []*sol
 
 	transactionAccts := sealevel.NewTransactionAccountsFromRefs(acctsForTx, acctsShared)
 	transactionAccts.AcctMetas = convertedAcctMetas
+	transactionAccts.LoadedAccountsDataSize = uint32(accumulator.accumulator)
 	transactionAccts.OnFirstWriteClone = recordTxAcctCowClone
 	TxAcctsLoaded.Add(loadedAcctCount)
 	TxAcctsLoadedBytes.Add(loadedAcctBytes)
@@ -402,22 +456,25 @@ func loadAndValidateTxAcctsSimd186(slotCtx *sealevel.SlotCtx, txAcctMetas []*sol
 			if err != nil {
 				programAcct, err = slotCtx.GetAccountFromAccountsDb(instr.ProgramId)
 				if err != nil {
-					return nil, nil, TxErrProgramAccountNotFound
+					if !errors.Is(err, accountsdb.ErrNoAccount) {
+						return transactionAccts, txAcctMetas, newAccountSourceError("load program account", err)
+					}
+					return transactionAccts, txAcctMetas, TxErrProgramAccountNotFound
 				}
 			}
 		}
 
 		if programAcct.Lamports == 0 {
-			return nil, nil, TxErrProgramAccountNotFound
+			return transactionAccts, txAcctMetas, TxErrProgramAccountNotFound
 		}
 
 		if !removeAcctsExecutableFlagChecks && !programAcct.Executable {
-			return nil, nil, TxErrInvalidProgramForExecution
+			return transactionAccts, txAcctMetas, TxErrInvalidProgramForExecution
 		}
 
 		owner := programAcct.Owner
 		if owner != addresses.NativeLoaderAddr && !isLoaderAcct(owner) {
-			return nil, nil, TxErrInvalidProgramForExecution
+			return transactionAccts, txAcctMetas, TxErrInvalidProgramForExecution
 		}
 	}
 

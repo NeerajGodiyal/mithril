@@ -1,8 +1,11 @@
 package costmodel
 
 import (
+	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/safemath"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -36,32 +39,64 @@ func EstimateTransactionCost(tx *solana.Transaction, feats *features.Features) (
 	if err != nil {
 		return TransactionCost{}, err
 	}
+	writable, err := writableAccounts(tx, feats)
+	if err != nil {
+		return TransactionCost{}, err
+	}
 
-	limits, err := sealevel.ComputeBudgetExecuteInstructions(instrs, feats)
+	limits, err := sealevel.ComputeBudgetForTransaction(tx, instrs, feats)
 	if err != nil {
 		// A compute-budget parse failure yields zero execution cost; the transaction will not execute.
 		return TransactionCost{
-			SignatureCost: signatureCost(tx),
-			WriteLockCost: writeLockCost(countWriteLocks(tx)),
-			DataBytesCost: instructionDataCost(tx),
-			WritableAccounts: writableAccounts(tx),
+			SignatureCost:    signatureCost(tx, feats),
+			WriteLockCost:    writeLockCost(countWriteLocks(tx)),
+			DataBytesCost:    instructionDataCost(tx),
+			WritableAccounts: writable,
 		}, nil
 	}
 
 	loadedDataCost := loadedAccountsDataSizeCost(limits.LoadedAccountBytes)
+	if tx.Message.GetVersion() == solana.MessageVersionV1 && limits.LoadedAccountBytes == 0 {
+		loadedDataCost = HeapCost
+	}
 	return TransactionCost{
-		SignatureCost:              signatureCost(tx),
+		SignatureCost:              signatureCost(tx, feats),
 		WriteLockCost:              writeLockCost(countWriteLocks(tx)),
 		DataBytesCost:              instructionDataCost(tx),
 		ProgramsExecutionCost:      uint64(limits.ComputeUnitLimit),
 		LoadedAccountsDataSizeCost: loadedDataCost,
 		AllocatedAccountsDataSize:  estimateAllocDelta(instrs, feats),
-		WritableAccounts:           writableAccounts(tx),
+		WritableAccounts:           writable,
 	}, nil
 }
 
-func signatureCost(tx *solana.Transaction) uint64 {
-	return uint64(len(tx.Signatures)) * SignatureCost
+func signatureCost(tx *solana.Transaction, feats *features.Features) uint64 {
+	cost := safemath.SaturatingMulU64(uint64(len(tx.Signatures)), SignatureCost)
+	for _, instruction := range tx.Message.Instructions {
+		if len(instruction.Data) == 0 {
+			continue
+		}
+		programID, err := tx.ResolveProgramIDIndex(instruction.ProgramIDIndex)
+		if err != nil {
+			continue
+		}
+		var perSignature uint64
+		secp256k := solana.PublicKey(addresses.Secp256kPrecompileAddr)
+		ed25519 := solana.PublicKey(addresses.Ed25519PrecompileAddr)
+		secp256r1 := solana.PublicKey(addresses.Secp256r1PrecompileAddr)
+		switch {
+		case programID == secp256k:
+			perSignature = Secp256k1VerifyCost
+		case programID == ed25519:
+			perSignature = Ed25519VerifyStrictCost
+		case programID == secp256r1:
+			if feats != nil && feats.IsActive(features.EnableSecp256r1Precompile) {
+				perSignature = Secp256r1VerifyCost
+			}
+		}
+		cost = safemath.SaturatingAddU64(cost, safemath.SaturatingMulU64(uint64(instruction.Data[0]), perSignature))
+	}
+	return cost
 }
 
 func writeLockCost(num uint64) uint64 {
@@ -90,42 +125,111 @@ func LoadedAccountsDataSizeCost(bytes uint32) uint64 {
 }
 
 func countWriteLocks(tx *solana.Transaction) uint64 {
-	return uint64(len(writableAccounts(tx)))
+	if tx == nil {
+		return 0
+	}
+	h := tx.Message.Header
+	signed := int(h.NumRequiredSignatures) - int(h.NumReadonlySignedAccounts)
+	unsigned := len(tx.Message.AccountKeys) - int(h.NumRequiredSignatures) - int(h.NumReadonlyUnsignedAccounts)
+	if signed < 0 {
+		signed = 0
+	}
+	if unsigned < 0 {
+		unsigned = 0
+	}
+	return uint64(signed + unsigned)
 }
 
-func writableAccounts(tx *solana.Transaction) []solana.PublicKey {
+func writableAccounts(tx *solana.Transaction, feats *features.Features) ([]solana.PublicKey, error) {
 	if tx == nil {
-		return nil
+		return nil, nil
 	}
-	hdr := tx.Message.Header
-	numSigners := int(hdr.NumRequiredSignatures)
-	numKeys := len(tx.Message.AccountKeys)
-	if numKeys == 0 {
-		return nil
+	metas, err := tx.AccountMetaList()
+	if err != nil {
+		return nil, err
 	}
-	numWritableSigners := numSigners - int(hdr.NumReadonlySignedAccounts)
-	if numWritableSigners < 0 {
-		numWritableSigners = 0
+	programIDs, err := tx.GetProgramIDs()
+	if err != nil {
+		return nil, err
 	}
-	numWritableNonSigners := numKeys - numSigners - int(hdr.NumReadonlyUnsignedAccounts)
-	if numWritableNonSigners < 0 {
-		numWritableNonSigners = 0
+	programSet := make(map[solana.PublicKey]struct{}, len(programIDs))
+	for _, programID := range programIDs {
+		programSet[programID] = struct{}{}
 	}
-	out := make([]solana.PublicKey, 0, numWritableSigners+numWritableNonSigners)
-	for i := 0; i < numWritableSigners && i < numKeys; i++ {
-		out = append(out, tx.Message.AccountKeys[i])
+	demoteProgramIDs := true
+	for _, key := range tx.Message.AccountKeys {
+		if key == addresses.BpfLoaderUpgradeableAddr {
+			demoteProgramIDs = false
+			break
+		}
 	}
-	start := numSigners + int(hdr.NumReadonlyUnsignedAccounts)
-	for i := start; i < numKeys; i++ {
-		out = append(out, tx.Message.AccountKeys[i])
+	out := make([]solana.PublicKey, 0, len(metas))
+	for _, meta := range metas {
+		if isWritableForCost(meta, programSet, demoteProgramIDs, feats) {
+			out = append(out, meta.PublicKey)
+		}
 	}
-	return out
+	return out, nil
 }
 
 func estimateAllocDelta(instrs []sealevel.Instruction, feats *features.Features) uint64 {
-	_ = instrs
-	_ = feats
-	return 0
+	var total uint64
+	for _, instruction := range instrs {
+		if instruction.ProgramId != addresses.SystemProgramAddr {
+			continue
+		}
+		decoder := bin.NewBinDecoder(instruction.Data)
+		kind, err := decoder.ReadUint32(bin.LE)
+		if err != nil {
+			return 0
+		}
+		var space uint64
+		switch kind {
+		case sealevel.SystemProgramInstrTypeCreateAccount:
+			var value sealevel.SystemInstrCreateAccount
+			if value.UnmarshalWithDecoder(decoder) != nil {
+				return 0
+			}
+			space = value.Space
+		case sealevel.SystemProgramInstrTypeCreateAccountWithSeed:
+			var value sealevel.SystemInstrCreateAccountWithSeed
+			if value.UnmarshalWithDecoder(decoder) != nil {
+				return 0
+			}
+			space = value.Space
+		case sealevel.SystemProgramInstrTypeAllocate:
+			var value sealevel.SystemInstrAllocate
+			if value.UnmarshalWithDecoder(decoder) != nil {
+				return 0
+			}
+			space = value.Space
+		case sealevel.SystemProgramInstrTypeAllocateWithSeed:
+			var value sealevel.SystemInstrAllocateWithSeed
+			if value.UnmarshalWithDecoder(decoder) != nil {
+				return 0
+			}
+			space = value.Space
+		case sealevel.SystemProgramInstrTypeCreateAccountAllowPrefund:
+			if feats == nil || !feats.IsActive(features.CreateAccountAllowPrefund) {
+				continue
+			}
+			var value sealevel.SystemInstrCreateAccountAllowPrefund
+			if value.UnmarshalWithDecoder(decoder) != nil {
+				return 0
+			}
+			space = value.Space
+		default:
+			continue
+		}
+		if space > sealevel.SystemProgMaxPermittedDataLen {
+			return 0
+		}
+		total = safemath.SaturatingAddU64(total, space)
+	}
+	if total > sealevel.SystemProgMaxPermittedDataLen {
+		return sealevel.SystemProgMaxPermittedDataLen
+	}
+	return total
 }
 
 func replayInstrsAndAcctMetas(tx *solana.Transaction, feats *features.Features) ([]sealevel.Instruction, [][]sealevel.AccountMeta, error) {
@@ -176,7 +280,11 @@ func replayInstrsAndAcctMetas(tx *solana.Transaction, feats *features.Features) 
 }
 
 func isWritableForCost(am *solana.AccountMeta, programIDSet map[solana.PublicKey]struct{}, demote bool, feats *features.Features) bool {
-	if !am.IsWritable {
+	if feats == nil {
+		feats = features.NewFeaturesDefault()
+	}
+	meta := &sealevel.AccountMeta{Pubkey: am.PublicKey, IsSigner: am.IsSigner, IsWritable: am.IsWritable}
+	if !sealevel.IsWritable(meta, feats) {
 		return false
 	}
 	if demote {

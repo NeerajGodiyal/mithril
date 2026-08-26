@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -18,6 +19,7 @@ var (
 	ErrInvalidAccountForFee     = errors.New("invalid account for fee")
 	ErrInsufficientFundsForFee  = sealevel.InstrErrInsufficientFunds
 	ErrInsufficientFundsForRent = errors.New("insufficient funds for rent")
+	ErrFeePayerSource           = errors.New("fee payer account source failure")
 )
 
 const (
@@ -76,6 +78,9 @@ func PayerCanFund(slotCtx *sealevel.SlotCtx, tx *solana.Transaction) error {
 	}
 	payer, err := loadPayer(slotCtx, tx.Message.AccountKeys[0])
 	if err != nil {
+		if !errors.Is(err, accountsdb.ErrNoAccount) && !errors.Is(err, ErrFeePayerNotFound) {
+			return errors.Join(ErrFeePayerSource, err)
+		}
 		return ErrFeePayerNotFound
 	}
 	feats := features.NewFeaturesDefault()
@@ -86,7 +91,7 @@ func PayerCanFund(slotCtx *sealevel.SlotCtx, tx *solana.Transaction) error {
 	if err != nil {
 		return err
 	}
-	limits, err := sealevel.ComputeBudgetExecuteInstructions(instrs, feats)
+	limits, err := sealevel.ComputeBudgetForTransaction(tx, instrs, feats)
 	if err != nil {
 		return err
 	}

@@ -50,7 +50,7 @@ func Secp256r1GetDataSlice(txCtx *TransactionCtx, index uint16, offset uint16, s
 	if index == math.MaxUint16 {
 		instrCtx, err := txCtx.CurrentInstructionCtx()
 		if err != nil {
-			return nil, PrecompileErrSignature
+			return nil, PrecompileErrDataOffset
 		}
 		data = instrCtx.Data
 		dataSize = uint64(len(data))
@@ -65,7 +65,7 @@ func Secp256r1GetDataSlice(txCtx *TransactionCtx, index uint16, offset uint16, s
 
 	end := safemath.SaturatingAddU64(uint64(offset), size)
 	if end > dataSize {
-		return nil, PrecompileErrSignature
+		return nil, PrecompileErrDataOffset
 	}
 
 	return data[offset:end], nil

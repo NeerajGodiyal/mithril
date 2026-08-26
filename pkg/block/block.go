@@ -260,14 +260,23 @@ func (b *Block) CompleteTurbineReplayAdmission(at time.Time) (TurbineIngressTimi
 	b.turbineReplayAdmissionStart = time.Time{}
 	return b.turbineIngressTimings, true
 }
-func (b *Block) FixupTxVersions() {
+func (b *Block) FixupTxVersions() error {
 	if b == nil || len(b.Versions) == 0 {
-		return
+		return nil
+	}
+	if len(b.Versions) != len(b.Transactions) {
+		return fmt.Errorf("transaction version count %d does not match transaction count %d", len(b.Versions), len(b.Transactions))
 	}
 	b.invalidateTransactionDerivedState()
 	for idx, tx := range b.Transactions {
-		tx.Message.SetVersion(solana.MessageVersion(b.Versions[idx]))
+		if tx == nil {
+			return fmt.Errorf("transaction %d is nil", idx)
+		}
+		if _, err := tx.Message.SetVersion(solana.MessageVersion(b.Versions[idx])); err != nil {
+			return fmt.Errorf("transaction %d version %d: %w", idx, b.Versions[idx], err)
+		}
 	}
+	return nil
 }
 
 type TxEntry struct {

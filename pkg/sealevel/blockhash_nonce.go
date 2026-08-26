@@ -1,6 +1,10 @@
 package sealevel
 
 import (
+	"errors"
+
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	a "github.com/Overclock-Validator/mithril/pkg/addresses"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -33,8 +37,19 @@ func IsNonceInstr(instr Instruction) bool {
 }
 
 func MaybeAdvanceNonceAccountForFailedTx(slotCtx *SlotCtx, tx *solana.Transaction, instr Instruction) (solana.PublicKey, bool) {
-	if !IsNonceInstr(instr) {
+	noncePk, nonceAcct, ok, err := AdvancedNonceAccountForFailedTx(slotCtx, tx, instr)
+	if err != nil || !ok || slotCtx.SetAccount(noncePk, nonceAcct) != nil {
 		return solana.PublicKey{}, false
+	}
+	return noncePk, true
+}
+
+// AdvancedNonceAccountForFailedTx returns the committed nonce state for a
+// processed failure without mutating the bank. The caller publishes it with
+// the fee-payer rollback state.
+func AdvancedNonceAccountForFailedTx(slotCtx *SlotCtx, tx *solana.Transaction, instr Instruction) (solana.PublicKey, *accounts.Account, bool, error) {
+	if !IsNonceInstr(instr) {
+		return solana.PublicKey{}, nil, false, nil
 	}
 
 	// we don't need to advance the durable nonce under error conditions if the blockhash is of valid age.
@@ -43,32 +58,39 @@ func MaybeAdvanceNonceAccountForFailedTx(slotCtx *SlotCtx, tx *solana.Transactio
 	// see https://github.com/anza-xyz/agave/blame/992a398fe8ea29ec4f04d081ceef7664960206f4/accounts-db/src/blockhash_queue.rs#L222
 	recentBlockhashes, ok := recentBlockhashesForSlot(slotCtx)
 	if !ok {
-		return solana.PublicKey{}, false
+		return solana.PublicKey{}, nil, false, nil
 	}
 	if recentBlockhashes.IsBlockhashAgeValid(tx.Message.RecentBlockhash) {
-		return solana.PublicKey{}, false
+		return solana.PublicKey{}, nil, false, nil
 	} else if tx.Message.RecentBlockhash == slotCtx.LatestEvictedBlockhash {
-		return solana.PublicKey{}, false
+		return solana.PublicKey{}, nil, false, nil
 	}
 
 	noncePk := instr.Accounts[0].Pubkey
 	nonceAcct, err := slotCtx.GetAccount(noncePk)
-	if err != nil {
-		return solana.PublicKey{}, false
+	if err != nil && (slotCtx.AccountsDb != nil || slotCtx.UnrootedRead != nil) {
+		nonceAcct, err = slotCtx.GetAccountFromAccountsDb(noncePk)
 	}
+	if err != nil {
+		if (slotCtx.AccountsDb != nil || slotCtx.UnrootedRead != nil) && !errors.Is(err, accountsdb.ErrNoAccount) {
+			return solana.PublicKey{}, nil, false, err
+		}
+		return solana.PublicKey{}, nil, false, nil
+	}
+	nonceAcct = nonceAcct.Clone()
 
 	nonceStateVersions, err := UnmarshalNonceStateVersions(nonceAcct.Data)
 	if err != nil {
-		return solana.PublicKey{}, false
+		return solana.PublicKey{}, nil, false, nil
 	}
 
 	if nonceStateVersions.Type == NonceVersionLegacy {
-		return solana.PublicKey{}, false
+		return solana.PublicKey{}, nil, false, nil
 	}
 
 	state := nonceStateVersions.State()
 	if !state.IsInitialized {
-		return solana.PublicKey{}, false
+		return solana.PublicKey{}, nil, false, nil
 	}
 
 	var nonceInstrSigners []solana.PublicKey
@@ -79,13 +101,13 @@ func MaybeAdvanceNonceAccountForFailedTx(slotCtx *SlotCtx, tx *solana.Transactio
 	}
 
 	if !state.IsSignerAuthority(nonceInstrSigners) {
-		return solana.PublicKey{}, false
+		return solana.PublicKey{}, nil, false, nil
 	}
 
 	rbh := slotCtx.LastBlockhash
 	nextDurableNonce := durableNonce(rbh)
 	if state.DurableNonce == nextDurableNonce {
-		return solana.PublicKey{}, false
+		return solana.PublicKey{}, nil, false, nil
 	}
 
 	if nonceStateVersions.Type == NonceVersionCurrent {
@@ -100,13 +122,11 @@ func MaybeAdvanceNonceAccountForFailedTx(slotCtx *SlotCtx, tx *solana.Transactio
 
 	newData, err := nonceStateVersions.Marshal()
 	if err != nil {
-		return solana.PublicKey{}, false
+		return solana.PublicKey{}, nil, false, err
 	}
 
 	copy(nonceAcct.Data, newData)
-	slotCtx.SetAccount(noncePk, nonceAcct)
-
-	return noncePk, true
+	return noncePk, nonceAcct, true, nil
 }
 
 func IsTransactionAgeValid(tx *solana.Transaction, instrs []Instruction, slotCtx *SlotCtx) bool {
@@ -159,7 +179,7 @@ func IsTransactionAgeValid(tx *solana.Transaction, instrs []Instruction, slotCtx
 
 	noncePk := instr.Accounts[0].Pubkey
 	nonceAcct, err := slotCtx.GetAccount(noncePk)
-	if err != nil && slotCtx.AccountsDb != nil {
+	if err != nil && (slotCtx.AccountsDb != nil || slotCtx.UnrootedRead != nil) {
 		// Per-slot MemAccounts only holds accounts referenced by the
 		// current block's txs. On the simulate path the nonce account
 		// is usually absent there — fall back to accountsdb so durable

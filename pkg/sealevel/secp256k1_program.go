@@ -184,19 +184,32 @@ func Secp256k1ProgramExecute(execCtx *ExecutionCtx) error {
 			panic("shouldn't happen, lengths already checked")
 		}
 
-		signature, err := Secp256k1GetDataSlice(txCtx, uint16(secpOffsets.SignatureInstructionIndex), secpOffsets.SignatureOffset, SignatureSerializedSize+1)
-		if err != nil {
-			return PrecompileErrDataOffset
+		signatureIndex := int(secpOffsets.SignatureInstructionIndex)
+		if signatureIndex >= len(txCtx.AllInstructions) {
+			return PrecompileErrInstrDataSize
+		}
+		signatureData := txCtx.AllInstructions[signatureIndex].Data
+		signatureStart := uint64(secpOffsets.SignatureOffset)
+		signatureEnd := safemath.SaturatingAddU64(signatureStart, Secp256k1SignatureSerializedSize)
+		if signatureEnd >= uint64(len(signatureData)) {
+			return PrecompileErrSignature
+		}
+		signature := signatureData[signatureStart : signatureEnd+1]
+		if err := parseAndValidateSignature(signature[:Secp256k1SignatureSerializedSize]); err != nil {
+			return PrecompileErrSignature
+		}
+		if signature[Secp256k1SignatureSerializedSize] >= 4 {
+			return PrecompileErrRecoveryId
 		}
 
 		ethAddr, err := Secp256k1GetDataSlice(txCtx, uint16(secpOffsets.EthAddressInstructionIndex), secpOffsets.EthAddressOffset, Secp256k1HashedPubkeySerializedSize)
 		if err != nil {
-			return PrecompileErrDataOffset
+			return err
 		}
 
 		msg, err := Secp256k1GetDataSlice(txCtx, uint16(secpOffsets.MessageInstructionIndex), secpOffsets.MessageDataOffset, uint64(secpOffsets.MessageDataSize))
 		if err != nil {
-			return PrecompileErrDataOffset
+			return err
 		}
 
 		hasher := sha3.NewLegacyKeccak256()

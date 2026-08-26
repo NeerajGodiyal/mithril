@@ -8,6 +8,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/migration"
 	bin "github.com/gagliardetto/binary"
+	"github.com/gagliardetto/solana-go"
 )
 
 const (
@@ -21,10 +22,46 @@ const (
 )
 
 type ComputeBudgetLimits struct {
-	UpdatedHeapBytes   uint32
-	ComputeUnitLimit   uint32
-	ComputeUnitPrice   uint64
-	LoadedAccountBytes uint32
+	UpdatedHeapBytes          uint32
+	ComputeUnitLimit          uint32
+	ComputeUnitPrice          uint64
+	PrioritizationFeeLamports uint64
+	LoadedAccountBytes        uint32
+}
+
+type ComputeBudgetErrorKind uint8
+
+const (
+	ComputeBudgetErrorInvalidInstructionData ComputeBudgetErrorKind = iota
+	ComputeBudgetErrorDuplicateInstruction
+	ComputeBudgetErrorInvalidLoadedAccountsDataSizeLimit
+)
+
+// ComputeBudgetError preserves the transaction-error variant and instruction
+// index chosen by Agave's compute-budget preprocessor.
+type ComputeBudgetError struct {
+	Kind             ComputeBudgetErrorKind
+	InstructionIndex uint8
+}
+
+func (e *ComputeBudgetError) Error() string {
+	switch e.Kind {
+	case ComputeBudgetErrorInvalidInstructionData:
+		return fmt.Sprintf("Error processing Instruction %d: %v", e.InstructionIndex, InstrErrInvalidInstructionData)
+	case ComputeBudgetErrorDuplicateInstruction:
+		return fmt.Sprintf("Transaction contains a duplicate instruction (%d) that is not allowed", e.InstructionIndex)
+	case ComputeBudgetErrorInvalidLoadedAccountsDataSizeLimit:
+		return "loaded accounts data size limit must be greater than zero"
+	default:
+		return "unknown compute budget error"
+	}
+}
+
+func (e *ComputeBudgetError) Unwrap() error {
+	if e != nil && e.Kind == ComputeBudgetErrorInvalidInstructionData {
+		return InstrErrInvalidInstructionData
+	}
+	return nil
 }
 
 const (
@@ -127,11 +164,11 @@ func sanitizeRequestedHeapSize(len uint32) bool {
 }
 
 func invalidInstructionDataErr(idx int) error {
-	return fmt.Errorf("Error processing Instruction %d: %w", idx, InstrErrInvalidInstructionData)
+	return &ComputeBudgetError{Kind: ComputeBudgetErrorInvalidInstructionData, InstructionIndex: uint8(idx)}
 }
 
 func duplicateInstructionErr(idx int) error {
-	return fmt.Errorf("Transaction contains a duplicate instruction (%d) that is not allowed", idx)
+	return &ComputeBudgetError{Kind: ComputeBudgetErrorDuplicateInstruction, InstructionIndex: uint8(idx)}
 }
 
 func calculateDefaultComputeUnitLimit(f *features.Features, numBuiltinInstrs uint32, numNonBuiltinInstrs uint32, numNonComputeBudgetInstrs uint32) uint32 {
@@ -171,6 +208,7 @@ func ComputeBudgetExecuteInstructions(instructions []Instruction, f *features.Fe
 	var numNonBuiltinInstrs uint32
 
 	var requestedHeapSize uint32
+	var requestedHeapIndex uint8
 	var updatedComputeUnitLimit uint32
 	var updatedLoadedAccountsDataSizeLimit uint32
 	var updatedComputeUnitPrice uint64
@@ -208,14 +246,9 @@ func ComputeBudgetExecuteInstructions(instructions []Instruction, f *features.Fe
 					return nil, duplicateInstructionErr(idx)
 				}
 
-				requestedSize := requestHeapFrame.Bytes
-
-				if sanitizeRequestedHeapSize(requestedSize) {
-					requestedHeapSize = requestedSize
-					hasRequestedHeapSize = true
-				} else {
-					return nil, invalidInstructionDataErr(idx)
-				}
+				requestedHeapSize = requestHeapFrame.Bytes
+				requestedHeapIndex = uint8(idx)
+				hasRequestedHeapSize = true
 			}
 
 		case ComputeBudgetInstrTypeSetComputeUnitLimit:
@@ -275,6 +308,9 @@ func ComputeBudgetExecuteInstructions(instructions []Instruction, f *features.Fe
 
 	var updatedHeapBytes uint32
 	if hasRequestedHeapSize {
+		if !sanitizeRequestedHeapSize(requestedHeapSize) {
+			return nil, invalidInstructionDataErr(int(requestedHeapIndex))
+		}
 		updatedHeapBytes = requestedHeapSize
 	} else {
 		updatedHeapBytes = MinHeapFrameBytes
@@ -297,6 +333,9 @@ func ComputeBudgetExecuteInstructions(instructions []Instruction, f *features.Fe
 
 	var loadedAccountBytes uint32
 	if hasUpdatedLoadedAccountsDataSizeLimit {
+		if updatedLoadedAccountsDataSizeLimit == 0 {
+			return nil, &ComputeBudgetError{Kind: ComputeBudgetErrorInvalidLoadedAccountsDataSizeLimit}
+		}
 		loadedAccountBytes = min(updatedLoadedAccountsDataSizeLimit, MaxLoadedAccountsDataSizeBytes)
 	} else {
 		loadedAccountBytes = MaxLoadedAccountsDataSizeBytes
@@ -306,6 +345,44 @@ func ComputeBudgetExecuteInstructions(instructions []Instruction, f *features.Fe
 		ComputeUnitLimit: computeUnitLimit, ComputeUnitPrice: computeUnitPrice, LoadedAccountBytes: loadedAccountBytes}
 
 	return computeBudgetLimits, nil
+}
+
+// ComputeBudgetForTransaction reads v1's inline transaction configuration and
+// keeps the instruction preprocessor for legacy and v0 transactions.
+func ComputeBudgetForTransaction(tx *solana.Transaction, instructions []Instruction, f *features.Features) (*ComputeBudgetLimits, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("nil transaction")
+	}
+	if tx.Message.GetVersion() != solana.MessageVersionV1 {
+		return ComputeBudgetExecuteInstructions(instructions, f)
+	}
+	if err := tx.Sanitize(); err != nil {
+		return nil, err
+	}
+
+	config := tx.Message.TransactionConfig
+	heapBytes := uint32(MinHeapFrameBytes)
+	if config.HeapSize != nil {
+		heapBytes = *config.HeapSize
+	}
+	var computeUnitLimit uint32
+	if config.ComputeUnitLimit != nil {
+		computeUnitLimit = min(*config.ComputeUnitLimit, uint32(MaxComputeUnitLimit))
+	}
+	var loadedAccountBytes uint32
+	if config.LoadedAccountsDataSizeLimit != nil {
+		loadedAccountBytes = min(*config.LoadedAccountsDataSizeLimit, uint32(MaxLoadedAccountsDataSizeBytes))
+	}
+	var priorityFee uint64
+	if config.PriorityFee != nil {
+		priorityFee = *config.PriorityFee
+	}
+	return &ComputeBudgetLimits{
+		UpdatedHeapBytes:          heapBytes,
+		ComputeUnitLimit:          computeUnitLimit,
+		PrioritizationFeeLamports: priorityFee,
+		LoadedAccountBytes:        loadedAccountBytes,
+	}, nil
 }
 
 func ComputeBudgetExecute(execCtx *ExecutionCtx) error {

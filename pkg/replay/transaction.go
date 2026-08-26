@@ -18,6 +18,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
+	"github.com/Overclock-Validator/mithril/pkg/rootedevents"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/sigverify"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
@@ -246,7 +247,7 @@ func handleModifiedAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.Executi
 	return stats
 }
 
-func recordStakeDelegation(slot uint64, acct *accounts.Account) {
+func recordStakeDelegation(slotCtx *sealevel.SlotCtx, acct *accounts.Account) {
 	isEmpty := acct.Lamports == 0
 	isUninitialized := true
 
@@ -259,7 +260,7 @@ func recordStakeDelegation(slot uint64, acct *accounts.Account) {
 		// Slot-keyed enqueue: the entry reaches the durable index only when
 		// this slot folds; an unwound wrong-fork slot drops it. Scans see it
 		// from RAM meanwhile (StreamStakeAccounts merges pending entries).
-		global.EnqueuePendingStakePubkey(slot, acct.Key)
+		slotCtx.RecordPendingStakePubkey(acct.Key)
 	}
 }
 
@@ -295,23 +296,42 @@ func recordVoteTimestampAndSlot(slotCtx *sealevel.SlotCtx, acct *accounts.Accoun
 
 func recordStakeAndVoteAccount(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx, acct *accounts.Account, modifiedVoteAccts bool) {
 	if acct.Lamports == 0 || acct.Owner != a.VoteProgramAddr {
-		if global.VoteCacheItem(acct.Key) != nil {
-			global.DeleteVoteCacheItem(acct.Key)
-			markVoteStakeDirty(slotCtx.Slot) // global cache mutated — gates in-loop unwind
+		if global.VoteCacheItem(acct.Key) != nil || slotCtx.HasPendingVoteCacheUpdate(acct.Key) {
+			slotCtx.RecordVoteCacheUpdate(acct.Key, nil)
 		}
 	} else if modifiedVoteAccts {
 		recordVoteTimestampAndSlot(slotCtx, acct)
 		newVersionedVoteState, wasModified := execCtx.ModifiedVoteStates[acct.Key]
 		if wasModified {
-			global.PutVoteCacheItem(acct.Key, newVersionedVoteState)
+			slotCtx.RecordVoteCacheUpdate(acct.Key, newVersionedVoteState)
 		}
-		markVoteStakeDirty(slotCtx.Slot)
 	}
 
 	if acct.Owner == a.StakeProgramAddr {
-		recordStakeDelegation(slotCtx.Slot, acct)
-		markVoteStakeDirty(slotCtx.Slot)
+		recordStakeDelegation(slotCtx, acct)
 	}
+}
+
+func commitVoteStakeCacheUpdates(slotCtx *sealevel.SlotCtx) bool {
+	if slotCtx == nil || slotCtx.AcctMapsMu == nil {
+		return false
+	}
+	voteUpdates, stakePubkeys := slotCtx.TakeVoteStakeUpdates()
+	for pubkey, voteState := range voteUpdates {
+		if voteState == nil {
+			global.DeleteVoteCacheItem(pubkey)
+		} else {
+			global.PutVoteCacheItem(pubkey, voteState)
+		}
+	}
+	for pubkey := range stakePubkeys {
+		global.EnqueuePendingStakePubkey(slotCtx.Slot, pubkey)
+	}
+	if len(voteUpdates) == 0 && len(stakePubkeys) == 0 {
+		return false
+	}
+	markVoteStakeDirty(slotCtx.Slot)
+	return true
 }
 
 func recordStakeAndVoteAccounts(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx, writablePubkeySet map[solana.PublicKey]struct{}) {
@@ -608,6 +628,23 @@ func processTransactionComputeUnits(execCtx *sealevel.ExecutionCtx) uint64 {
 }
 
 func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions, arena *arena.Arena[sealevel.BorrowedAccount], shouldVerifySignatures bool) (*fees.TxFeeInfo, uint64, error) {
+	return processTransactionForReplay(slotCtx, sigverifyWg, tx, txMeta, dbgOpts, arena, nil, shouldVerifySignatures)
+}
+
+func processTransactionForReplay(
+	slotCtx *sealevel.SlotCtx,
+	sigverifyWg *sync.WaitGroup,
+	tx *solana.Transaction,
+	txMeta *rpc.TransactionMeta,
+	dbgOpts *DebugOptions,
+	arena *arena.Arena[sealevel.BorrowedAccount],
+	observation *rootedevents.TransactionObservation,
+	shouldVerifySignatures bool,
+) (feeInfo *fees.TxFeeInfo, computeUnits uint64, processingErr error) {
+	transactionFailure := ""
+	defer func() {
+		FinishRootedTransactionObservation(observation, computeUnits, processingErr, transactionFailure)
+	}()
 	if trace.IsEnabled() && slotCtx.TraceCtx != nil {
 		regionType := "ProcessTransaction"
 		if tx.IsVote() {
@@ -629,6 +666,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 
 	if slotCtx.Features.IsActive(features.StaticInstructionLimit) {
 		if len(tx.Message.Instructions) > maxInstrTraceCapacity {
+			transactionFailure = TransactionErrorSanitizeFailure.String()
 			return nil, 0, TxErrSanitizeFailure
 		}
 	}
@@ -636,6 +674,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	if shouldVerifySignatures {
 		sigverifySnapshot, err := buildSigverifySnapshot(tx, slotCtx.Slot)
 		if err != nil {
+			transactionFailure = TransactionErrorSanitizeFailure.String()
 			return nil, 0, err
 		}
 		sigverifyWg.Add(1)
@@ -659,10 +698,18 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 		LeanResult:  true,
 		// On-chain metadata and the trailing verifier are the only replay
 		// consumers of pre-balances. Ordinary production transactions skip it.
-		CapturePreBalances: txMeta != nil || captureTx,
-		RecordLogs:         debugTx,
+		CapturePreBalances:      txMeta != nil || captureTx,
+		RecordLogs:              debugTx || observation != nil,
+		RecordInnerInstructions: observation != nil,
+	}
+	if observation != nil {
+		input.LogMessagesBytesLimit = sealevel.DefaultLogMessagesBytesLimit
 	}
 	output := LoadAndExecuteTransaction(input)
+	CaptureRootedTransactionExecution(observation, output.ExecCtx)
+	if output.LoadError != nil {
+		return nil, 0, fmt.Errorf("load transaction accounts: %w", output.LoadError)
+	}
 
 	execCtx := output.ExecCtx
 	instrs := output.Instrs
@@ -692,6 +739,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 	// Handle transaction errors from the pure function
 	if output.ProcessingResult.TransactionError != nil {
 		txErr := output.ProcessingResult.TransactionError
+		transactionFailure = txErr.RootedFailure()
 		// Trailing-verifier capture (failed tx): fee + status + pre-balances.
 		// Post-balances are never compared for failed txs (mirrors the
 		// RPC-mode checks, which only compare post on success). Capture is a
@@ -718,7 +766,7 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 
 		switch txErr.ErrorType {
 		case TransactionErrorSanitizeFailure:
-			return nil, processTransactionComputeUnits(execCtx), txErr.InstructionError
+			return nil, processTransactionComputeUnits(execCtx), txErr
 
 		case TransactionErrorBlockhashNotFound:
 			return nil, processTransactionComputeUnits(execCtx), TxErrInvalidBlockhash
@@ -730,19 +778,24 @@ func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, 
 			return txFeeInfo, processTransactionComputeUnits(execCtx), err
 
 		case TransactionErrorInsufficientFundsForFee:
-			// CalculateAndDeductTxFees failed - return fee info with nil error (matches original behavior)
-			return output.FeeInfo, processTransactionComputeUnits(execCtx), nil
+			return nil, processTransactionComputeUnits(execCtx), txErr
 
 		case TransactionErrorInstructionError:
+			if !output.ExecutionStarted {
+				return nil, processTransactionComputeUnits(execCtx), txErr
+			}
 			txFeeInfo, err := handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, txErr.InstructionError, nil)
 			return txFeeInfo, processTransactionComputeUnits(execCtx), err
 
 		case TransactionErrorInsufficientFundsForRent:
+			if !output.ExecutionStarted {
+				return nil, processTransactionComputeUnits(execCtx), txErr
+			}
 			txFeeInfo, err := handleFailedTx(slotCtx, tx, instrs, computeBudgetLimits, nil, txErr.InstructionError)
 			return txFeeInfo, processTransactionComputeUnits(execCtx), err
 
 		default:
-			return nil, processTransactionComputeUnits(execCtx), txErr.InstructionError
+			return nil, processTransactionComputeUnits(execCtx), txErr
 		}
 	}
 

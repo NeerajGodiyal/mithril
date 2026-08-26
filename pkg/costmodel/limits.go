@@ -26,7 +26,7 @@ const (
 	DefaultMaxDataShredsPerSlot = 32 * 1024
 	// SIMD-0525 max_entry_bytes_per_slot at the 400ms / 32,768-shred baseline.
 	DefaultMaxEntryBytesPerSlot = 20 * 1024 * 1024
-	PacketDataSize              = 1232
+	PacketDataSize              = 4096
 	// EntryHeaderBytes is the Agave/Firedancer 48-byte entry header used for
 	// pack byte accounting and the reserved ending-tick.
 	EntryHeaderBytes = 48

@@ -123,8 +123,12 @@ func (write *UpgradeableLoaderInstrWrite) MarshalWithEncoder(encoder *bin.Encode
 		return err
 	}
 
-	err = encoder.WriteBytes(write.Bytes, true)
-	return err
+	err = encoder.WriteUint64(uint64(len(write.Bytes)), bin.LE)
+	if err != nil {
+		return err
+	}
+
+	return encoder.WriteBytes(write.Bytes, false)
 }
 
 func (deploy *UpgradeableLoaderInstrDeployWithMaxDataLen) UnmarshalWithDecoder(decoder *bin.Decoder) error {
@@ -648,6 +652,12 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64
 
 	size += 8 + uint64(len(instrData)) // data len
 	size += solana.PublicKeyLength     // program id
+	directAccountPointers := execCtx.Features.IsActive(features.DirectAccountPointersInProgramInput)
+	accountPointersPadding := uint64(0)
+	if directAccountPointers {
+		accountPointersPadding = util.AlignUp(size, bpfAlignOfU128) - size
+		size += accountPointersPadding + uint64(len(accts))*8
+	}
 
 	var serializedData []byte
 	if !execCtx.IsSimulation && execCtx.SlotCtx.SerializedParameterArena != nil {
@@ -660,6 +670,10 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64
 
 	preLens := make([]uint64, len(accts))
 	accountMetadatas := make([]serializedAcctMetadata, len(accts))
+	var accountPointers []uint64
+	if directAccountPointers {
+		accountPointers = make([]uint64, len(accts))
+	}
 	var inputRegions []sbpf.InputRegion
 	var regionStart uint64
 	var hostRegionStart uint64
@@ -674,8 +688,14 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64
 			serializedData[l] = byte(position)
 			preLens[i] = preLens[position]
 			accountMetadatas[i] = accountMetadatas[position]
+			if directAccountPointers {
+				accountPointers[i] = accountPointers[position]
+			}
 			virtualOffset += 8
 		} else { // not a duplicate
+			if directAccountPointers {
+				accountPointers[i] = sbpf.VaddrInput + vmAcctOffset
+			}
 			dataLen := uint64(len(borrowedAcct.Data()))
 			alignmentOffset := util.AlignUp(dataLen, 8) - dataLen
 			reserved := safemath.SaturatingAddU64(dataLen, MaxPermittedDataIncrease)
@@ -786,6 +806,14 @@ func serializeParametersAligned(execCtx *ExecutionCtx) ([]byte, []uint64, uint64
 	copy(serializedData[l+8:l+8+len(instrData)], instrData)
 	copy(serializedData[len(serializedData)-32:], programId[:])
 	virtualOffset += 8 + uint64(len(instrData)) + solana.PublicKeyLength
+	if directAccountPointers {
+		serializedData = append(serializedData, make([]byte, accountPointersPadding+uint64(len(accountPointers))*8)...)
+		pointerOffset := len(serializedData) - len(accountPointers)*8
+		for i, pointer := range accountPointers {
+			binary.LittleEndian.PutUint64(serializedData[pointerOffset+i*8:pointerOffset+(i+1)*8], pointer)
+		}
+		virtualOffset += accountPointersPadding + uint64(len(accountPointers))*8
+	}
 
 	if vasa {
 		appendVasaMetadataRegion(&inputRegions, regionStart, virtualOffset, hostRegionStart)
@@ -1366,6 +1394,13 @@ func addProgramToCache(execCtx *ExecutionCtx, programAddr solana.PublicKey, entr
 		return
 	}
 	execCtx.SlotCtx.AccountsDb.AddProgramToCache(programAddr, entry)
+}
+
+func removeProgramFromCache(execCtx *ExecutionCtx, programAddr solana.PublicKey) {
+	if execCtx.SlotCtx == nil || execCtx.SlotCtx.AccountsDb == nil {
+		return
+	}
+	execCtx.SlotCtx.AccountsDb.RemoveProgramFromCache(programAddr)
 }
 
 func mapVirtualAddressSpaceRunErr(execCtx *ExecutionCtx, err error, inputRegions []sbpf.InputRegion) error {
@@ -2700,7 +2735,7 @@ func UpgradeableLoaderClose(execCtx *ExecutionCtx, txCtx *TransactionCtx, instrC
 					if err != nil {
 						return err
 					}
-					execCtx.SlotCtx.AccountsDb.RemoveProgramFromCache(closeKey)
+					removeProgramFromCache(execCtx, closeKey)
 				}
 
 			default:

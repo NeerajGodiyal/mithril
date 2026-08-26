@@ -1,12 +1,17 @@
 package blockprod
 
 import (
+	"context"
+	"encoding/binary"
+	"errors"
 	"sync"
 
+	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/costmodel"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
+	"github.com/Overclock-Validator/mithril/pkg/rootedevents"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/turbine"
 	"github.com/gagliardetto/solana-go"
@@ -34,10 +39,14 @@ type WorkingBank struct {
 	entries   *EntryBuilder
 	sink      BatchSink
 	forgedTxs []*solana.Transaction
-	txFees    fees.TxFeeInfoAccumulator
-	numSigs   uint64
-	entryHash solana.Hash
-	accepting bool
+	// rootedEventObservations stays index-aligned with forgedTxs when capture is
+	// enabled. Rejected transactions enter neither slice.
+	rootedEventObservations []rootedevents.TransactionObservation
+	captureRootedEvents     bool
+	txFees                  fees.TxFeeInfoAccumulator
+	numSigs                 uint64
+	entryHash               solana.Hash
+	accepting               bool
 	// ancestorStatuses is the immutable transaction-status lineage pinned when
 	// this bank's replay parent was selected.
 	ancestorStatuses *replay.TransactionStatusView
@@ -54,6 +63,7 @@ type BankConfig struct {
 	EntryHash           solana.Hash
 	Sink                BatchSink
 	TransactionStatuses *replay.TransactionStatusView
+	CaptureRootedEvents bool
 }
 
 func NewWorkingBank(cfg BankConfig) *WorkingBank {
@@ -72,16 +82,17 @@ func NewWorkingBank(cfg BankConfig) *WorkingBank {
 		sink = NopBatchSink{}
 	}
 	return &WorkingBank{
-		slotCtx:          cfg.SlotCtx,
-		slot:             cfg.Slot,
-		leader:           cfg.Leader,
-		costs:            costmodel.NewCostTracker(limits),
-		entries:          NewEntryBuilder(limits, cfg.EntryHash),
-		sink:             sink,
-		entryHash:        cfg.EntryHash,
-		accepting:        true,
-		ancestorStatuses: cfg.TransactionStatuses,
-		seenMessages:     make(map[[32]byte]struct{}),
+		slotCtx:             cfg.SlotCtx,
+		slot:                cfg.Slot,
+		leader:              cfg.Leader,
+		costs:               costmodel.NewCostTracker(limits),
+		entries:             NewEntryBuilder(limits, cfg.EntryHash),
+		sink:                sink,
+		entryHash:           cfg.EntryHash,
+		accepting:           true,
+		ancestorStatuses:    cfg.TransactionStatuses,
+		seenMessages:        make(map[[32]byte]struct{}),
+		captureRootedEvents: cfg.CaptureRootedEvents,
 	}
 }
 
@@ -115,6 +126,12 @@ func (b *WorkingBank) ForgedTransactions() []*solana.Transaction {
 	out := make([]*solana.Transaction, len(b.forgedTxs))
 	copy(out, b.forgedTxs)
 	return out
+}
+
+func (b *WorkingBank) RootedEventObservations() ([]rootedevents.TransactionObservation, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return rootedevents.CloneTransactionObservations(b.rootedEventObservations), b.captureRootedEvents
 }
 
 func (b *WorkingBank) NumSignatures() uint64 {
@@ -173,6 +190,14 @@ func (b *WorkingBank) Forge(wire []byte) (ForgeResult, costmodel.ExceedReason) {
 	return b.ForgeTransaction(tx, len(wire))
 }
 
+func (b *WorkingBank) validateAccountReadLocked() bool {
+	if err := b.slotCtx.ValidateAccountRead(); err != nil {
+		b.accepting = false
+		return false
+	}
+	return true
+}
+
 // ForgeTransaction executes and commits a parsed transaction.
 func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (ForgeResult, costmodel.ExceedReason) {
 	if tx == nil {
@@ -183,6 +208,36 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 	if err != nil {
 		b.RebateSchedule(wireSize)
 		return ForgeDroppedParse, costmodel.ExceedNone
+	}
+	executionTx := tx
+	if tx.Message.IsVersioned() && !tx.Message.IsResolved() && tx.Message.AddressTableLookups.NumLookups() != 0 {
+		wire, marshalErr := tx.MarshalBinary()
+		if marshalErr != nil {
+			b.RebateSchedule(wireSize)
+			return ForgeDroppedParse, costmodel.ExceedNone
+		}
+		executionTx, err = solana.TransactionFromBytes(wire)
+		if err != nil {
+			b.RebateSchedule(wireSize)
+			return ForgeDroppedParse, costmodel.ExceedNone
+		}
+		if err = replay.ResolveAddrTableLookupsForTxInBank(context.Background(), executionTx, b.slotCtx); err != nil {
+			b.RebateSchedule(wireSize)
+			if _, protocolFailure := replay.AddressLookupTableTransactionError(err); protocolFailure {
+				return ForgeDroppedExecution, costmodel.ExceedNone
+			}
+			b.mu.Lock()
+			b.accepting = false
+			b.mu.Unlock()
+			return ForgeDroppedNoLeader, costmodel.ExceedNone
+		}
+		if b.slotCtx.ValidateAccountRead() != nil {
+			b.RebateSchedule(wireSize)
+			b.mu.Lock()
+			b.accepting = false
+			b.mu.Unlock()
+			return ForgeDroppedNoLeader, costmodel.ExceedNone
+		}
 	}
 	ancestorAlreadyProcessed := false
 	var ancestorStatusErr error
@@ -201,7 +256,7 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 			f := features.NewFeaturesDefault()
 			feats = f
 		}
-		cost, err = costmodel.EstimateTransactionCost(tx, feats)
+		cost, err = costmodel.EstimateTransactionCost(executionTx, feats)
 		if err != nil {
 			b.RebateSchedule(wireSize)
 			return ForgeDroppedParse, costmodel.ExceedNone
@@ -238,20 +293,80 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 	if reason := b.reserveEntryBytesLocked(wireSize); reason != costmodel.ExceedNone {
 		return ForgeDroppedCost, reason
 	}
-	if err := fees.PayerCanFund(b.slotCtx, tx); err != nil {
+	if !b.validateAccountReadLocked() {
+		return ForgeDroppedNoLeader, costmodel.ExceedNone
+	}
+	if err := fees.PayerCanFund(b.slotCtx, executionTx); err != nil {
+		if errors.Is(err, fees.ErrFeePayerSource) {
+			b.accepting = false
+			return ForgeDroppedNoLeader, costmodel.ExceedNone
+		}
+		if !b.validateAccountReadLocked() {
+			return ForgeDroppedNoLeader, costmodel.ExceedNone
+		}
 		return ForgeDroppedExecution, costmodel.ExceedNone
+	}
+	var observation rootedevents.TransactionObservation
+	if b.captureRootedEvents {
+		observation, err = replay.PrepareRootedTransactionObservation(tx, uint32(len(b.forgedTxs)))
+		if err != nil {
+			return ForgeDroppedParse, costmodel.ExceedNone
+		}
 	}
 
-	output := replay.LoadAndExecuteTransaction(replay.LoadAndExecuteTransactionInput{
-		SlotCtx:     b.slotCtx,
-		Transaction: tx,
-		LeanResult:  true,
-	})
-	if output.ProcessingResult.TransactionError != nil {
+	input := replay.LoadAndExecuteTransactionInput{
+		SlotCtx:                 b.slotCtx,
+		Transaction:             executionTx,
+		LeanResult:              true,
+		CaptureRollbackAccounts: true,
+		RecordLogs:              b.captureRootedEvents,
+		RecordInnerInstructions: b.captureRootedEvents,
+	}
+	if b.captureRootedEvents {
+		input.LogMessagesBytesLimit = sealevel.DefaultLogMessagesBytesLimit
+	}
+	output := replay.LoadAndExecuteTransaction(input)
+	if !b.validateAccountReadLocked() {
+		return ForgeDroppedNoLeader, costmodel.ExceedNone
+	}
+	if output.LoadError != nil {
+		b.accepting = false
+		return ForgeDroppedNoLeader, costmodel.ExceedNone
+	}
+	if b.captureRootedEvents {
+		replay.CaptureRootedTransactionExecution(&observation, output.ExecCtx)
+	}
+	transactionFailure := ""
+	if txErr := output.ProcessingResult.TransactionError; txErr != nil {
+		switch txErr.ErrorType {
+		case replay.TransactionErrorInstructionError, replay.TransactionErrorInsufficientFundsForRent:
+			if !output.ExecutionStarted {
+				return ForgeDroppedExecution, costmodel.ExceedNone
+			}
+			if err := replay.ApplyFailedTransaction(b.slotCtx, output); err != nil {
+				b.accepting = false
+				return ForgeDroppedNoLeader, costmodel.ExceedNone
+			}
+			transactionFailure = txErr.RootedFailure()
+		case replay.TransactionErrorMaxLoadedAccountsDataSizeExceeded,
+			replay.TransactionErrorInvalidProgramForExecution,
+			replay.TransactionErrorProgramAccountNotFound:
+			if !output.FeesOnly {
+				return ForgeDroppedExecution, costmodel.ExceedNone
+			}
+			if err := replay.ApplyFailedTransaction(b.slotCtx, output); err != nil {
+				b.accepting = false
+				return ForgeDroppedNoLeader, costmodel.ExceedNone
+			}
+			transactionFailure = txErr.RootedFailure()
+		default:
+			return ForgeDroppedExecution, costmodel.ExceedNone
+		}
+	} else if err := replay.ApplySuccessfulTransaction(b.slotCtx, output); err != nil {
 		return ForgeDroppedExecution, costmodel.ExceedNone
 	}
-	if err := replay.ApplySuccessfulTransaction(b.slotCtx, output); err != nil {
-		return ForgeDroppedExecution, costmodel.ExceedNone
+	if !b.validateAccountReadLocked() {
+		return ForgeDroppedNoLeader, costmodel.ExceedNone
 	}
 	if b.seenMessages == nil {
 		b.seenMessages = make(map[[32]byte]struct{})
@@ -261,6 +376,14 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 		b.txFees.Add(output.FeeInfo)
 	}
 	b.forgedTxs = append(b.forgedTxs, tx)
+	if b.captureRootedEvents {
+		execCU := uint64(0)
+		if output.ExecCtx != nil {
+			execCU = output.ExecCtx.ComputeMeter.Used()
+		}
+		replay.FinishRootedTransactionObservation(&observation, execCU, nil, transactionFailure)
+		b.rootedEventObservations = append(b.rootedEventObservations, observation)
+	}
 	b.numSigs += uint64(tx.Message.Header.NumRequiredSignatures)
 
 	b.costs.Record(cost)
@@ -277,20 +400,10 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 func actualExecutionUsage(output replay.LoadAndExecuteTransactionOutput) (execCU, loadedCost uint64) {
 	execCtx := output.ExecCtx
 	if execCtx == nil {
-		return 0, 0
+		return 0, costmodel.LoadedAccountsDataSizeCost(output.LoadedAccountsDataSize)
 	}
 	execCU = execCtx.ComputeMeter.Used()
-	if execCtx.TransactionContext == nil {
-		return execCU, 0
-	}
-	var loadedBytes uint32
-	for _, acct := range execCtx.TransactionContext.Accounts.Accounts {
-		if acct == nil || acct.IsDummy {
-			continue
-		}
-		loadedBytes += uint32(len(acct.Data))
-	}
-	return execCU, costmodel.LoadedAccountsDataSizeCost(loadedBytes)
+	return execCU, costmodel.LoadedAccountsDataSizeCost(output.LoadedAccountsDataSize)
 }
 
 // BufferedDropReason classifies why a buffered transaction should be discarded.
@@ -304,8 +417,27 @@ const (
 
 // ClassifyBuffered reports whether a buffered transaction is expired or already
 // processed relative to this bank.
-func (b *WorkingBank) ClassifyBuffered(blockhash solana.Hash, messageHash [32]byte) BufferedDropReason {
-	if rbh := sealevel.SysvarCache.RecentBlockHashes.Sysvar; rbh == nil || !rbh.IsBlockhashAgeValid(blockhash) {
+func potentialDurableNonce(tx *solana.Transaction) bool {
+	if tx == nil || len(tx.Message.Instructions) == 0 {
+		return false
+	}
+	instruction := tx.Message.Instructions[0]
+	programID, err := tx.ResolveProgramIDIndex(instruction.ProgramIDIndex)
+	return err == nil && programID == addresses.SystemProgramAddr && len(instruction.Data) >= 4 &&
+		binary.LittleEndian.Uint32(instruction.Data[:4]) == sealevel.SystemProgramInstrTypeAdvanceNonceAccount
+}
+
+func (b *WorkingBank) ClassifyBuffered(tx *solana.Transaction, messageHash [32]byte) BufferedDropReason {
+	if tx == nil {
+		return BufferedExpired
+	}
+	blockhash := tx.Message.RecentBlockhash
+	bankSysvars := b.slotCtx.BankSysvars()
+	if bankSysvars == nil {
+		return BufferedExpired
+	}
+	rbh, ok := bankSysvars.RecentBlockhashes()
+	if !ok || (!rbh.IsBlockhashAgeValid(blockhash) && blockhash != b.slotCtx.LatestEvictedBlockhash && !potentialDurableNonce(tx)) {
 		return BufferedExpired
 	}
 	if b.ancestorStatuses != nil {

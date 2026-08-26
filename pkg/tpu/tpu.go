@@ -1,25 +1,12 @@
 package tpu
 
 import (
-	"errors"
-
 	"github.com/Overclock-Validator/mithril/pkg/tpu/sigverify"
-	"github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 )
 
 func ParseTx(p []byte) (tx *solana.Transaction, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = errors.New("ParseTx panic")
-		}
-	}()
-
-	tx, err = solana.TransactionFromDecoder(bin.NewBinDecoder(p))
-	if err != nil {
-		return nil, err
-	}
-	return
+	return sigverify.ParseTx(p)
 }
 
 // VerifyPacket parses and signature-verifies one TPU wire packet.
@@ -30,10 +17,7 @@ func VerifyPacket(data []byte) bool {
 
 // VerifyTxSig reports whether every required signature on tx is valid.
 //
-// It delegates rather than reimplementing. The hand-rolled version this
-// replaces marshalled the message itself and so omitted the version-byte
-// fixup that txverify.MessageBytes applies, which meant a correctly signed
-// versioned transaction never verified here.
+// It delegates rather than maintaining a second parser and verifier here.
 func VerifyTxSig(tx *solana.Transaction) (ok bool) {
 	return sigverify.VerifyTransaction(tx)
 }

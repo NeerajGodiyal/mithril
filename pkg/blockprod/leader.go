@@ -86,19 +86,20 @@ type RewardCertBuilder interface {
 }
 
 type LeaderLoop struct {
-	controller       *Controller
-	identity         solana.PrivateKey
-	accountsDb       *accountsdb.AccountsDb
-	broadcaster      turbine.PacketBroadcaster
-	shredVersion     uint16
-	userAgent        []byte
-	rewardCerts      RewardCertBuilder
-	epochSchedule    *sealevel.SysvarEpochSchedule
-	alpenglowClock   bool
-	parentContext    func(uint64) ParentContext
-	productionParent func(uint64) alpenglow.BlockProductionParent
-	onBlock          func(*b.Block)
-	commitLeaderSlot func(replay.CommitLeaderInput) (*sealevel.SlotCtx, error)
+	controller          *Controller
+	identity            solana.PrivateKey
+	accountsDb          *accountsdb.AccountsDb
+	broadcaster         turbine.PacketBroadcaster
+	shredVersion        uint16
+	userAgent           []byte
+	rewardCerts         RewardCertBuilder
+	epochSchedule       *sealevel.SysvarEpochSchedule
+	alpenglowClock      bool
+	captureRootedEvents bool
+	parentContext       func(uint64) ParentContext
+	productionParent    func(uint64) alpenglow.BlockProductionParent
+	onBlock             func(*b.Block)
+	commitLeaderSlot    func(replay.CommitLeaderInput) (*replay.LeaderCommitResult, error)
 
 	currentSlot   func() uint64
 	leaderForSlot func(uint64) (solana.PublicKey, bool)
@@ -135,19 +136,20 @@ type leaderProductionWindow struct {
 }
 
 type LeaderLoopConfig struct {
-	Controller       *Controller
-	Identity         solana.PrivateKey
-	AccountsDb       *accountsdb.AccountsDb
-	Broadcaster      turbine.PacketBroadcaster
-	ShredVersion     uint16
-	UserAgent        []byte
-	EpochSchedule    *sealevel.SysvarEpochSchedule
-	AlpenglowClock   bool
-	ParentContext    func(uint64) ParentContext
-	ProductionParent func(slot uint64) alpenglow.BlockProductionParent
-	OnBlock          func(*b.Block)
-	CurrentSlot      func() uint64
-	LeaderForSlot    func(uint64) (solana.PublicKey, bool)
+	Controller          *Controller
+	Identity            solana.PrivateKey
+	AccountsDb          *accountsdb.AccountsDb
+	Broadcaster         turbine.PacketBroadcaster
+	ShredVersion        uint16
+	UserAgent           []byte
+	EpochSchedule       *sealevel.SysvarEpochSchedule
+	AlpenglowClock      bool
+	CaptureRootedEvents bool
+	ParentContext       func(uint64) ParentContext
+	ProductionParent    func(slot uint64) alpenglow.BlockProductionParent
+	OnBlock             func(*b.Block)
+	CurrentSlot         func() uint64
+	LeaderForSlot       func(uint64) (solana.PublicKey, bool)
 	// ParentBlockID is retained for source compatibility and ignored. Parent
 	// identity is supplied atomically by ParentContext.
 	ParentBlockID func(parentSlot uint64) (solana.Hash, bool)
@@ -179,6 +181,7 @@ func NewLeaderLoop(cfg LeaderLoopConfig) *LeaderLoop {
 		userAgent:           cfg.UserAgent,
 		epochSchedule:       cfg.EpochSchedule,
 		alpenglowClock:      cfg.AlpenglowClock,
+		captureRootedEvents: cfg.CaptureRootedEvents,
 		parentContext:       cfg.ParentContext,
 		productionParent:    cfg.ProductionParent,
 		onBlock:             cfg.OnBlock,
@@ -1003,7 +1006,7 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 	if l.commitLeaderSlot != nil {
 		commitLeaderSlot = l.commitLeaderSlot
 	}
-	if _, err := commitLeaderSlot(replay.CommitLeaderInput{
+	commitResult, err := commitLeaderSlot(replay.CommitLeaderInput{
 		AcctsDb:                 l.accountsDb,
 		SlotCtx:                 l.activeBank.SlotCtx(),
 		Block:                   producedBlock,
@@ -1012,8 +1015,19 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 		AlpenglowShredVersion:   l.shredVersion,
 		FooterTimestamp:         footerTimestamp,
 		FooterProducerTimeNanos: producerTimeNanos,
-	}); err != nil {
+	})
+	if err != nil {
 		l.failProductionWindowLocked(slot, leaderReasonFreezeFailed, err.Error())
+		l.abortActiveSlotLocked()
+		return
+	}
+	if commitResult == nil || commitResult.SlotCtx == nil {
+		l.failProductionWindowLocked(slot, leaderReasonFreezeFailed, "leader commit returned no slot context")
+		l.abortActiveSlotLocked()
+		return
+	}
+	if err := commitResult.SlotCtx.ValidateAccountRead(); err != nil {
+		l.failProductionWindowLocked(slot, leaderReasonFreezeFailed, "leader parent account bank changed during finalization")
 		l.abortActiveSlotLocked()
 		return
 	}
@@ -1023,7 +1037,7 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 		l.abortActiveSlotLocked()
 		return
 	}
-	footerBankhash := solana.HashFromBytes(l.activeBank.SlotCtx().FinalBankhash)
+	footerBankhash := solana.HashFromBytes(commitResult.SlotCtx.FinalBankhash)
 	if err := l.activeSess.BroadcastFooter(footerBankhash, producerTimeNanos, footerRewards.Skip, footerRewards.Notar); err != nil {
 		l.failProductionWindowLocked(slot, leaderReasonFooterBroadcastFailed, err.Error())
 		l.abortActiveSlotLocked()
@@ -1046,14 +1060,19 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 		blockID := l.activeSess.BlockID(parentSlot, l.activeParentID)
 		producedBlock.AlpenglowBlockID = blockID
 		producedBlock.HasAlpenglowBlockID = true
-		global.SetAlpenglowBlockID(slot, blockID)
 	}
 	if chained := l.activeSess.ChainedMerkleRoot(); chained != (solana.Hash{}) {
 		producedBlock.AlpenglowLastChainedRoot = chained
 		producedBlock.HasAlpenglowLastChainedRoot = true
-		global.SetAlpenglowChainedMerkleRoot(slot, chained)
 	}
-	replay.RegisterLocalLeaderCommit(l.activeBank.SlotCtx())
+	observations, observationsCaptured := l.activeBank.RootedEventObservations()
+	replay.RegisterLocalLeaderCommitData(
+		commitResult.SlotCtx,
+		commitResult.ModifiedAccounts,
+		true,
+		observations,
+		observationsCaptured,
+	)
 	if l.onBlock != nil {
 		handoffStartedAt := l.now()
 		l.onBlock(producedBlock)
@@ -1214,6 +1233,7 @@ func (l *LeaderLoop) startSlotLocked(slot uint64) error {
 		EntryHash:           startEntryHash,
 		Sink:                sink,
 		TransactionStatuses: parentCtx.TransactionStatuses,
+		CaptureRootedEvents: l.captureRootedEvents,
 	})
 	if slot > 0 && !sameReplayParentSnapshot(parentCtx, l.parentContext(slot)) {
 		bank.Close()

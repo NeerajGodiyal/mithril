@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -28,6 +29,14 @@ type CommitLeaderInput struct {
 	AlpenglowShredVersion   uint16
 	FooterTimestamp         int64
 	FooterProducerTimeNanos uint64
+}
+
+// LeaderCommitResult owns the exact account delta used to compute the local
+// leader bank hash. Replay must adopt this delta rather than reconstructing it
+// from SlotCtx maps, which omit eager-rent-only rewrites.
+type LeaderCommitResult struct {
+	SlotCtx          *sealevel.SlotCtx
+	ModifiedAccounts []*accounts.Account
 }
 
 // PrepareLeaderSlotSysvars derives the child bank's dynamic sysvars from the
@@ -93,11 +102,14 @@ func PrepareLeaderSlotSysvars(slotCtx *sealevel.SlotCtx, block *b.Block, alpengl
 // CommitLeaderSlot freezes a forged bank and computes the footer bank hash. It
 // does not write AccountsDB, update global replay progress, or bypass forkchoice.
 // Replay later adopts the returned SlotCtx instead of running ProcessBlock.
-func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
+func CommitLeaderSlot(in CommitLeaderInput) (*LeaderCommitResult, error) {
 	if in.AcctsDb == nil || in.SlotCtx == nil || in.Block == nil {
 		return nil, fmt.Errorf("missing leader finalization input")
 	}
 	slotCtx, block := in.SlotCtx, in.Block
+	if err := slotCtx.ValidateAccountRead(); err != nil {
+		return nil, fmt.Errorf("leader parent account bank is unavailable: %w", err)
+	}
 	bankSysvars := slotCtx.BankSysvars()
 	if bankSysvars == nil {
 		return nil, fmt.Errorf("leader slot %d has no bank sysvar snapshot", slotCtx.Slot)
@@ -110,6 +122,7 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 	block.FooterProducerTimeNanos = in.FooterProducerTimeNanos
 	block.UnixTimestamp = in.FooterTimestamp
 	slotCtx.Blockhash = block.Blockhash
+	slotCtx.BlockHeight = block.BlockHeight
 	slotCtx.Epoch = block.Epoch
 	slotCtx.FeeRateGovernor = block.FeeRateGovernor
 	slotCtx.NumSignatures = block.NumSignatures
@@ -161,10 +174,16 @@ func CommitLeaderSlot(in CommitLeaderInput) (*sealevel.SlotCtx, error) {
 	if err := ensureParentAccountsForModified(slotCtx, modified); err != nil {
 		return nil, err
 	}
+	if err := slotCtx.ValidateAccountRead(); err != nil {
+		return nil, fmt.Errorf("leader parent account bank changed during finalization: %w", err)
+	}
 	slotCtx.FinalBankhash = bankhash.CalculateBankHash(slotCtx, writable, modified, block.ParentBankhash, block.NumSignatures, block.Blockhash)
 	copy(block.ExpectedBankhash[:], slotCtx.FinalBankhash)
 	block.HasExpectedBankhash = true
-	return slotCtx, nil
+	return &LeaderCommitResult{
+		SlotCtx:          slotCtx,
+		ModifiedAccounts: cloneAccountSlice(modified),
+	}, nil
 }
 
 func finishLeaderSysvars(slotCtx *sealevel.SlotCtx, block *b.Block) error {
@@ -191,8 +210,10 @@ func ensureParentAccountsForModified(slotCtx *sealevel.SlotCtx, modified []*acco
 			continue
 		}
 		acct, err := slotCtx.GetAccountFromAccountsDb(key)
-		if err != nil {
+		if errors.Is(err, accountsdb.ErrNoAccount) {
 			acct = &accounts.Account{Key: key}
+		} else if err != nil {
+			return fmt.Errorf("read leader parent account %s: %w", key, err)
 		}
 		if err := slotCtx.ParentAccts.SetAccountWithoutLock(key, acct.Clone()); err != nil {
 			return err

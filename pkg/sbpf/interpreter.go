@@ -69,6 +69,13 @@ var (
 // The caller must create a new interpreter object for every new execution.
 // In other words, Run may only be called once per interpreter.
 func NewInterpreter(p *Program, opts *VMOpts) *Interpreter {
+	if opts.ComputeMeter == nil {
+		meter := cu.NewComputeMeterDefault()
+		if opts.MaxCU > 0 {
+			meter = cu.NewComputeMeter(uint64(opts.MaxCU))
+		}
+		opts.ComputeMeter = &meter
+	}
 	var heap []byte
 	if UsePool {
 		heap = heapPool.Get().([]byte)
@@ -1318,7 +1325,7 @@ func (ip *Interpreter) TranslateInput(addr uint64, size uint64) ([]byte, error) 
 	return ip.input[offset : offset+size], nil
 }
 
-func (ip *Interpreter) SetInputRegionData(addr uint64, data []byte, length uint64, writable bool) bool {
+func (ip *Interpreter) SetInputRegionData(addr uint64, data []byte, length uint64, writable bool, onWrite func(*InputRegion, uint64) error) bool {
 	if addr < VaddrInput || len(ip.inputRegions) == 0 {
 		return false
 	}
@@ -1335,11 +1342,12 @@ func (ip *Interpreter) SetInputRegionData(addr uint64, data []byte, length uint6
 	}
 	region.RegionSize = length
 	region.Writable = writable
+	region.OnWrite = onWrite
 	return true
 }
 
 func (ip *Interpreter) SetInputRegionLength(addr uint64, length uint64, writable bool) bool {
-	return ip.SetInputRegionData(addr, nil, length, writable)
+	return ip.SetInputRegionData(addr, nil, length, writable, nil)
 }
 
 func (ip *Interpreter) Translate(addr uint64, size uint64, write bool) ([]byte, error) {

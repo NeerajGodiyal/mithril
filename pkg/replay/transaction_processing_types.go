@@ -2,6 +2,7 @@ package replay
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
@@ -14,6 +15,18 @@ import (
 // This structure contains the complete result of transaction processing, including whether
 // the transaction was successfully processed or encountered an error.
 type LoadAndExecuteTransactionOutput struct {
+	// LoadError is an internal account-source failure, not a Solana transaction
+	// result. Callers must fail closed instead of publishing AccountNotFound.
+	LoadError error
+	// FeesOnly means loading stopped after the fee payer was validated and
+	// charged. PostAccountSnapshots is the only state that may be committed.
+	FeesOnly bool
+	// ExecutionStarted distinguishes instruction/rent failures from fee or
+	// loader failures that happen after an ExecCtx has been constructed.
+	ExecutionStarted bool
+	// LoadedAccountsDataSize is the exact protocol accumulator produced by
+	// the account loader, including feature-gated base and lookup-table costs.
+	LoadedAccountsDataSize uint32
 	// Result of processing the transaction. Rich mode contains either a
 	// ProcessedTransaction or TransactionError; lean success leaves both nil.
 	ProcessingResult TransactionProcessingResult
@@ -34,6 +47,13 @@ type LoadAndExecuteTransactionOutput struct {
 	// uses these to decode pre-execution token balances; block-replay
 	// callers leave it nil.
 	PreAccountSnapshots []*accounts.Account
+	// PostAccountSnapshots is the committed failure view: fee payer after
+	// fee deduction plus an advanced durable nonce, with instruction writes
+	// rolled back. It is populated only when requested.
+	PostAccountSnapshots []*accounts.Account
+	// ReturnData retains execution return data even when a later instruction
+	// or rent check fails.
+	ReturnData *TransactionReturnData
 	// FeeInfo contains the calculated fee info. Set whenever fees were calculated.
 	FeeInfo *fees.TxFeeInfo
 	// Instrs contains the parsed instructions from the transaction.
@@ -61,6 +81,20 @@ type TransactionError struct {
 	InstructionError error
 	// AccountIndex is set for errors that reference a specific account
 	AccountIndex *uint8
+}
+
+func (e *TransactionError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.RootedFailure()
+}
+
+func (e *TransactionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.InstructionError
 }
 
 // TransactionErrorType represents the type of transaction error
@@ -413,10 +447,11 @@ func agaveInstrErrName(err error) interface{} {
 	if err == nil {
 		return nil
 	}
-	// TODO: propagate the program-defined u32 through InstructionError
-	// rather than emitting 0 as a placeholder.
 	if err == sealevel.InstrErrCustom {
 		return map[string]uint32{"Custom": 0}
+	}
+	if sealevel.IsCustomErr(err) {
+		return map[string]uint32{"Custom": uint32(sealevel.TranslateErrToErrCode(err))}
 	}
 	if err == sealevel.InstrErrBorshIoError {
 		return map[string]string{"BorshIoError": err.Error()}
@@ -429,6 +464,40 @@ func agaveInstrErrName(err error) interface{} {
 		return strings.TrimPrefix(name, "TxErr")
 	}
 	return name
+}
+
+// RootedFailure renders the stable, compact failure carried by rooted-event
+// records. It preserves tuple payloads that ErrorType.String alone loses.
+func (e *TransactionError) RootedFailure() string {
+	if e == nil {
+		return ""
+	}
+	switch e.ErrorType {
+	case TransactionErrorInstructionError:
+		idx := uint8(0)
+		if e.InstructionIndex != nil {
+			idx = *e.InstructionIndex
+		}
+		inner := agaveInstrErrName(e.InstructionError)
+		if custom, ok := inner.(map[string]uint32); ok {
+			return fmt.Sprintf("InstructionError(%d, Custom(%d))", idx, custom["Custom"])
+		}
+		return fmt.Sprintf("InstructionError(%d, %v)", idx, inner)
+	case TransactionErrorInsufficientFundsForRent:
+		idx := uint8(0)
+		if e.AccountIndex != nil {
+			idx = *e.AccountIndex
+		}
+		return fmt.Sprintf("InsufficientFundsForRent(account_index=%d)", idx)
+	case TransactionErrorDuplicateInstruction:
+		idx := uint8(0)
+		if e.InstructionIndex != nil {
+			idx = *e.InstructionIndex
+		}
+		return fmt.Sprintf("DuplicateInstruction(%d)", idx)
+	default:
+		return e.ErrorType.String()
+	}
 }
 
 // MarshalJSON renders TransactionError in Agave's wire format: bare string

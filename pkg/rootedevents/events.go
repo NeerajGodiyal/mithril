@@ -17,13 +17,12 @@ import (
 
 const (
 	// SchemaVersion is the current rooted-event wire schema.
-	SchemaVersion uint32 = 2
+	SchemaVersion uint32 = 3
 
-	// These limits mirror the runtime values that can reach schema v2. Its
-	// message representation is legacy/v0; adding v1 requires a schema and
-	// parser update rather than silently accepting larger messages here.
+	// These limits mirror the runtime values that can reach schema v3. Message
+	// bytes are opaque canonical Solana messages, including v1.
 	maxAccountDataBytes          = 10 << 20
-	maxTransactionMessageBytes   = 1232
+	maxTransactionMessageBytes   = solana.MaxTransactionSizeV1
 	maxTransactionAccountKeys    = 256
 	maxTransactionLogBytes       = 10_064
 	maxInnerInstructions         = 64

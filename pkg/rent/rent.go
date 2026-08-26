@@ -95,7 +95,7 @@ func checkRentStateTransitionAllowed(preRentState *RentStateInfo, postRentState 
 	return nil
 }
 
-func VerifyRentStateChanges(preStates []*RentStateInfo, postStates []*RentStateInfo, txCtx *sealevel.TransactionCtx) error {
+func VerifyRentStateChanges(preStates []*RentStateInfo, postStates []*RentStateInfo, txCtx *sealevel.TransactionCtx) (uint8, error) {
 	if len(preStates) != len(postStates) {
 		panic("programming error - pre tx states and post tx states must be same length")
 	}
@@ -103,11 +103,11 @@ func VerifyRentStateChanges(preStates []*RentStateInfo, postStates []*RentStateI
 	for count := uint64(0); count < uint64(len(preStates)); count++ {
 		err := checkRentStateTransitionAllowed(preStates[count], postStates[count], txCtx, count)
 		if err != nil {
-			return err
+			return uint8(count), err
 		}
 	}
 
-	return nil
+	return 0, nil
 }
 
 func MaybeSetRentExemptRentEpochMax(slotCtx *sealevel.SlotCtx, rent *sealevel.SysvarRent, f *features.Features, txAccts *sealevel.TransactionAccounts) {

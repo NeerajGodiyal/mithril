@@ -681,7 +681,7 @@ func LoaderV4ProcessRetract(execCtx *ExecutionCtx) error {
 	}
 
 	if !execCtx.IsSimulation {
-		execCtx.SlotCtx.AccountsDb.RemoveProgramFromCache(program.Key())
+		removeProgramFromCache(execCtx, program.Key())
 	}
 	return nil
 }

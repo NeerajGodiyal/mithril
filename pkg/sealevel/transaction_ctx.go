@@ -17,12 +17,13 @@ type TxReturnData struct {
 }
 
 type TransactionAccounts struct {
-	Accounts          []*accounts.Account
-	Shared            []bool
-	Locked            []bool
-	Touched           []bool
-	AcctMetas         []*AccountMeta
-	OnFirstWriteClone func(*accounts.Account)
+	Accounts               []*accounts.Account
+	Shared                 []bool
+	Locked                 []bool
+	Touched                []bool
+	AcctMetas              []*AccountMeta
+	LoadedAccountsDataSize uint32
+	OnFirstWriteClone      func(*accounts.Account)
 }
 
 type TransactionCtx struct {
@@ -84,6 +85,7 @@ func NewTransactionCtx(txAccts TransactionAccounts, instrStackCapacity uint64, i
 	txCtx.InstructionStack = make([]uint64, 0, instrStackCapacity)
 	txCtx.InstructionTrace = append(txCtx.InstructionTrace, InstructionCtx{})
 	txCtx.HeapSize = 32 * 1024
+	txCtx.ComputeBudgetLimits = &ComputeBudgetLimits{UpdatedHeapBytes: MinHeapFrameBytes}
 
 	txCtx.AccountKeys = make([]solana.PublicKey, 0, len(txAccts.Accounts))
 	for _, acct := range txAccts.Accounts {

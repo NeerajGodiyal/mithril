@@ -83,7 +83,7 @@ func lsTxMetaToTxMeta(lsMeta *proto.TransactionStatusMeta) *rpc.TransactionMeta 
 
 	for _, loadedAddr := range lsMeta.LoadedWritableAddresses {
 		convertedAddr := solana.PublicKeyFromBytes(loadedAddr)
-		meta.LoadedAddresses.ReadOnly = append(meta.LoadedAddresses.Writable, convertedAddr)
+		meta.LoadedAddresses.Writable = append(meta.LoadedAddresses.Writable, convertedAddr)
 	}
 
 	return meta
@@ -99,8 +99,8 @@ func lsTransactionToTransaction(lsTx *proto.Transaction) *solana.Transaction {
 	}
 
 	// message
-	if !lsTx.Message.Versioned {
-		tx.Message.SetVersion(1)
+	if lsTx.Message.Versioned {
+		tx.Message.SetVersion(solana.MessageVersionV0)
 	}
 
 	for _, acctKey := range lsTx.Message.AccountKeys {

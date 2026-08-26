@@ -69,24 +69,32 @@ type AccountReader interface {
 	GetAccount(slot uint64, pubkey solana.PublicKey) (*accounts.Account, error)
 }
 
+type AccountReadValidator interface {
+	ValidateAccountRead() error
+}
+
 type SlotCtx struct {
-	Accounts        accounts.Accounts
-	ParentAccts     accounts.Accounts
-	AccountsDb      *accountsdb.AccountsDb
-	UnrootedRead    AccountReader // nil in legacy mode; shadows AccountsDb reads when set
-	FeeRateGovernor *FeeRateGovernor
-	Slot            uint64
-	ParentSlot      uint64
-	Epoch           uint64
-	AcctMapsMu      *sync.Mutex // AcctMapsMu protects the next 2 maps
-	ModifiedAccts   map[solana.PublicKey]bool
-	WritableAccts   map[solana.PublicKey]bool
-	NumSignatures   uint64 // signatures processed in this bank (resets for every child bank)
-	Blockhash       [32]byte
-	LastBlockhash   [32]byte
-	SlotBank        SlotBank
-	Features        *features.Features
-	VoteTimestampMu *sync.Mutex
+	Accounts         accounts.Accounts
+	ParentAccts      accounts.Accounts
+	AccountsDb       *accountsdb.AccountsDb
+	UnrootedRead     AccountReader // nil in legacy mode; shadows AccountsDb reads when set
+	FeeRateGovernor  *FeeRateGovernor
+	Slot             uint64
+	ParentSlot       uint64
+	BlockHeight      uint64
+	TransactionCount uint64
+	Epoch            uint64
+	AcctMapsMu       *sync.Mutex // AcctMapsMu protects the next 4 maps
+	ModifiedAccts    map[solana.PublicKey]bool
+	WritableAccts    map[solana.PublicKey]bool
+	PendingVoteCache map[solana.PublicKey]*VoteStateVersions
+	PendingStakeKeys map[solana.PublicKey]struct{}
+	NumSignatures    uint64 // signatures processed in this bank (resets for every child bank)
+	Blockhash        [32]byte
+	LastBlockhash    [32]byte
+	SlotBank         SlotBank
+	Features         *features.Features
+	VoteTimestampMu  *sync.Mutex
 	// VoteTimestampsMu protects VoteTimestamps
 	VoteTimestamps            map[solana.PublicKey]BlockTimestamp
 	VoteAccts                 map[solana.PublicKey]uint64
@@ -486,12 +494,22 @@ func (slotCtx *SlotCtx) GetAccountFromAccountsDb(pubkey solana.PublicKey) (*acco
 	if slotCtx.UnrootedRead != nil {
 		return slotCtx.UnrootedRead.GetAccount(slotCtx.Slot, pubkey)
 	}
+	if slotCtx.AccountsDb == nil {
+		return nil, fmt.Errorf("account storage is unavailable at slot %d", slotCtx.Slot)
+	}
 	acct, err := slotCtx.AccountsDb.GetAccount(slotCtx.Slot, pubkey)
 	if err != nil {
 		return nil, err
 	} else {
 		return acct, nil
 	}
+}
+
+func (slotCtx *SlotCtx) ValidateAccountRead() error {
+	if validator, ok := slotCtx.UnrootedRead.(AccountReadValidator); ok {
+		return validator.ValidateAccountRead()
+	}
+	return nil
 }
 
 func (slotCtx *SlotCtx) SetAccount(pubkey solana.PublicKey, acct *accounts.Account) error {
@@ -534,4 +552,43 @@ func (slotCtx *SlotCtx) RecordWritableAccts(pubkeys []solana.PublicKey) {
 	for _, pubkey := range pubkeys {
 		slotCtx.WritableAccts[pubkey] = true
 	}
+}
+
+// RecordVoteCacheUpdate journals a vote-cache replacement (or nil deletion)
+// until the whole bank commits. Transaction workers must not mutate the
+// process-global cache because a later transaction can invalidate the bank.
+func (slotCtx *SlotCtx) RecordVoteCacheUpdate(pubkey solana.PublicKey, voteState *VoteStateVersions) {
+	slotCtx.AcctMapsMu.Lock()
+	defer slotCtx.AcctMapsMu.Unlock()
+	if slotCtx.PendingVoteCache == nil {
+		slotCtx.PendingVoteCache = make(map[solana.PublicKey]*VoteStateVersions)
+	}
+	slotCtx.PendingVoteCache[pubkey] = voteState
+}
+
+func (slotCtx *SlotCtx) HasPendingVoteCacheUpdate(pubkey solana.PublicKey) bool {
+	slotCtx.AcctMapsMu.Lock()
+	defer slotCtx.AcctMapsMu.Unlock()
+	_, ok := slotCtx.PendingVoteCache[pubkey]
+	return ok
+}
+
+func (slotCtx *SlotCtx) RecordPendingStakePubkey(pubkey solana.PublicKey) {
+	slotCtx.AcctMapsMu.Lock()
+	defer slotCtx.AcctMapsMu.Unlock()
+	if slotCtx.PendingStakeKeys == nil {
+		slotCtx.PendingStakeKeys = make(map[solana.PublicKey]struct{})
+	}
+	slotCtx.PendingStakeKeys[pubkey] = struct{}{}
+}
+
+// TakeVoteStakeUpdates transfers the completed bank's journals to its commit
+// path. Callers invoke it only after transaction workers have stopped.
+func (slotCtx *SlotCtx) TakeVoteStakeUpdates() (map[solana.PublicKey]*VoteStateVersions, map[solana.PublicKey]struct{}) {
+	slotCtx.AcctMapsMu.Lock()
+	defer slotCtx.AcctMapsMu.Unlock()
+	votes, stakes := slotCtx.PendingVoteCache, slotCtx.PendingStakeKeys
+	slotCtx.PendingVoteCache = nil
+	slotCtx.PendingStakeKeys = nil
+	return votes, stakes
 }

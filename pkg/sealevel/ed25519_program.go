@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 
+	"filippo.io/edwards25519"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sigverify"
 )
@@ -131,6 +132,9 @@ func Ed25519ProgramExecute(execCtx *ExecutionCtx) error {
 
 		if len(pubkey) != PubkeySerializedSize {
 			return PrecompileErrDataOffset
+		}
+		if _, err := new(edwards25519.Point).SetBytes(pubkey); err != nil {
+			return PrecompileErrPublicKey
 		}
 
 		// Signatures are verified one at a time on purpose. The reference

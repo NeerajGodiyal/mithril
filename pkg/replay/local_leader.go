@@ -7,6 +7,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/global"
+	"github.com/Overclock-Validator/mithril/pkg/rootedevents"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 )
@@ -14,7 +15,11 @@ import (
 // LocalLeaderCommit is the already-mutated producer bank for a slot this
 // validator forged. Replay adopts it instead of running ProcessBlock.
 type LocalLeaderCommit struct {
-	SlotCtx *sealevel.SlotCtx
+	SlotCtx                  *sealevel.SlotCtx
+	ModifiedAccounts         []*accounts.Account
+	ModifiedAccountsCaptured bool
+	TransactionObservations  []rootedevents.TransactionObservation
+	RootedEventsCaptured     bool
 }
 
 var (
@@ -24,12 +29,42 @@ var (
 
 // RegisterLocalLeaderCommit publishes a frozen producer SlotCtx for ordered adopt.
 func RegisterLocalLeaderCommit(slotCtx *sealevel.SlotCtx) {
+	RegisterLocalLeaderCommitData(slotCtx, nil, false, nil, false)
+}
+
+// RegisterLocalLeaderCommitData publishes an owned producer handoff. The
+// capture flags distinguish a deliberately empty slot from legacy callers
+// that did not supply the corresponding data.
+func RegisterLocalLeaderCommitData(
+	slotCtx *sealevel.SlotCtx,
+	modified []*accounts.Account,
+	modifiedCaptured bool,
+	observations []rootedevents.TransactionObservation,
+	rootedEventsCaptured bool,
+) {
 	if slotCtx == nil {
 		return
 	}
+	commit := LocalLeaderCommit{
+		SlotCtx:                  slotCtx,
+		ModifiedAccounts:         cloneAccountSlice(modified),
+		ModifiedAccountsCaptured: modifiedCaptured,
+		TransactionObservations:  rootedevents.CloneTransactionObservations(observations),
+		RootedEventsCaptured:     rootedEventsCaptured,
+	}
 	localLeaderMu.Lock()
-	localLeaderCommits[slotCtx.Slot] = LocalLeaderCommit{SlotCtx: slotCtx}
+	localLeaderCommits[slotCtx.Slot] = commit
 	localLeaderMu.Unlock()
+}
+
+func cloneAccountSlice(values []*accounts.Account) []*accounts.Account {
+	out := make([]*accounts.Account, len(values))
+	for i, value := range values {
+		if value != nil {
+			out[i] = value.Clone()
+		}
+	}
+	return out
 }
 
 // TakeLocalLeaderCommit removes and returns the registered commit for slot.
@@ -68,20 +103,50 @@ func adoptLocalLeaderBlock(
 		return nil, fmt.Errorf("adopt local leader block: missing producer SlotCtx for slot %d", block.Slot)
 	}
 	slotCtx := commit.SlotCtx
+	if slotCtx.Slot != block.Slot {
+		return nil, fmt.Errorf("adopt local leader block: producer slot %d does not match block slot %d", slotCtx.Slot, block.Slot)
+	}
 	if slotCtx.BankSysvars() == nil {
 		return nil, fmt.Errorf("adopt local leader block: missing bank sysvars for slot %d", block.Slot)
 	}
+	if tail != nil && !commit.ModifiedAccountsCaptured {
+		return nil, fmt.Errorf("adopt local leader block slot %d: exact finalized account delta was not captured", block.Slot)
+	}
 	modified := collectAdoptAccounts(slotCtx, block)
+	if commit.ModifiedAccountsCaptured {
+		modified = cloneAccountSlice(commit.ModifiedAccounts)
+	}
 	bankhash := append([]byte(nil), slotCtx.FinalBankhash...)
 	if tail != nil {
+		if tail.CapturesRootedEvents() {
+			if !commit.RootedEventsCaptured {
+				return nil, fmt.Errorf("adopt local leader block slot %d: rooted transaction observations were not captured", block.Slot)
+			}
+			if len(commit.TransactionObservations) != len(block.Transactions) {
+				return nil, fmt.Errorf("adopt local leader block slot %d: %d rooted transaction observations for %d transactions", block.Slot, len(commit.TransactionObservations), len(block.Transactions))
+			}
+		}
+		if err := commitRootedStatusAndEvents(
+			transactionStatuses,
+			block,
+			func() error { return transactionStatuses.CommitBlock(block) },
+			func() error {
+				return tail.RecordRootedEventSlot(block.Slot, block.ParentSlot, commit.TransactionObservations)
+			},
+		); err != nil {
+			return nil, fmt.Errorf("adopt local leader block slot %d: %w", block.Slot, err)
+		}
 		tail.Add(slotCtx.Slot, modified, bankhash)
 	}
 	if persistedHashes != nil {
 		persistedHashes.Set(block.Slot, bankhash)
 	}
-	if err := transactionStatuses.CommitBlock(block); err != nil {
-		return nil, fmt.Errorf("adopt local leader block slot %d: %w", block.Slot, err)
+	if tail == nil {
+		if err := transactionStatuses.CommitBlock(block); err != nil {
+			return nil, fmt.Errorf("adopt local leader block slot %d: %w", block.Slot, err)
+		}
 	}
+	commitVoteStakeCacheUpdates(slotCtx)
 	global.IncrTransactionCount(uint64(len(block.Transactions)))
 	return slotCtx, nil
 }
