@@ -3,6 +3,7 @@ package rpcserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/replay"
@@ -21,9 +22,7 @@ func TestGateForVerificationStateCoversEveryState(t *testing.T) {
 	}{
 		{replay.VerificationComplete, evidenceGateOpen},
 		{replay.VerificationNotApplicable, evidenceGateOpen},
-		// Behind but progressing still answers: freshness is the caller's policy,
-		// expressed with minContextSlot, not this gate's business.
-		{replay.VerificationIncomplete, evidenceGateOpen},
+		{replay.VerificationIncomplete, evidenceGateIncomplete},
 		{replay.VerificationDiverged, evidenceGateDiverged},
 		{replay.VerificationStalled, evidenceGateStalled},
 		{replay.VerificationUnavailable, evidenceGateUnavailable},
@@ -216,13 +215,10 @@ func TestHealthMethodsAnswerWhileTheGateRefusesEverythingElse(t *testing.T) {
 		t.Fatalf("watermarks: %+v", status)
 	}
 
-	health, err := server.GetHealth(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("health on a diverged node: %v", err)
-	}
-	if health.Status != string(evidenceGateDiverged) ||
-		health.VerificationState != string(replay.VerificationDiverged) {
-		t.Fatalf("health must name the reason: %+v", health)
+	_, err = server.GetHealth(context.Background(), nil)
+	var unhealthy *NodeUnhealthyError
+	if !errors.As(err, &unhealthy) || unhealthy.Reason != string(evidenceGateDiverged) {
+		t.Fatalf("health error = %v", err)
 	}
 }
 
@@ -231,7 +227,6 @@ func TestHealthMethodsAgreeWithTheGateWhenServing(t *testing.T) {
 	for _, state := range []replay.VerificationState{
 		replay.VerificationComplete,
 		replay.VerificationNotApplicable,
-		replay.VerificationIncomplete,
 	} {
 		server := &RpcServer{verificationSnapshot: snapshotReturning(state, 10, 10)}
 		status, err := server.GetVerificationStatus(context.Background(), nil)
@@ -245,14 +240,68 @@ func TestHealthMethodsAgreeWithTheGateWhenServing(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if health.Status != "ok" {
-			t.Fatalf("state %q: health = %q, want ok", state, health.Status)
+		if health != "ok" {
+			t.Fatalf("state %q: health = %q, want ok", state, health)
 		}
-		// Healthy is narrower than serving: "incomplete" serves evidence while
-		// coverage is still catching up, and the two fields must not be
-		// conflated by a caller reading either one alone.
 		if status.Healthy != state.Healthy() {
 			t.Fatalf("state %q: healthy flag disagrees with the state", state)
 		}
+	}
+}
+
+func TestGetHealthUsesTheSolanaWireShape(t *testing.T) {
+	server := &RpcServer{verificationSnapshot: snapshotReturning(replay.VerificationComplete, 10, 10)}
+	server.rpcService = newRPCService(server)
+	payload, err := server.executeRPCRequestWithID(context.Background(), rpcMethodProbe{
+		JSONRPC: "2.0", Method: "getHealth", ID: json.RawMessage(`1`), Params: json.RawMessage(`[]`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var healthy struct {
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(payload, &healthy); err != nil || healthy.Result != "ok" {
+		t.Fatalf("healthy response = %s, error = %v", payload, err)
+	}
+
+	server.verificationSnapshot = snapshotReturning(replay.VerificationDiverged, 9, 10)
+	payload, err = server.executeRPCRequestWithID(context.Background(), rpcMethodProbe{
+		JSONRPC: "2.0", Method: "getHealth", ID: json.RawMessage(`2`), Params: json.RawMessage(`[]`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unhealthy struct {
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Data    struct {
+				NumSlotsBehind *uint64 `json:"numSlotsBehind"`
+			} `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(payload, &unhealthy); err != nil {
+		t.Fatal(err)
+	}
+	if unhealthy.Error.Code != -32005 || unhealthy.Error.Message != "Node is unhealthy" ||
+		unhealthy.Error.Data.NumSlotsBehind != nil {
+		t.Fatalf("unhealthy response = %s", payload)
+	}
+}
+
+func TestIncompleteVerificationRefusesCurrentBankEvidence(t *testing.T) {
+	server := &RpcServer{verificationSnapshot: snapshotReturning(replay.VerificationIncomplete, 9, 10)}
+	status, err := server.GetVerificationStatus(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.EvidenceServed || status.Reason != string(evidenceGateIncomplete) {
+		t.Fatalf("incomplete verification reported %+v", status)
+	}
+	_, err = server.GetHealth(context.Background(), nil)
+	var unhealthy *NodeUnhealthyError
+	if !errors.As(err, &unhealthy) || unhealthy.Reason != string(evidenceGateIncomplete) {
+		t.Fatalf("incomplete health error = %v", err)
 	}
 }

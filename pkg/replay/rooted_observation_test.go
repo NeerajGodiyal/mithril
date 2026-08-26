@@ -82,6 +82,7 @@ func TestRootedTransactionObservationTypesEarlySanitizeFailure(t *testing.T) {
 		nil,
 		nil,
 		&observation,
+		nil,
 		false,
 	)
 	require.ErrorIs(t, err, TxErrSanitizeFailure)

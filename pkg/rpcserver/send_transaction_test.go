@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/gagliardetto/solana-go"
 	solanarpc "github.com/gagliardetto/solana-go/rpc"
+	"github.com/mr-tron/base58"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -113,6 +115,100 @@ func TestSendTransaction_RejectsSanitizeFailure(t *testing.T) {
 	invalidParams, ok := err.(*InvalidParamsError)
 	require.True(t, ok)
 	assert.Equal(t, "invalid transaction: Transaction failed to sanitize accounts offsets correctly", invalidParams.Message)
+}
+
+func TestDecodeSendTransactionSupportsLargeV1OnlyAsBase64(t *testing.T) {
+	wire := testV1TransactionWire(t, packetDataSize+1)
+	tx, gotWire, err := decodeSendTransaction(base64.StdEncoding.EncodeToString(wire), "base64")
+	require.NoError(t, err)
+	require.Equal(t, solana.MessageVersionV1, tx.Message.GetVersion())
+	require.Equal(t, wire, gotWire)
+
+	_, _, err = decodeSendTransaction(strings.Repeat("1", maxBase58TxSize+1), "base58")
+	require.ErrorContains(t, err, "base58 encoded solana_transaction too large")
+}
+
+func TestDecodeSendTransactionV1SizeBoundaries(t *testing.T) {
+	maxWire := testV1TransactionWire(t, v1PacketDataSize)
+	_, _, err := decodeSendTransaction(base64.StdEncoding.EncodeToString(maxWire), "base64")
+	require.NoError(t, err)
+
+	overWire := testV1TransactionWire(t, v1PacketDataSize+1)
+	_, _, err = decodeSendTransaction(base64.StdEncoding.EncodeToString(overWire), "base64")
+	require.ErrorContains(t, err, "decoded solana_transaction too large")
+
+	smallWire := testV1TransactionWire(t, 300)
+	_, _, err = decodeSendTransaction(base58.Encode(smallWire), "base58")
+	require.NoError(t, err)
+
+	legacyWire := testTransactionWire(t, packetDataSize+1, solana.MessageVersionLegacy)
+	_, _, err = decodeSendTransaction(base64.StdEncoding.EncodeToString(legacyWire), "base64")
+	require.ErrorContains(t, err, "decoded solana_transaction too large")
+}
+
+func TestDecodeSendTransactionRejectsTrailingV1Bytes(t *testing.T) {
+	wire := append(testV1TransactionWire(t, packetDataSize+1), 0)
+	_, _, err := decodeSendTransaction(base64.StdEncoding.EncodeToString(wire), "base64")
+	require.ErrorContains(t, err, "trailing bytes after transaction v1")
+}
+
+func TestSendTransactionSkipPreflightForwardsInactiveV1(t *testing.T) {
+	wire := testV1TransactionWire(t, packetDataSize+1)
+	leader := solana.PublicKey{0x41}
+	global.SetLeaderSchedule(leaderschedule.NewLeaderScheduleFromKeyedSlots(
+		map[solana.PublicKey][]uint64{leader: {0}}, 1,
+	))
+	global.SetSlot(0)
+	defer global.SetLeaderSchedule(nil)
+	defer global.SetSlot(0)
+	sent := false
+	receipts, err := txstatus.NewIndex(txstatus.Config{MaxReceipts: 8, Retention: time.Hour})
+	require.NoError(t, err)
+	rpcServer := &RpcServer{
+		slotCtx:                           &sealevel.SlotCtx{Features: features.NewFeaturesDefault()},
+		sendTransactionLeaderForwardCount: 0,
+		clusterNodesFetcher: func(context.Context) ([]*solanarpc.GetClusterNodesResult, error) {
+			return []*solanarpc.GetClusterNodesResult{{
+				Pubkey:  leader,
+				TPUQUIC: stringPtr("127.0.0.1:10401"),
+			}}, nil
+		},
+		transactionSender: func(context.Context, []byte, tpuEndpoint) error {
+			sent = true
+			return nil
+		},
+	}
+	rpcServer.SetTransactionReceipts(receipts)
+	_, err = rpcServer.SendTransaction(context.Background(), mustRawParams(t, []interface{}{
+		base64.StdEncoding.EncodeToString(wire),
+		map[string]interface{}{"encoding": "base64", "skipPreflight": true},
+	}))
+	require.NoError(t, err)
+	require.True(t, sent)
+}
+
+func TestSendTransactionRejectsMalformedV1BeforeForwarding(t *testing.T) {
+	tx, err := solana.TransactionFromBytes(testV1TransactionWire(t, 300))
+	require.NoError(t, err)
+	tx.Message.AccountKeys = append(tx.Message.AccountKeys, tx.Message.AccountKeys[0])
+	wire, err := tx.MarshalBinary()
+	require.NoError(t, err)
+	active := features.NewFeaturesDefault()
+	active.EnableFeature(features.EnableTransactionV1, 0)
+	sent := false
+	rpcServer := &RpcServer{
+		slotCtx: &sealevel.SlotCtx{Features: active},
+		transactionSender: func(context.Context, []byte, tpuEndpoint) error {
+			sent = true
+			return nil
+		},
+	}
+	_, err = rpcServer.SendTransaction(context.Background(), mustRawParams(t, []interface{}{
+		base64.StdEncoding.EncodeToString(wire),
+		map[string]interface{}{"encoding": "base64", "skipPreflight": true},
+	}))
+	require.ErrorContains(t, err, "failed to sanitize")
+	require.False(t, sent)
 }
 
 func TestSendTransaction_PreflightSignatureFailure(t *testing.T) {
@@ -427,6 +523,34 @@ func TestRefreshLeaderTPUCache_PrefersQUICEndpoints(t *testing.T) {
 	assert.Equal(t, tpuEndpoint{Addr: netip.MustParseAddrPort("127.0.0.1:9003"), Transport: tpuTransportUDP}, rpcServer.leaderTPUByIdentity[leaderC])
 }
 
+func TestResolveV1LeaderEndpointsSkipsUDPOnlyLeaders(t *testing.T) {
+	udpLeader := solana.PublicKey{0x31}
+	quicLeader := solana.PublicKey{0x32}
+	global.SetLeaderSchedule(leaderschedule.NewLeaderScheduleFromKeyedSlots(
+		map[solana.PublicKey][]uint64{udpLeader: {0}, quicLeader: {1}}, 700,
+	))
+	global.SetSlot(700)
+	defer global.SetLeaderSchedule(nil)
+	defer global.SetSlot(0)
+
+	rpcServer := &RpcServer{clusterNodesFetcher: func(context.Context) ([]*solanarpc.GetClusterNodesResult, error) {
+		return []*solanarpc.GetClusterNodesResult{
+			{Pubkey: udpLeader, TPU: stringPtr("127.0.0.1:9301")},
+			{Pubkey: quicLeader, TPUQUIC: stringPtr("127.0.0.1:10302")},
+		}, nil
+	}}
+	require.NoError(t, rpcServer.refreshLeaderTPUCache(context.Background()))
+	targets, err := rpcServer.resolveUpcomingLeaderTPUEndpointsForTransport(context.Background(), 1, true)
+	require.NoError(t, err)
+	require.Equal(t, []tpuEndpoint{{Addr: netip.MustParseAddrPort("127.0.0.1:10302"), Transport: tpuTransportQUIC}}, targets)
+
+	udpOnly := &RpcServer{clusterNodesFetcher: func(context.Context) ([]*solanarpc.GetClusterNodesResult, error) {
+		return []*solanarpc.GetClusterNodesResult{{Pubkey: udpLeader, TPU: stringPtr("127.0.0.1:9301")}}, nil
+	}}
+	_, err = udpOnly.resolveUpcomingLeaderTPUEndpointsForTransport(context.Background(), 1, true)
+	require.ErrorContains(t, err, "unable to resolve TPU addresses")
+}
+
 func mustRawParams(t *testing.T, params []interface{}) jsonrpc.RawParams {
 	t.Helper()
 	raw, err := json.Marshal(params)
@@ -450,6 +574,42 @@ func testLegacyTransaction(t *testing.T) (*solana.Transaction, []byte) {
 	return tx, wire
 }
 
+func testV1TransactionWire(t *testing.T, target int) []byte {
+	return testTransactionWire(t, target, solana.MessageVersionV1)
+}
+
+func testTransactionWire(t *testing.T, target int, version solana.MessageVersion) []byte {
+	t.Helper()
+	tx := &solana.Transaction{
+		Signatures: []solana.Signature{{}},
+		Message: solana.Message{
+			Header:       solana.MessageHeader{NumRequiredSignatures: 1, NumReadonlyUnsignedAccounts: 1},
+			AccountKeys:  []solana.PublicKey{{1}, {2}},
+			Instructions: []solana.CompiledInstruction{{ProgramIDIndex: 1, Accounts: []uint16{0}}},
+		},
+	}
+	if version != solana.MessageVersionLegacy {
+		_, err := tx.Message.SetVersion(version)
+		require.NoError(t, err)
+	}
+	for low, high := 0, target; low <= high; {
+		dataLen := low + (high-low)/2
+		tx.Message.Instructions[0].Data = make([]byte, dataLen)
+		wire, marshalErr := tx.MarshalBinary()
+		require.NoError(t, marshalErr)
+		switch {
+		case len(wire) < target:
+			low = dataLen + 1
+		case len(wire) > target:
+			high = dataLen - 1
+		default:
+			return wire
+		}
+	}
+	t.Fatalf("could not construct a version %v transaction with %d-byte wire size", version, target)
+	return nil
+}
+
 func mustListenUDP(t *testing.T) *net.UDPConn {
 	t.Helper()
 
@@ -461,7 +621,7 @@ func mustListenUDP(t *testing.T) *net.UDPConn {
 func mustReadUDP(t *testing.T, conn *net.UDPConn) []byte {
 	t.Helper()
 
-	buf := make([]byte, packetDataSize)
+	buf := make([]byte, v1PacketDataSize)
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
 	n, _, err := conn.ReadFromUDP(buf)
 	require.NoError(t, err)

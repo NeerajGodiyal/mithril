@@ -1,7 +1,6 @@
 package txstatus
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -304,6 +303,68 @@ func TestSpeculativeExpiryCanRelandAfterForkRewind(t *testing.T) {
 	}
 }
 
+func TestForkRewindRestoresPreExpiryStatus(t *testing.T) {
+	for _, status := range []Status{StatusSubmissionUnknown, StatusSubmitted, StatusUnwound} {
+		t.Run(status.String(), func(t *testing.T) {
+			idx, _ := testIndex(t, 16, time.Hour)
+			s := sig(byte(status + 30))
+			if err := idx.SubmissionAttempted(s, hash(1), blockHeight(250)); err != nil {
+				t.Fatalf("SubmissionAttempted: %v", err)
+			}
+			if status != StatusSubmissionUnknown {
+				idx.Forwarded(s)
+			}
+			if status == StatusUnwound {
+				idx.Landed(s, 240, "")
+				idx.Unwound(240)
+			}
+
+			idx.ObserveBlockHeight(300)
+			if got := receiptStatus(t, idx, s); got != StatusExpired {
+				t.Fatalf("status after expiry = %v", got)
+			}
+			idx.RewindBlockHeight(251)
+			if got := receiptStatus(t, idx, s); got != StatusExpired {
+				t.Fatalf("status above deadline = %v", got)
+			}
+			idx.RewindBlockHeight(250)
+			if got := receiptStatus(t, idx, s); got != status {
+				t.Fatalf("status after valid rewind = %v, want %v", got, status)
+			}
+		})
+	}
+}
+
+func TestForwardedAfterExpiryRestoresSubmittedAfterRewind(t *testing.T) {
+	idx, _ := testIndex(t, 16, time.Hour)
+	s := sig(63)
+	if err := idx.SubmissionAttempted(s, hash(1), blockHeight(250)); err != nil {
+		t.Fatal(err)
+	}
+
+	idx.ObserveBlockHeight(251)
+	if got := receiptStatus(t, idx, s); got != StatusExpired {
+		t.Fatalf("status after expiry = %v", got)
+	}
+	idx.Forwarded(s)
+	if got := receiptStatus(t, idx, s); got != StatusExpired {
+		t.Fatalf("forwarded changed expired status to %v", got)
+	}
+	idx.RewindBlockHeight(250)
+	if got := receiptStatus(t, idx, s); got != StatusSubmitted {
+		t.Fatalf("status after rewind = %v", got)
+	}
+}
+
+func receiptStatus(t *testing.T, idx *Index, signature solana.Signature) Status {
+	t.Helper()
+	receipt, known := idx.Lookup(signature)
+	if !known {
+		t.Fatal("receipt is unknown")
+	}
+	return receipt.Status
+}
+
 func TestUnknownBlockhashDeadlineDoesNotFabricateExpiry(t *testing.T) {
 	idx, _ := testIndex(t, 16, time.Hour)
 	s := sig(15)
@@ -333,8 +394,7 @@ func TestLandedReceiptsDoNotExpire(t *testing.T) {
 	}
 }
 
-// TestCapacityPreservesUnresolvedReceipts covers the fail-closed memory bound.
-func TestCapacityPreservesUnresolvedReceipts(t *testing.T) {
+func TestCapacityEvictsOldestReceiptWithoutBlockingNewSubmissions(t *testing.T) {
 	idx, clock := testIndex(t, 3, time.Hour)
 	for i := byte(1); i <= 3; i++ {
 		submit(idx, sig(i), hash(1), blockHeight(500))
@@ -344,35 +404,33 @@ func TestCapacityPreservesUnresolvedReceipts(t *testing.T) {
 		t.Fatalf("Len = %d, want 3", idx.Len())
 	}
 
-	err := idx.SubmissionAttempted(sig(4), hash(1), blockHeight(500))
-	if !errors.Is(err, ErrCapacity) {
-		t.Fatalf("fourth unresolved receipt error = %v", err)
+	if err := idx.SubmissionAttempted(sig(4), hash(1), blockHeight(500)); err != nil {
+		t.Fatalf("fourth unresolved receipt: %v", err)
 	}
 	if idx.Len() != 3 {
 		t.Errorf("capacity exceeded: Len = %d", idx.Len())
 	}
-	if _, known := idx.Lookup(sig(1)); !known {
-		t.Error("the oldest unresolved receipt was evicted")
-	}
-	if _, known := idx.Lookup(sig(4)); known {
-		t.Error("the rejected receipt was inserted")
-	}
-
-	idx.Landed(sig(1), 100, "")
-	idx.Rooted(100)
-	if err := idx.SubmissionAttempted(sig(4), hash(1), blockHeight(500)); err != nil {
-		t.Fatalf("completed receipt did not make room: %v", err)
-	}
 	if _, known := idx.Lookup(sig(1)); known {
-		t.Error("the completed receipt was not evicted")
+		t.Error("the oldest unresolved receipt was retained")
 	}
 	if _, known := idx.Lookup(sig(4)); !known {
 		t.Error("the new receipt was not inserted")
 	}
+
+	idx.Landed(sig(2), 100, "")
+	idx.Rooted(100)
+	if err := idx.SubmissionAttempted(sig(5), hash(1), blockHeight(500)); err != nil {
+		t.Fatalf("completed receipt did not make room: %v", err)
+	}
+	if _, known := idx.Lookup(sig(2)); known {
+		t.Error("the completed receipt was not evicted")
+	}
+	if _, known := idx.Lookup(sig(5)); !known {
+		t.Error("the new receipt was not inserted")
+	}
 }
 
-// TestRetentionEvictsOnlyTerminalReceipts keeps unresolved evidence intact.
-func TestRetentionEvictsOnlyTerminalReceipts(t *testing.T) {
+func TestRetentionBoundsUnresolvedReceipts(t *testing.T) {
 	idx, clock := testIndex(t, 16, time.Minute)
 	s := sig(12)
 	submit(idx, s, hash(1), blockHeight(500))
@@ -383,15 +441,8 @@ func TestRetentionEvictsOnlyTerminalReceipts(t *testing.T) {
 	}
 
 	*clock = clock.Add(31 * time.Second)
-	if _, known := idx.Lookup(s); !known {
-		t.Error("unresolved receipt was removed by retention")
-	}
-
-	idx.Landed(s, 100, "")
-	idx.Rooted(100)
-	*clock = clock.Add(time.Minute + time.Second)
 	if _, known := idx.Lookup(s); known {
-		t.Error("terminal receipt outlived its retention window")
+		t.Error("unresolved receipt outlived its retention window")
 	}
 }
 

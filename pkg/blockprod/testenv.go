@@ -28,6 +28,7 @@ type TestEnvConfig struct {
 	Sink                BatchSink
 	TransactionStatuses *replay.TransactionStatusView
 	CaptureRootedEvents bool
+	CaptureOutcomes     bool
 }
 
 func NewTestEnv(cfg TestEnvConfig) *TestEnv {
@@ -90,6 +91,7 @@ func NewTestEnv(cfg TestEnvConfig) *TestEnv {
 		Sink:                cfg.Sink,
 		TransactionStatuses: statuses,
 		CaptureRootedEvents: cfg.CaptureRootedEvents,
+		CaptureOutcomes:     cfg.CaptureOutcomes,
 	})
 	controller := NewController()
 	controller.SetWorkingBank(bank)

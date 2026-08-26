@@ -96,5 +96,6 @@ func TestClassicSetupGeneratesRPCSource(t *testing.T) {
 	assert.NoError(t, err)
 	content := string(raw)
 	assert.Contains(t, content, "source = \"rpc\"")
+	assert.Contains(t, content, "bind_address = \"127.0.0.1\"")
 	assert.False(t, strings.Contains(content, "[turbine]"))
 }

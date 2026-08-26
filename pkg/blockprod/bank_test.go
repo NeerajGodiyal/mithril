@@ -274,6 +274,33 @@ func TestWorkingBankIncludesExecutedFailureWithFeeRollback(t *testing.T) {
 	require.Equal(t, "InstructionError(1, InvalidInstructionData)", observations[0].Failure)
 }
 
+func TestWorkingBankCapturesLightweightTransactionOutcomes(t *testing.T) {
+	env := NewTestEnv(TestEnvConfig{CaptureOutcomes: true})
+	defer env.Close()
+	payer := txfixture.PayerPubkey()
+	fail := solana.NewInstruction(addresses.SystemProgramAddr, nil, []byte{0xff, 0xff, 0xff, 0xff})
+	tx, err := solana.NewTransaction([]solana.Instruction{fail}, txfixture.TestBlockhash(), solana.TransactionPayer(payer))
+	require.NoError(t, err)
+	privateKey := txfixture.PayerPrivateKey()
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key == payer {
+			return &privateKey
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	wire, err := tx.MarshalBinary()
+	require.NoError(t, err)
+
+	result, reason := env.Bank.Forge(wire)
+	require.Equal(t, ForgeAccepted, result)
+	require.Equal(t, costmodel.ExceedNone, reason)
+	require.Equal(t, []string{"InstructionError(0, InvalidInstructionData)"}, env.Bank.TransactionOutcomes())
+	observations, captured := env.Bank.RootedEventObservations()
+	require.False(t, captured)
+	require.Empty(t, observations)
+}
+
 func TestWorkingBankIncludesFeesOnlyProgramLoadFailure(t *testing.T) {
 	env := NewTestEnv(TestEnvConfig{CaptureRootedEvents: true})
 	defer env.Close()

@@ -8,6 +8,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/gossip"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
+	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/stretchr/testify/require"
 )
 
@@ -71,6 +72,20 @@ func TestValidatorModeUsesLocalFooterBankHashInsteadOfRPCVerifier(t *testing.T) 
 	require.True(t, got.ValidatorFooterHash)
 
 	require.Equal(t, cfg, verifierConfigForConsensusMode("verifying", cfg), "verifying mode must remain unchanged")
+}
+
+func TestRPCVerificationGateStartsClosedWhenVerificationIsRequired(t *testing.T) {
+	t.Cleanup(func() { replay.ResetVerificationStatus(false, 0) })
+	initializeVerificationStatusForRPC(
+		replay.VerifierConfig{Enabled: true, Required: true},
+		&state.MithrilState{LastRootedSlot: 42},
+		true,
+	)
+	got, required, verified, eligible := replay.VerificationSnapshot()
+	require.Equal(t, replay.VerificationUnavailable, got)
+	require.True(t, required)
+	require.Equal(t, uint64(42), verified)
+	require.Equal(t, uint64(42), eligible)
 }
 
 func TestTxParallelismForMode(t *testing.T) {

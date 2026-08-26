@@ -1,6 +1,7 @@
 package rpcserver
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 
@@ -16,6 +17,16 @@ func TestClampLogs_UnderLimitReturnsUnchanged(t *testing.T) {
 	in := []string{"hello", "world"}
 	got := clampLogs(in)
 	assert.Equal(t, in, got)
+}
+
+func TestDecodeSimulationTransactionSupportsLargeV1AndRejectsTrailingBytes(t *testing.T) {
+	wire := testV1TransactionWire(t, packetDataSize+1)
+	tx, err := decodeSimulationTransaction(base64.StdEncoding.EncodeToString(wire), "base64")
+	require.NoError(t, err)
+	require.Equal(t, solana.MessageVersionV1, tx.Message.GetVersion())
+
+	_, err = decodeSimulationTransaction(base64.StdEncoding.EncodeToString(append(wire, 0)), "base64")
+	require.ErrorContains(t, err, "trailing bytes")
 }
 
 func TestClampLogs_AtBoundaryAppendsTruncatedMarker(t *testing.T) {

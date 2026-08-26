@@ -171,7 +171,7 @@ func TestPlanBlockTransactionExecutionRejectsMalformedHeaderBeforePlanner(t *tes
 	_, err = planBlockTransactionExecution(block)
 	require.ErrorIs(t, err, TxErrSanitizeFailure)
 	require.NotPanics(t, func() {
-		_, err = ProcessBlock(nil, block, nil, 1, nil, nil, nil, NewTransactionStatusCache(), false, nil)
+		_, err = ProcessBlock(nil, block, nil, 1, nil, nil, nil, NewTransactionStatusCache(), nil, false, nil)
 	})
 	require.ErrorIs(t, err, TxErrSanitizeFailure)
 }
@@ -196,9 +196,9 @@ func TestTransactionLoopsRejectUnprocessableTransactionWithoutFees(t *testing.T)
 				previousArenas := sealevel.BorrowedAccountArenas
 				sealevel.BorrowedAccountArenas = []*arena.Arena[sealevel.BorrowedAccount]{arena.New[sealevel.BorrowedAccount](16)}
 				defer func() { sealevel.BorrowedAccountArenas = previousArenas }()
-				_, _, err = parallelTxLoop(slotCtx, &sigverify, block, block, plan, nil, 1, nil, false)
+				_, _, err = parallelTxLoop(slotCtx, &sigverify, block, block, plan, nil, nil, 1, nil, false)
 			} else {
-				_, _, err = sequentialTxLoop(slotCtx, &sigverify, block, plan, nil, nil, false)
+				_, _, err = sequentialTxLoop(slotCtx, &sigverify, block, plan, nil, nil, nil, false)
 			}
 			sigverify.Wait()
 			require.ErrorContains(t, err, "not processable")

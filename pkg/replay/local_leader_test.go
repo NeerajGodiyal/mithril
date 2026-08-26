@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
@@ -11,6 +12,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/rootedevents"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/state"
+	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/require"
 )
@@ -59,7 +61,7 @@ func TestAdoptLocalLeaderBlockUsesProducerSlotCtx(t *testing.T) {
 
 	block := &b.Block{Slot: 20, ParentSlot: 19, FromLocalProduction: true}
 	persisted := &persistedTracker{}
-	got, err := adoptLocalLeaderBlock(block, nil, NewTransactionStatusCache(), persisted)
+	got, err := adoptLocalLeaderBlock(block, nil, NewTransactionStatusCache(), persisted, nil)
 	require.NoError(t, err)
 	require.Same(t, slotCtx, got)
 
@@ -73,7 +75,7 @@ func TestAdoptLocalLeaderBlockUsesProducerSlotCtx(t *testing.T) {
 
 func TestAdoptLocalLeaderBlockFailsClosedWithoutCommit(t *testing.T) {
 	t.Cleanup(ResetLocalLeaderCommits)
-	_, err := adoptLocalLeaderBlock(&b.Block{Slot: 3, FromLocalProduction: true}, nil, NewTransactionStatusCache(), nil)
+	_, err := adoptLocalLeaderBlock(&b.Block{Slot: 3, FromLocalProduction: true}, nil, NewTransactionStatusCache(), nil, nil)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "missing producer SlotCtx")
 }
@@ -81,7 +83,7 @@ func TestAdoptLocalLeaderBlockFailsClosedWithoutCommit(t *testing.T) {
 func TestAdoptLocalLeaderBlockFailsClosedWithoutBankSysvars(t *testing.T) {
 	t.Cleanup(ResetLocalLeaderCommits)
 	RegisterLocalLeaderCommit(&sealevel.SlotCtx{Slot: 4})
-	_, err := adoptLocalLeaderBlock(&b.Block{Slot: 4, FromLocalProduction: true}, nil, NewTransactionStatusCache(), nil)
+	_, err := adoptLocalLeaderBlock(&b.Block{Slot: 4, FromLocalProduction: true}, nil, NewTransactionStatusCache(), nil, nil)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "missing bank sysvars")
 }
@@ -92,13 +94,13 @@ func TestAdoptLocalLeaderBlockUsesOwnedExactFinalizedDelta(t *testing.T) {
 	const slot = uint64(20)
 	slotCtx := localLeaderTestSlotCtx(t, slot)
 	rentOnly := &accounts.Account{Key: solana.PublicKey{0x44}, Lamports: 41, Data: []byte{1, 2, 3}}
-	RegisterLocalLeaderCommitData(slotCtx, []*accounts.Account{rentOnly}, true, nil, true)
+	RegisterLocalLeaderCommitData(slotCtx, []*accounts.Account{rentOnly}, true, nil, true, nil)
 	rentOnly.Lamports = 99
 	rentOnly.Data[0] = 9
 
 	tail := rootedCaptureTestTail(t)
 	block := &b.Block{Slot: slot, ParentSlot: slot - 1, FromLocalProduction: true}
-	_, err := adoptLocalLeaderBlock(block, tail, NewTransactionStatusCache(), &persistedTracker{})
+	_, err := adoptLocalLeaderBlock(block, tail, NewTransactionStatusCache(), &persistedTracker{}, nil)
 	require.NoError(t, err)
 
 	deltas := tail.overlay.PromotionPrefix(slot)
@@ -116,13 +118,13 @@ func TestAdoptLocalLeaderBlockRejectsObservationMismatchBeforeTailMutation(t *te
 
 	const slot = uint64(21)
 	slotCtx := localLeaderTestSlotCtx(t, slot)
-	RegisterLocalLeaderCommitData(slotCtx, nil, true, nil, true)
+	RegisterLocalLeaderCommitData(slotCtx, nil, true, nil, true, nil)
 	tail := rootedCaptureTestTail(t)
 	block := &b.Block{
 		Slot: slot, ParentSlot: slot - 1, FromLocalProduction: true,
 		Transactions: []*solana.Transaction{{}},
 	}
-	_, err := adoptLocalLeaderBlock(block, tail, NewTransactionStatusCache(), &persistedTracker{})
+	_, err := adoptLocalLeaderBlock(block, tail, NewTransactionStatusCache(), &persistedTracker{}, nil)
 	require.ErrorContains(t, err, "0 rooted transaction observations for 1 transactions")
 	require.Zero(t, tail.overlay.HeldSlots())
 	require.NotContains(t, tail.transactions, slot)
@@ -148,6 +150,7 @@ func TestAdoptLocalLeaderBlockRequiresExactDeltaForRootedTail(t *testing.T) {
 		tail,
 		NewTransactionStatusCache(),
 		&persistedTracker{},
+		nil,
 	)
 	require.ErrorContains(t, err, "exact finalized account delta was not captured")
 	require.Zero(t, tail.overlay.HeldSlots())
@@ -173,7 +176,7 @@ func TestAdoptLocalLeaderBlockStatusFailurePublishesNothing(t *testing.T) {
 	require.NoError(t, cache.CommitBlock(statusCacheTestBlock(10)))
 	const slot = uint64(12)
 	slotCtx := localLeaderTestSlotCtx(t, slot)
-	RegisterLocalLeaderCommitData(slotCtx, nil, true, nil, true)
+	RegisterLocalLeaderCommitData(slotCtx, nil, true, nil, true, nil)
 	baseTail := rootedCaptureTestTail(t)
 	tail := &rejectingRootedEventTail{unrootedTail: baseTail, err: errors.New("must not be called")}
 	persisted := &persistedTracker{}
@@ -183,6 +186,7 @@ func TestAdoptLocalLeaderBlockStatusFailurePublishesNothing(t *testing.T) {
 		tail,
 		cache,
 		persisted,
+		nil,
 	)
 	require.Error(t, err)
 	require.Zero(t, tail.calls)
@@ -203,7 +207,7 @@ func TestAdoptLocalLeaderBlockEventFailureRestoresStatusAndPublishesNothing(t *t
 	require.NoError(t, cache.CommitBlock(statusCacheTestBlock(10)))
 	const slot = uint64(11)
 	slotCtx := localLeaderTestSlotCtx(t, slot)
-	RegisterLocalLeaderCommitData(slotCtx, nil, true, nil, true)
+	RegisterLocalLeaderCommitData(slotCtx, nil, true, nil, true, nil)
 	baseTail := rootedCaptureTestTail(t)
 	recordErr := errors.New("rooted event limit")
 	tail := &rejectingRootedEventTail{unrootedTail: baseTail, err: recordErr}
@@ -214,6 +218,7 @@ func TestAdoptLocalLeaderBlockEventFailureRestoresStatusAndPublishesNothing(t *t
 		tail,
 		cache,
 		persisted,
+		nil,
 	)
 	require.ErrorIs(t, err, recordErr)
 	require.Equal(t, 1, tail.calls)
@@ -225,6 +230,43 @@ func TestAdoptLocalLeaderBlockEventFailureRestoresStatusAndPublishesNothing(t *t
 	tip, ok := cache.TipSlot()
 	require.True(t, ok)
 	require.Equal(t, uint64(10), tip)
+}
+
+func TestAdoptLocalLeaderBlockPublishesActualTransactionFailure(t *testing.T) {
+	t.Cleanup(ResetLocalLeaderCommits)
+	const slot = uint64(23)
+	tx := statusCacheTestTransaction(1, 2, 31)
+	block := statusCacheTestBlock(slot, tx)
+	block.FromLocalProduction = true
+	block.BlockHeight = 90
+	index, err := txstatus.NewIndex(txstatus.Config{MaxReceipts: 8, Retention: time.Hour})
+	require.NoError(t, err)
+	require.NoError(t, index.SubmissionAttempted(tx.Signatures[0], tx.Message.RecentBlockhash, nil))
+	index.Forwarded(tx.Signatures[0])
+	RegisterLocalLeaderCommitData(localLeaderTestSlotCtx(t, slot), nil, false, nil, false, []string{"InstructionError(0, InvalidInstructionData)"})
+
+	_, err = adoptLocalLeaderBlock(block, nil, NewTransactionStatusCache(), &persistedTracker{}, index)
+	require.NoError(t, err)
+	receipt, known := index.Lookup(tx.Signatures[0])
+	require.True(t, known)
+	require.Equal(t, txstatus.StatusLandedFailed, receipt.Status)
+	require.Equal(t, "InstructionError(0, InvalidInstructionData)", receipt.ExecutionError)
+	require.Equal(t, slot, receipt.LandedSlot)
+}
+
+func TestSubmittedOutcomeMismatchDoesNotClaimLanding(t *testing.T) {
+	tx := statusCacheTestTransaction(1, 2, 32)
+	block := statusCacheTestBlock(24, tx)
+	block.BlockHeight = 91
+	index, err := txstatus.NewIndex(txstatus.Config{MaxReceipts: 8, Retention: time.Hour})
+	require.NoError(t, err)
+	require.NoError(t, index.SubmissionAttempted(tx.Signatures[0], tx.Message.RecentBlockhash, nil))
+	index.Forwarded(tx.Signatures[0])
+
+	publishSubmittedTransactionOutcomes(index, block, nil)
+	receipt, known := index.Lookup(tx.Signatures[0])
+	require.True(t, known)
+	require.Equal(t, txstatus.StatusSubmitted, receipt.Status)
 }
 
 func rootedCaptureTestTail(t *testing.T) *unrootedTail {
