@@ -10,17 +10,13 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
-// ErrCapacity means every retained receipt is still live or ambiguous, so
-// tracking a new signature would require discarding unresolved evidence.
-var ErrCapacity = errors.New("txstatus: receipt capacity contains only unresolved transactions")
-
 // Config bounds the index. Both bounds are mandatory: an unbounded receipt
 // index on a long-running validator is a memory leak with extra steps.
 type Config struct {
 	// MaxReceipts caps how many submissions are tracked at once. Completed
-	// receipts are evicted first; unresolved receipts are never silently lost.
+	// receipts are evicted first, then the oldest receipt when necessary.
 	MaxReceipts int
-	// Retention drops completed receipts this long after their last update.
+	// Retention drops receipts this long after their last update.
 	Retention time.Duration
 	// Now defaults to time.Now; tests supply a clock.
 	Now func() time.Time
@@ -81,8 +77,8 @@ func (i *Index) SubmissionAttempted(
 	if _, exists := i.receipts[signature]; exists {
 		return nil
 	}
-	if len(i.receipts) >= i.maxReceipts && !i.evictOldestTerminalLocked() {
-		return ErrCapacity
+	if len(i.receipts) >= i.maxReceipts {
+		i.evictOldestLocked()
 	}
 	now := i.now()
 	var deadline *uint64
@@ -107,7 +103,15 @@ func (i *Index) Forwarded(signature solana.Signature) {
 	defer i.mu.Unlock()
 
 	receipt, ours := i.receipts[signature]
-	if !ours || receipt.Status != StatusSubmissionUnknown {
+	if !ours {
+		return
+	}
+	if receipt.Status == StatusExpired && receipt.statusBeforeExpiry == StatusSubmissionUnknown {
+		receipt.statusBeforeExpiry = StatusSubmitted
+		receipt.UpdatedAt = i.now()
+		return
+	}
+	if receipt.Status != StatusSubmissionUnknown {
 		return
 	}
 	receipt.Status = StatusSubmitted
@@ -130,6 +134,7 @@ func (i *Index) Landed(signature solana.Signature, slot uint64, executionError s
 	}
 	receipt.LandedSlot = slot
 	receipt.ExecutionError = boundedExecutionError(executionError)
+	receipt.statusBeforeExpiry = StatusUnknown
 	if receipt.ExecutionError != "" {
 		if slot <= i.rootedThrough {
 			receipt.Status = StatusFailed
@@ -226,6 +231,31 @@ func (i *Index) ObserveBlockHeight(blockHeight uint64) {
 	i.observeBlockHeightLocked(blockHeight)
 }
 
+// RewindBlockHeight lowers the observed height after replay abandons a fork.
+// A receipt that expired only on the abandoned suffix returns to its exact
+// pre-expiry state when its deadline becomes valid again.
+func (i *Index) RewindBlockHeight(blockHeight uint64) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if blockHeight >= i.observedBlockHeight {
+		return
+	}
+	i.observedBlockHeight = blockHeight
+	now := i.now()
+	for _, receipt := range i.receipts {
+		if receipt.Status != StatusExpired || receipt.LastValidBlockHeight == nil || blockHeight > *receipt.LastValidBlockHeight {
+			continue
+		}
+		restore := receipt.statusBeforeExpiry
+		if restore != StatusSubmissionUnknown && restore != StatusSubmitted && restore != StatusUnwound {
+			restore = StatusSubmissionUnknown
+		}
+		receipt.Status = restore
+		receipt.statusBeforeExpiry = StatusUnknown
+		receipt.UpdatedAt = now
+	}
+}
+
 func (i *Index) observeBlockHeightLocked(blockHeight uint64) {
 	if blockHeight <= i.observedBlockHeight {
 		return
@@ -239,6 +269,7 @@ func (i *Index) observeBlockHeightLocked(blockHeight uint64) {
 		switch receipt.Status {
 		case StatusSubmissionUnknown, StatusSubmitted, StatusUnwound:
 			if receipt.LastValidBlockHeight != nil && blockHeight > *receipt.LastValidBlockHeight {
+				receipt.statusBeforeExpiry = receipt.Status
 				receipt.Status = StatusExpired
 				receipt.UpdatedAt = now
 			}
@@ -296,21 +327,22 @@ func (i *Index) Len() int {
 	return len(i.receipts)
 }
 
-// evictLocked drops completed receipts past their retention window. An
-// unresolved outcome is never converted into "unknown" merely because time
-// passed; if unresolved evidence fills the index, new submissions fail closed.
+// evictLocked bounds the lifetime of every in-memory receipt. This index is
+// operational evidence, not durable history; after eviction callers get the
+// explicit unknown result rather than stale or fabricated certainty.
 func (i *Index) evictLocked() {
 	cutoff := i.now().Add(-i.retention)
 	for signature, receipt := range i.receipts {
-		if receipt.Status.Terminal() && receipt.UpdatedAt.Before(cutoff) {
+		if receipt.UpdatedAt.Before(cutoff) {
 			delete(i.receipts, signature)
 		}
 	}
 }
 
-// evictOldestTerminalLocked makes one slot for a new receipt without losing an
-// unresolved outcome.
-func (i *Index) evictOldestTerminalLocked() bool {
+// evictOldestLocked makes one slot for a new receipt. It prefers completed
+// evidence, then evicts the oldest unresolved record so remote submissions
+// cannot permanently disable receipt tracking.
+func (i *Index) evictOldestLocked() {
 	var oldestSig solana.Signature
 	var oldest time.Time
 	found := false
@@ -324,6 +356,14 @@ func (i *Index) evictOldestTerminalLocked() bool {
 	}
 	if found {
 		delete(i.receipts, oldestSig)
+		return
 	}
-	return found
+	for signature, receipt := range i.receipts {
+		if !found || receipt.UpdatedAt.Before(oldest) {
+			oldestSig, oldest, found = signature, receipt.UpdatedAt, true
+		}
+	}
+	if found {
+		delete(i.receipts, oldestSig)
+	}
 }

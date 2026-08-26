@@ -9,6 +9,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/rootedevents"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -20,6 +21,7 @@ type LocalLeaderCommit struct {
 	ModifiedAccountsCaptured bool
 	TransactionObservations  []rootedevents.TransactionObservation
 	RootedEventsCaptured     bool
+	TransactionOutcomes      []string
 }
 
 var (
@@ -29,7 +31,7 @@ var (
 
 // RegisterLocalLeaderCommit publishes a frozen producer SlotCtx for ordered adopt.
 func RegisterLocalLeaderCommit(slotCtx *sealevel.SlotCtx) {
-	RegisterLocalLeaderCommitData(slotCtx, nil, false, nil, false)
+	RegisterLocalLeaderCommitData(slotCtx, nil, false, nil, false, nil)
 }
 
 // RegisterLocalLeaderCommitData publishes an owned producer handoff. The
@@ -41,6 +43,7 @@ func RegisterLocalLeaderCommitData(
 	modifiedCaptured bool,
 	observations []rootedevents.TransactionObservation,
 	rootedEventsCaptured bool,
+	outcomes []string,
 ) {
 	if slotCtx == nil {
 		return
@@ -51,6 +54,7 @@ func RegisterLocalLeaderCommitData(
 		ModifiedAccountsCaptured: modifiedCaptured,
 		TransactionObservations:  rootedevents.CloneTransactionObservations(observations),
 		RootedEventsCaptured:     rootedEventsCaptured,
+		TransactionOutcomes:      append([]string(nil), outcomes...),
 	}
 	localLeaderMu.Lock()
 	localLeaderCommits[slotCtx.Slot] = commit
@@ -94,6 +98,7 @@ func adoptLocalLeaderBlock(
 	tail unrootedState,
 	transactionStatuses *TransactionStatusCache,
 	persistedHashes *persistedTracker,
+	submittedTransactions txstatus.Sink,
 ) (*sealevel.SlotCtx, error) {
 	if block == nil {
 		return nil, fmt.Errorf("adopt local leader block: nil block")
@@ -147,6 +152,7 @@ func adoptLocalLeaderBlock(
 		}
 	}
 	commitVoteStakeCacheUpdates(slotCtx)
+	publishSubmittedTransactionOutcomes(submittedTransactions, block, commit.TransactionOutcomes)
 	global.IncrTransactionCount(uint64(len(block.Transactions)))
 	return slotCtx, nil
 }

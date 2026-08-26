@@ -10,19 +10,17 @@ import (
 // as though nothing were wrong. That is the case this gate exists for: a client
 // asking what an account holds cannot distinguish a correct answer from one
 // produced by a node that already knows its state disagrees with the cluster.
-// Evidence must fail closed when the node knows it is wrong.
-//
-// Being merely behind is deliberately not gated. "incomplete" means required
-// verification is progressing but has not caught up, which is the ordinary
-// state during catch-up. A caller that cares about freshness already says so
-// with minContextSlot and its own lag policy, so refusing here would duplicate
-// a threshold that lives elsewhere and make the node useless while it catches
-// up. This gate answers "is the node wrong", not "is the node current".
+// Evidence must fail closed unless the bank being served is covered by the
+// required verification. minContextSlot is only a lower freshness bound; it
+// cannot constrain a response to the last verified bank.
 type evidenceGateReason string
 
 const (
 	// evidenceGateOpen means the node may answer.
 	evidenceGateOpen evidenceGateReason = ""
+	// evidenceGateIncomplete means required verification has not caught up to
+	// the bank the RPC server would answer from.
+	evidenceGateIncomplete evidenceGateReason = "incomplete"
 	// evidenceGateDiverged means replay, footer, bank-hash or finality evidence
 	// disagreed. Terminal: VerificationStatus refuses to leave this state.
 	evidenceGateDiverged evidenceGateReason = "diverged"
@@ -50,9 +48,10 @@ type verificationSnapshotFunc func() (replay.VerificationState, bool, uint64, ui
 // function so the whole matrix is testable without a node.
 func gateForVerificationState(state replay.VerificationState) evidenceGateReason {
 	switch state {
-	case replay.VerificationComplete, replay.VerificationNotApplicable,
-		replay.VerificationIncomplete:
+	case replay.VerificationComplete, replay.VerificationNotApplicable:
 		return evidenceGateOpen
+	case replay.VerificationIncomplete:
+		return evidenceGateIncomplete
 	case replay.VerificationDiverged:
 		return evidenceGateDiverged
 	case replay.VerificationStalled:
@@ -148,5 +147,5 @@ func marshalNodeUnhealthyError(
 	// Refusing must never fall through to serving. If the structured form
 	// cannot be built, emit a plain error carrying the same code.
 	return marshalRPCProbeError(id, int(rpcCodeNodeUnhealthy),
-		"Node is unhealthy and refuses to answer")
+		"Node is unhealthy")
 }

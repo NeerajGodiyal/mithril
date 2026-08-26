@@ -628,7 +628,7 @@ func processTransactionComputeUnits(execCtx *sealevel.ExecutionCtx) uint64 {
 }
 
 func ProcessTransaction(slotCtx *sealevel.SlotCtx, sigverifyWg *sync.WaitGroup, tx *solana.Transaction, txMeta *rpc.TransactionMeta, dbgOpts *DebugOptions, arena *arena.Arena[sealevel.BorrowedAccount], shouldVerifySignatures bool) (*fees.TxFeeInfo, uint64, error) {
-	return processTransactionForReplay(slotCtx, sigverifyWg, tx, txMeta, dbgOpts, arena, nil, shouldVerifySignatures)
+	return processTransactionForReplay(slotCtx, sigverifyWg, tx, txMeta, dbgOpts, arena, nil, nil, shouldVerifySignatures)
 }
 
 func processTransactionForReplay(
@@ -639,11 +639,15 @@ func processTransactionForReplay(
 	dbgOpts *DebugOptions,
 	arena *arena.Arena[sealevel.BorrowedAccount],
 	observation *rootedevents.TransactionObservation,
+	outcome *string,
 	shouldVerifySignatures bool,
 ) (feeInfo *fees.TxFeeInfo, computeUnits uint64, processingErr error) {
 	transactionFailure := ""
 	defer func() {
 		FinishRootedTransactionObservation(observation, computeUnits, processingErr, transactionFailure)
+		if outcome != nil {
+			*outcome = transactionFailure
+		}
 	}()
 	if trace.IsEnabled() && slotCtx.TraceCtx != nil {
 		regionType := "ProcessTransaction"

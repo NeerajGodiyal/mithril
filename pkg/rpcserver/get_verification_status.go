@@ -56,35 +56,20 @@ func (rpcServer *RpcServer) GetVerificationStatus(
 	}, nil
 }
 
-// GetHealthResp deliberately does not imitate Agave's getHealth, which answers
-// "am I near my peers' highest slot" — a liveness proxy this node cannot
-// honestly compute, because it observes no cluster tip. This one answers a
-// stronger and different question: does my own replayed state check out.
-type GetHealthResp struct {
-	// Status is "ok" when the node will serve evidence, otherwise the gate
-	// reason: diverged, stalled, unavailable, unknown_verification_state.
-	Status string `json:"status"`
-	// VerificationState is the underlying six-state value, so a caller is
-	// never forced to infer it from the status string.
-	VerificationState string `json:"verificationState"`
-	VerifiedSlot      uint64 `json:"verifiedSlot"`
-}
-
 func (rpcServer *RpcServer) GetHealth(
 	_ context.Context, _ jsonrpc.RawParams,
-) (GetHealthResp, error) {
+) (string, error) {
 	snapshot := rpcServer.verificationSnapshot
 	if snapshot == nil {
 		snapshot = defaultVerificationSnapshot
 	}
-	state, _, verified, _ := snapshot()
-	status := "ok"
+	state, _, verified, eligible := snapshot()
 	if reason := gateForVerificationState(state); reason != evidenceGateOpen {
-		status = string(reason)
+		return "", &NodeUnhealthyError{
+			Reason:       string(reason),
+			VerifiedSlot: verified,
+			EligibleSlot: eligible,
+		}
 	}
-	return GetHealthResp{
-		Status:            status,
-		VerificationState: string(state),
-		VerifiedSlot:      verified,
-	}, nil
+	return "ok", nil
 }

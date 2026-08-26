@@ -97,6 +97,7 @@ type LeaderLoop struct {
 	epochSchedule       *sealevel.SysvarEpochSchedule
 	alpenglowClock      bool
 	captureRootedEvents bool
+	captureOutcomes     bool
 	parentContext       func(uint64) ParentContext
 	productionParent    func(uint64) alpenglow.BlockProductionParent
 	onBlock             func(*b.Block)
@@ -146,6 +147,7 @@ type LeaderLoopConfig struct {
 	EpochSchedule       *sealevel.SysvarEpochSchedule
 	AlpenglowClock      bool
 	CaptureRootedEvents bool
+	CaptureOutcomes     bool
 	ParentContext       func(uint64) ParentContext
 	ProductionParent    func(slot uint64) alpenglow.BlockProductionParent
 	OnBlock             func(*b.Block)
@@ -183,6 +185,7 @@ func NewLeaderLoop(cfg LeaderLoopConfig) *LeaderLoop {
 		epochSchedule:       cfg.EpochSchedule,
 		alpenglowClock:      cfg.AlpenglowClock,
 		captureRootedEvents: cfg.CaptureRootedEvents,
+		captureOutcomes:     cfg.CaptureOutcomes,
 		parentContext:       cfg.ParentContext,
 		productionParent:    cfg.ProductionParent,
 		onBlock:             cfg.OnBlock,
@@ -1067,12 +1070,14 @@ func (l *LeaderLoop) finishActiveSlotLocked() {
 		producedBlock.HasAlpenglowLastChainedRoot = true
 	}
 	observations, observationsCaptured := l.activeBank.RootedEventObservations()
+	outcomes := l.activeBank.TransactionOutcomes()
 	replay.RegisterLocalLeaderCommitData(
 		commitResult.SlotCtx,
 		commitResult.ModifiedAccounts,
 		true,
 		observations,
 		observationsCaptured,
+		outcomes,
 	)
 	if l.onBlock != nil {
 		handoffStartedAt := l.now()
@@ -1236,6 +1241,7 @@ func (l *LeaderLoop) startSlotLocked(slot uint64) error {
 		Sink:                sink,
 		TransactionStatuses: parentCtx.TransactionStatuses,
 		CaptureRootedEvents: l.captureRootedEvents,
+		CaptureOutcomes:     l.captureOutcomes,
 	})
 	if slot > 0 && !sameReplayParentSnapshot(parentCtx, l.parentContext(slot)) {
 		bank.Close()

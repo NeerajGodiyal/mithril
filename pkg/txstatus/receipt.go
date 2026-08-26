@@ -112,7 +112,8 @@ type Receipt struct {
 	// StatusFailed, and empty otherwise.
 	ExecutionError string `json:"execution_error,omitempty"`
 
-	UpdatedAt time.Time `json:"updated_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+	statusBeforeExpiry Status
 }
 
 // Sink is the narrow interface the rest of the node writes through. Keeping it
@@ -138,6 +139,9 @@ type Sink interface {
 	// ObserveBlockHeight advances the node's block height so submissions with a
 	// known validity window can expire even when nothing of ours lands.
 	ObserveBlockHeight(blockHeight uint64)
+	// RewindBlockHeight restores receipts whose deadline is valid again after
+	// replay moves to a lower fork.
+	RewindBlockHeight(blockHeight uint64)
 }
 
 // Reader is the query half. It is separate from Sink so a component that only

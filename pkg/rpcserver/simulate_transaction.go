@@ -158,13 +158,9 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 		}
 	}
 
-	// Reject oversized encoded inputs BEFORE decode, matching Agave's
-	// decode_and_deserialize. Constants are from Agave's rpc.rs.
-	const (
-		maxBase58TxSize = 1683
-		maxBase64TxSize = 1644
-		packetDataSize  = 1232
-	)
+	// Base58 remains capped at the legacy packet size. Base64 can carry the
+	// larger v1 envelope; decoded legacy and v0 transactions are checked again
+	// below against the 1232-byte limit.
 	if conf.encoding == "base58" {
 		if len(txStr) > maxBase58TxSize {
 			return SimulateTransactionResp{}, &InvalidParamsError{
@@ -174,19 +170,14 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 	} else {
 		if len(txStr) > maxBase64TxSize {
 			return SimulateTransactionResp{}, &InvalidParamsError{
-				Message: fmt.Sprintf("base64 encoded solana_transaction too large: %d bytes (max: encoded/raw %d/%d)", len(txStr), maxBase64TxSize, packetDataSize),
+				Message: fmt.Sprintf("base64 encoded solana_transaction too large: %d bytes (max: encoded/raw %d/%d)", len(txStr), maxBase64TxSize, v1PacketDataSize),
 			}
 		}
 	}
 
-	var tx *solana.Transaction
-	if conf.encoding == "base58" {
-		tx, err = solana.TransactionFromBase58(txStr)
-	} else {
-		tx, err = solana.TransactionFromBase64(txStr)
-	}
+	tx, err := decodeSimulationTransaction(txStr, conf.encoding)
 	if err != nil {
-		return SimulateTransactionResp{}, &InvalidParamsError{Message: fmt.Sprintf("failed to decode transaction: %v", err)}
+		return SimulateTransactionResp{}, err
 	}
 
 	// Conflict check runs after decode so a bad tx surfaces as "failed to
@@ -413,6 +404,43 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 	}
 
 	return resp, nil
+}
+
+func decodeSimulationTransaction(txStr, encoding string) (*solana.Transaction, error) {
+	var (
+		wire []byte
+		err  error
+	)
+	if encoding == "base58" {
+		wire, err = base58.Decode(txStr)
+	} else {
+		wire, err = base64.StdEncoding.DecodeString(txStr)
+	}
+	if err != nil {
+		return nil, &InvalidParamsError{Message: fmt.Sprintf("failed to decode transaction: %v", err)}
+	}
+	rawLimit := packetDataSize
+	if encoding != "base58" {
+		rawLimit = v1PacketDataSize
+	}
+	if len(wire) > rawLimit {
+		return nil, &InvalidParamsError{
+			Message: fmt.Sprintf("decoded solana_transaction too large: %d bytes (max: %d bytes)", len(wire), rawLimit),
+		}
+	}
+	// Mithril applies the TPU's exact v1 envelope rule to simulation too. This is
+	// stricter than Agave RPC's lenient decoder and avoids simulating bytes that
+	// no leader can accept.
+	tx, err := solana.TransactionFromBytes(wire)
+	if err != nil {
+		return nil, &InvalidParamsError{Message: fmt.Sprintf("failed to decode transaction: %v", err)}
+	}
+	if tx.Message.GetVersion() != solana.MessageVersionV1 && len(wire) > packetDataSize {
+		return nil, &InvalidParamsError{
+			Message: fmt.Sprintf("decoded solana_transaction too large: %d bytes (max: %d bytes)", len(wire), packetDataSize),
+		}
+	}
+	return tx, nil
 }
 
 func parseSimulateConfig(params []interface{}) (simulateTransactionConfig, error) {

@@ -43,6 +43,8 @@ type WorkingBank struct {
 	// enabled. Rejected transactions enter neither slice.
 	rootedEventObservations []rootedevents.TransactionObservation
 	captureRootedEvents     bool
+	transactionOutcomes     []string
+	captureOutcomes         bool
 	txFees                  fees.TxFeeInfoAccumulator
 	numSigs                 uint64
 	entryHash               solana.Hash
@@ -64,6 +66,7 @@ type BankConfig struct {
 	Sink                BatchSink
 	TransactionStatuses *replay.TransactionStatusView
 	CaptureRootedEvents bool
+	CaptureOutcomes     bool
 }
 
 func NewWorkingBank(cfg BankConfig) *WorkingBank {
@@ -93,6 +96,7 @@ func NewWorkingBank(cfg BankConfig) *WorkingBank {
 		ancestorStatuses:    cfg.TransactionStatuses,
 		seenMessages:        make(map[[32]byte]struct{}),
 		captureRootedEvents: cfg.CaptureRootedEvents,
+		captureOutcomes:     cfg.CaptureOutcomes,
 	}
 }
 
@@ -132,6 +136,12 @@ func (b *WorkingBank) RootedEventObservations() ([]rootedevents.TransactionObser
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return rootedevents.CloneTransactionObservations(b.rootedEventObservations), b.captureRootedEvents
+}
+
+func (b *WorkingBank) TransactionOutcomes() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.transactionOutcomes...)
 }
 
 func (b *WorkingBank) NumSignatures() uint64 {
@@ -376,6 +386,9 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 		b.txFees.Add(output.FeeInfo)
 	}
 	b.forgedTxs = append(b.forgedTxs, tx)
+	if b.captureOutcomes {
+		b.transactionOutcomes = append(b.transactionOutcomes, transactionFailure)
+	}
 	if b.captureRootedEvents {
 		execCU := uint64(0)
 		if output.ExecCtx != nil {

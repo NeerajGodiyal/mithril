@@ -52,8 +52,9 @@ type sendTransactionConfig struct {
 
 const (
 	maxBase58TxSize                         = 1683
-	maxBase64TxSize                         = 1644
 	packetDataSize                          = 1232
+	v1PacketDataSize                        = solana.MaxTransactionSizeV1
+	maxBase64TxSize                         = (v1PacketDataSize + 2) / 3 * 4
 	sendTransactionLeaderForwardCount       = 10
 	sendTransactionTargetCount              = sendTransactionLeaderForwardCount + 1
 	sendTransactionLeaderLookahead          = 64
@@ -95,8 +96,9 @@ func (rpcServer *RpcServer) SendTransaction(ctx context.Context, p jsonrpc.RawPa
 	}
 
 	slotCtx := rpcServer.getSlotCtx()
-	// Legacy and already-expanded txs can be bounds-checked immediately.
-	if err := validateSendTransactionSanitize(tx, featuresForSendValidation(slotCtx), shouldValidateInstructionIndexes(tx)); err != nil {
+	// skipPreflight still performs bank-independent structural sanitization.
+	// Feature-gated execution remains the bank's job, matching Agave's RPC.
+	if err := validateSendTransactionSanitize(tx, featuresForSendValidation(slotCtx)); err != nil {
 		return "", err
 	}
 
@@ -132,7 +134,7 @@ func (rpcServer *RpcServer) SendTransaction(ctx context.Context, p jsonrpc.RawPa
 	if err := rpcServer.recordSubmissionAttempt(tx, signature); err != nil {
 		return "", err
 	}
-	if err := rpcServer.forwardTransactionToUpcomingLeaders(ctx, wire); err != nil {
+	if err := rpcServer.forwardTransactionToUpcomingLeaders(ctx, wire, tx.Message.GetVersion() == solana.MessageVersionV1); err != nil {
 		return "", err
 	}
 	rpcServer.recordSubmissionForwarded(signature)
@@ -225,7 +227,7 @@ func decodeSendTransaction(txStr string, encoding string) (*solana.Transaction, 
 	}
 	if encoding == "base64" && len(txStr) > maxBase64TxSize {
 		return nil, nil, &InvalidParamsError{
-			Message: fmt.Sprintf("base64 encoded solana_transaction too large: %d bytes (max: encoded/raw %d/%d)", len(txStr), maxBase64TxSize, packetDataSize),
+			Message: fmt.Sprintf("base64 encoded solana_transaction too large: %d bytes (max: encoded/raw %d/%d)", len(txStr), maxBase64TxSize, v1PacketDataSize),
 		}
 	}
 
@@ -246,15 +248,30 @@ func decodeSendTransaction(txStr string, encoding string) (*solana.Transaction, 
 		}
 	}
 
-	if len(wire) > packetDataSize {
+	rawLimit := packetDataSize
+	if encoding == "base64" {
+		rawLimit = v1PacketDataSize
+	}
+	if len(wire) > rawLimit {
+		return nil, nil, &InvalidParamsError{
+			Message: fmt.Sprintf("decoded solana_transaction too large: %d bytes (max: %d bytes)", len(wire), rawLimit),
+		}
+	}
+
+	decoder := bin.NewBinDecoder(wire)
+	tx, err := solana.TransactionFromDecoder(decoder)
+	if err != nil {
+		return nil, nil, &InvalidParamsError{Message: fmt.Sprintf("failed to deserialize solana_transaction: %v", err)}
+	}
+	if tx.Message.GetVersion() != solana.MessageVersionV1 && len(wire) > packetDataSize {
 		return nil, nil, &InvalidParamsError{
 			Message: fmt.Sprintf("decoded solana_transaction too large: %d bytes (max: %d bytes)", len(wire), packetDataSize),
 		}
 	}
-
-	tx, err := solana.TransactionFromDecoder(bin.NewBinDecoder(wire))
-	if err != nil {
-		return nil, nil, &InvalidParamsError{Message: fmt.Sprintf("failed to deserialize solana_transaction: %v", err)}
+	// Agave's RPC decoder is lenient, but TPU rejects trailing v1 bytes. Refuse
+	// them here rather than returning a receipt for a packet no leader accepts.
+	if tx.Message.GetVersion() == solana.MessageVersionV1 && decoder.HasRemaining() {
+		return nil, nil, &InvalidParamsError{Message: "failed to deserialize solana_transaction: trailing bytes after transaction v1"}
 	}
 
 	return tx, wire, nil
@@ -267,41 +284,15 @@ func featuresForSendValidation(slotCtx *sealevel.SlotCtx) *features.Features {
 	return nil
 }
 
-func shouldValidateInstructionIndexes(tx *solana.Transaction) bool {
-	return !tx.Message.IsVersioned() || tx.Message.AddressTableLookups.NumLookups() == 0
-}
-
-func validateSendTransactionSanitize(tx *solana.Transaction, feats *features.Features, validateInstructionIndexes bool) error {
-	hdr := tx.Message.Header
-	numKeys := len(tx.Message.AccountKeys)
-
-	if hdr.NumReadonlySignedAccounts >= hdr.NumRequiredSignatures ||
-		int(hdr.NumRequiredSignatures) > len(tx.Signatures) ||
-		len(tx.Signatures) > numKeys {
+func validateSendTransactionSanitize(tx *solana.Transaction, feats *features.Features) error {
+	if err := replay.ValidateTransactionShape(tx, nil); err != nil {
 		return errInvalidSanitizedTransaction
 	}
-
 	if feats != nil &&
 		feats.IsActive(features.StaticInstructionLimit) &&
 		len(tx.Message.Instructions) > maxSanitizedInstructionCount {
 		return errInvalidSanitizedTransaction
 	}
-
-	if !validateInstructionIndexes {
-		return nil
-	}
-
-	for _, ci := range tx.Message.Instructions {
-		if int(ci.ProgramIDIndex) >= numKeys {
-			return errInvalidSanitizedTransaction
-		}
-		for _, idx := range ci.Accounts {
-			if int(idx) >= numKeys {
-				return errInvalidSanitizedTransaction
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -320,7 +311,7 @@ func (rpcServer *RpcServer) preflightSendTransaction(ctx context.Context, tx *so
 		return err
 	}
 
-	if err := validateSendTransactionSanitize(tx, slotCtx.Features, true); err != nil {
+	if err := validateSendTransactionSanitize(tx, slotCtx.Features); err != nil {
 		return err
 	}
 
@@ -479,13 +470,13 @@ func normalizeSendTransactionErrorName(name string) string {
 	}
 }
 
-func (rpcServer *RpcServer) forwardTransactionToUpcomingLeaders(ctx context.Context, wire []byte) error {
+func (rpcServer *RpcServer) forwardTransactionToUpcomingLeaders(ctx context.Context, wire []byte, requireQUIC bool) error {
 	targetCount := int(rpcServer.sendTransactionLeaderForwardCount) + 1
 	if targetCount <= 1 {
 		targetCount = sendTransactionTargetCount
 	}
 
-	targets, err := rpcServer.resolveUpcomingLeaderTPUEndpoints(ctx, targetCount)
+	targets, err := rpcServer.resolveUpcomingLeaderTPUEndpointsForTransport(ctx, targetCount, requireQUIC)
 	if err != nil {
 		return err
 	}
@@ -529,11 +520,15 @@ func (rpcServer *RpcServer) forwardTransactionToUpcomingLeaders(ctx context.Cont
 }
 
 func (rpcServer *RpcServer) resolveUpcomingLeaderTPUEndpoints(ctx context.Context, want int) ([]tpuEndpoint, error) {
+	return rpcServer.resolveUpcomingLeaderTPUEndpointsForTransport(ctx, want, false)
+}
+
+func (rpcServer *RpcServer) resolveUpcomingLeaderTPUEndpointsForTransport(ctx context.Context, want int, requireQUIC bool) ([]tpuEndpoint, error) {
 	if want <= 0 {
 		want = 1
 	}
 
-	targets, updatedAt := rpcServer.collectUpcomingLeaderTPUEndpointsFromCache(want)
+	targets, updatedAt := rpcServer.collectUpcomingLeaderTPUEndpointsFromCache(want, requireQUIC)
 	cacheStale := updatedAt.IsZero() || time.Since(updatedAt) >= rpcServer.clusterNodesRefreshInterval()
 	if cacheStale || len(targets) < want {
 		if err := rpcServer.refreshLeaderTPUCacheForSend(ctx); err != nil {
@@ -543,7 +538,7 @@ func (rpcServer *RpcServer) resolveUpcomingLeaderTPUEndpoints(ctx context.Contex
 			mlog.Log.Warnf("sendTransaction: using partial cached TPU target set after refresh failure: %v", err)
 			return targets, nil
 		}
-		targets, _ = rpcServer.collectUpcomingLeaderTPUEndpointsFromCache(want)
+		targets, _ = rpcServer.collectUpcomingLeaderTPUEndpointsFromCache(want, requireQUIC)
 	}
 
 	if len(targets) == 0 {
@@ -639,7 +634,7 @@ func parseLeaderTPUEndpoint(raw *string, transport tpuTransport) (tpuEndpoint, b
 	return tpuEndpoint{Addr: addr, Transport: transport}, true
 }
 
-func (rpcServer *RpcServer) collectUpcomingLeaderTPUEndpointsFromCache(want int) ([]tpuEndpoint, time.Time) {
+func (rpcServer *RpcServer) collectUpcomingLeaderTPUEndpointsFromCache(want int, requireQUIC bool) ([]tpuEndpoint, time.Time) {
 	rpcServer.leaderTPUCacheMu.RLock()
 	nodeTPUs := make(map[solana.PublicKey]tpuEndpoint, len(rpcServer.leaderTPUByIdentity))
 	for leader, endpoint := range rpcServer.leaderTPUByIdentity {
@@ -664,7 +659,7 @@ func (rpcServer *RpcServer) collectUpcomingLeaderTPUEndpointsFromCache(want int)
 		seenLeaders[leader] = struct{}{}
 
 		target, ok := nodeTPUs[leader]
-		if !ok {
+		if !ok || requireQUIC && target.Transport != tpuTransportQUIC {
 			continue
 		}
 		if _, exists := seenTargets[target]; exists {

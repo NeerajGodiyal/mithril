@@ -26,8 +26,8 @@ const (
 // only this one means "stop trusting this node", so the reason is machine
 // readable rather than prose.
 type NodeUnhealthyError struct {
-	// Reason is one of the evidenceGateReason values: diverged, stalled,
-	// unavailable, or unknown_verification_state.
+	// Reason is one of the evidenceGateReason values: incomplete, diverged,
+	// stalled, unavailable, or unknown_verification_state.
 	Reason string
 	// VerifiedSlot and EligibleSlot describe how far verification had reached,
 	// so an operator can see whether the node was near the tip when it stopped.
@@ -36,7 +36,7 @@ type NodeUnhealthyError struct {
 }
 
 func (e *NodeUnhealthyError) Error() string {
-	return "Node is unhealthy and refuses to answer: " + e.Reason
+	return "Node is unhealthy"
 }
 
 func (e *NodeUnhealthyError) ToJSONRPCError() (jsonrpc.JSONRPCError, error) {
@@ -44,9 +44,10 @@ func (e *NodeUnhealthyError) ToJSONRPCError() (jsonrpc.JSONRPCError, error) {
 		Code:    rpcCodeNodeUnhealthy,
 		Message: e.Error(),
 		Data: map[string]any{
-			"reason":       e.Reason,
-			"verifiedSlot": e.VerifiedSlot,
-			"eligibleSlot": e.EligibleSlot,
+			"numSlotsBehind": nil,
+			"reason":         e.Reason,
+			"verifiedSlot":   e.VerifiedSlot,
+			"eligibleSlot":   e.EligibleSlot,
 		},
 	}, nil
 }

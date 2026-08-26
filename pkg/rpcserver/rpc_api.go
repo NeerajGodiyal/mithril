@@ -86,8 +86,8 @@ func (api *rpcAPI) GetVerificationStatus(
 	})
 }
 
-func (api *rpcAPI) GetHealth(ctx context.Context, p jsonrpc.RawParams) (GetHealthResp, error) {
-	return callRPC(ctx, func() (GetHealthResp, error) {
+func (api *rpcAPI) GetHealth(ctx context.Context, p jsonrpc.RawParams) (string, error) {
+	return callRPC(ctx, func() (string, error) {
 		return api.server.GetHealth(ctx, p)
 	})
 }

@@ -51,6 +51,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/Overclock-Validator/mithril/pkg/tpu"
 	"github.com/Overclock-Validator/mithril/pkg/turbine"
+	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/Overclock-Validator/mithril/pkg/version"
 	solana "github.com/gagliardetto/solana-go"
 	solrpc "github.com/gagliardetto/solana-go/rpc"
@@ -135,7 +136,8 @@ var (
 	paramArenaSizeMB         uint64
 	borrowedAccountArenaSize uint64
 
-	rpcPort int
+	rpcBindAddress string
+	rpcPort        int
 
 	// Lightbringer sidecar config
 	lightbringerEnabled          bool
@@ -241,6 +243,20 @@ func verifierConfigForConsensusMode(mode string, cfg replay.VerifierConfig) repl
 		cfg.ValidatorFooterHash = true
 	}
 	return cfg
+}
+
+func initializeVerificationStatusForRPC(cfg replay.VerifierConfig, st *state.MithrilState, alpenglowMode bool) {
+	var durableSlot uint64
+	if st != nil {
+		durableSlot = st.LastRootedSlot
+		if durableSlot == 0 {
+			durableSlot = st.SnapshotSlot
+		}
+	}
+	replay.ResetVerificationStatus(cfg.Enabled && cfg.Required && alpenglowMode, durableSlot)
+	if replay.HasActivePersistedVerificationDivergence(st, alpenglowMode) {
+		replay.MarkVerificationDiverged()
+	}
 }
 
 // alpenglowAddrForGossip returns the Votor QUIC address to advertise in gossip,
@@ -543,6 +559,7 @@ func init() {
 	Run.Flags().StringVar(&legacyGenesisHash, "legacy-genesis-hash", "", "Genesis hash owning legacy unbound AccountsDB/ledger artifacts (one-time re-genesis safety acknowledgement)")
 
 	// [rpc] section flags (Mithril's RPC server)
+	Run.Flags().StringVar(&rpcBindAddress, "rpc-bind-address", rpcserver.DefaultRPCBindAddress, "IP address for the RPC server. Defaults to loopback.")
 	Run.Flags().IntVar(&rpcPort, "rpc-port", 0, "RPC server port. Default off.")
 
 	// [replay] section flags
@@ -844,6 +861,13 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 	}
 
 	// [rpc] section - Mithril's RPC server
+	rpcBindAddress = strings.TrimSpace(getString("rpc-bind-address", "rpc.bind_address"))
+	if rpcBindAddress == "" {
+		rpcBindAddress = rpcserver.DefaultRPCBindAddress
+	}
+	if net.ParseIP(rpcBindAddress) == nil {
+		return fmt.Errorf("rpc.bind_address must be an IP address")
+	}
 	rpcPort = getInt("rpc-port", "rpc.port")
 
 	// Top-level
@@ -2306,6 +2330,7 @@ postBootstrap:
 	}
 	vcfg = verifierConfigForConsensusMode(consensusMode, vcfg)
 	replay.TrailingVerifierCfg = vcfg
+	initializeVerificationStatusForRPC(vcfg, mithrilState, alpenglowMode)
 
 	if foldBatch := config.GetInt("storage.fold_batch_slots"); alpenglowMode && foldBatch > 0 {
 		replay.FoldBatchSlots = min(max(foldBatch, 32), 512)
@@ -2521,13 +2546,53 @@ postBootstrap:
 		}
 	}
 
-	var rpcServer *rpcserver.RpcServer
+	var (
+		rpcServer             *rpcserver.RpcServer
+		submittedTransactions txstatus.Store
+		shutdownRPCOnce       sync.Once
+		shutdownRPCErr        error
+	)
+	shutdownRPC := func() error {
+		shutdownRPCOnce.Do(func() {
+			if rpcServer == nil {
+				return
+			}
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			shutdownRPCErr = rpcServer.Shutdown(shutdownCtx)
+		})
+		return shutdownRPCErr
+	}
 	if rpcPort < 0 || rpcPort > 65535 {
 		klog.Fatalf("invalid port: %d", rpcPort)
 	} else if rpcPort != 0 {
-		rpcServer = rpcserver.NewRpcServer(accountsDb, uint16(rpcPort), epochScheduleFromState(mithrilState))
+		rpcServer, err = rpcserver.NewRpcServerWithClusterRPCEndpointsE(
+			accountsDb,
+			rpcBindAddress,
+			uint16(rpcPort),
+			epochScheduleFromState(mithrilState),
+			rpcEndpoints,
+		)
+		if err != nil {
+			klog.Fatalf("create RPC server: %v", err)
+		}
+		if mithrilState != nil && mithrilState.GenesisHash != "" {
+			if err := rpcServer.SetGenesisHash(mithrilState.GenesisHash); err != nil {
+				klog.Fatalf("set RPC genesis hash: %v", err)
+			}
+		}
+		submittedTransactions, err = txstatus.NewIndex(txstatus.Config{MaxReceipts: 8192, Retention: time.Hour})
+		if err != nil {
+			klog.Fatalf("start transaction receipt tracking: %v", err)
+		}
+		rpcServer.SetTransactionReceipts(submittedTransactions)
 		rpcServer.Start()
-		mlog.Log.Infof("Started RPC server on port %d", rpcPort)
+		defer func() {
+			if err := shutdownRPC(); err != nil {
+				mlog.Log.Warnf("RPC server shutdown did not complete cleanly: %v", err)
+			}
+		}()
+		mlog.Log.Infof("Started RPC server on %s", net.JoinHostPort(rpcBindAddress, strconv.Itoa(rpcPort)))
 	}
 
 	// The Alpenglow observer is forkchoice authority in both Alpenglow modes.
@@ -2745,14 +2810,15 @@ postBootstrap:
 		leaderStop := make(chan struct{})
 		leaderDone := make(chan struct{})
 		leaderLoop := blockprod.NewLeaderLoop(blockprod.LeaderLoopConfig{
-			Controller:     controller,
-			Identity:       solana.PrivateKey(validatorIdentity),
-			AccountsDb:     accountsDb,
-			Broadcaster:    broadcaster,
-			ShredVersion:   uint16(turbineShredVersion),
-			EpochSchedule:  epochSchedule,
-			AlpenglowClock: true,
-			SlotDuration:   blockprod.AlpenglowSlotDuration,
+			Controller:      controller,
+			Identity:        solana.PrivateKey(validatorIdentity),
+			AccountsDb:      accountsDb,
+			Broadcaster:     broadcaster,
+			ShredVersion:    uint16(turbineShredVersion),
+			EpochSchedule:   epochSchedule,
+			AlpenglowClock:  true,
+			CaptureOutcomes: submittedTransactions != nil,
+			SlotDuration:    blockprod.AlpenglowSlotDuration,
 			ParentContext: func(slot uint64) blockprod.ParentContext {
 				tip := replay.ChainTipParentContext()
 				// Blockprod owns the replay-readiness rule. In particular, the first
@@ -2912,20 +2978,15 @@ postBootstrap:
 			klog.Fatalf("start Classic replay: %v", err)
 		}
 	}
-	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, uint16(turbineShredVersion), turbineAlpenglowAddr, validatorIdentity, blockstorePath, int(txParallelism), true, useLightbringer, useTurbine, dbgOpts, metricsWriter, slotCtxSetter, mithrilState, blockFetchOpts, consensusOpts, compactCfg.RewindHorizonBatches, replayStartTime)
+	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, uint16(turbineShredVersion), turbineAlpenglowAddr, validatorIdentity, blockstorePath, int(txParallelism), true, useLightbringer, useTurbine, dbgOpts, metricsWriter, slotCtxSetter, submittedTransactions, mithrilState, blockFetchOpts, consensusOpts, compactCfg.RewindHorizonBatches, replayStartTime)
 	cancelRun()
 	compactorWG.Wait()
 
 	cleanClassicShutdown := classicGuard != nil && result.Error == nil
-	if rpcServer != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		shutdownErr := rpcServer.Shutdown(shutdownCtx)
-		cancel()
-		if shutdownErr != nil {
-			mlog.Log.Errorf("RPC shutdown failed: %v", shutdownErr)
-			mlog.Log.Errorf("leaving AccountsDB open until process exit because an RPC handler may still be using it")
-			return
-		}
+	if err := shutdownRPC(); err != nil {
+		mlog.Log.Errorf("RPC shutdown failed: %v", err)
+		mlog.Log.Errorf("leaving AccountsDB open until process exit because an RPC handler may still be using it")
+		return
 	}
 	if cleanClassicShutdown {
 		if err := accountsDb.SyncDurableStorage(); err != nil {
@@ -4495,6 +4556,7 @@ func runReplayWithRecovery(
 	dbgOpts *replay.DebugOptions,
 	metricsWriter io.Writer,
 	rpcServer replay.SlotCtxSetter,
+	submittedTransactions txstatus.Sink,
 	mithrilState *state.MithrilState,
 	blockFetchOpts *replay.BlockFetchOpts,
 	consensusOpts *replay.ConsensusOpts,
@@ -4509,7 +4571,7 @@ func runReplayWithRecovery(
 			turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr,
 			turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr,
 			turbineIdentity, blockDir, txParallelism, isLive, useLightbringer,
-			useTurbine, dbgOpts, metricsWriter, rpcServer, mithrilState,
+			useTurbine, dbgOpts, metricsWriter, rpcServer, submittedTransactions, mithrilState,
 			blockFetchOpts, consensusOpts, rewindHorizon, replayStartTime,
 		)
 	})
@@ -4543,6 +4605,7 @@ func runReplayWithForkRecovery(
 	dbgOpts *replay.DebugOptions,
 	metricsWriter io.Writer,
 	rpcServer replay.SlotCtxSetter,
+	submittedTransactions txstatus.Sink,
 	mithrilState *state.MithrilState,
 	blockFetchOpts *replay.BlockFetchOpts,
 	consensusOpts *replay.ConsensusOpts,
@@ -4616,7 +4679,7 @@ func runReplayWithForkRecovery(
 		onCancelWriteState = nil
 	}
 
-	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
+	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, submittedTransactions, blockFetchOpts, consensusOpts, onCancelWriteState)
 	if consensusOpts == nil || !consensusOpts.Alpenglow {
 		return result
 	}
@@ -4737,9 +4800,18 @@ func runReplayWithForkRecovery(
 			mlog.Log.Errorf("fork switch: cannot rebuild resume context: %v; halting", err)
 			break
 		}
+		if submittedTransactions != nil {
+			durableThrough := uint64(0)
+			if retryStart > 0 {
+				durableThrough = retryStart - 1
+			}
+			submittedTransactions.DurableRewound(durableThrough)
+			submittedTransactions.Unwound(retryStart)
+			submittedTransactions.RewindBlockHeight(rs.ParentBlockHeight)
+		}
 		mlog.Log.Warnf("fork switch: %s; re-replaying the selected chain from rooted slot %d (attempt %d/%d)",
 			recoveryReason, retryStart-1, attempt, maxForkSwitchRetries)
-		result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, rs, retryStart, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)
+		result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, rs, retryStart, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, submittedTransactions, blockFetchOpts, consensusOpts, onCancelWriteState)
 	}
 	return result
 }
