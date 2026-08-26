@@ -269,6 +269,37 @@ func TestVerifierPublishesStalledAfterConfiguredWindow(t *testing.T) {
 	require.Equal(t, VerificationComplete, state)
 }
 
+func TestVerifierRewindReplacesAbandonedSuffix(t *testing.T) {
+	src := &fakeVerificationSource{blocks: map[uint64]*verifiedBlock{}, skipped: map[uint64]bool{}, errs: map[uint64]error{}}
+	v := newTestVerifier(src)
+
+	for slot := uint64(100); slot <= 102; slot++ {
+		digest, block := digestFor(slot, vhash(byte(slot)), vsig(byte(slot)), 5000, false, []uint64{1}, []uint64{2}, []byte{0})
+		v.Record(digest)
+		src.blocks[slot] = block
+	}
+	v.SetExecutedTip(200)
+	for range 3 {
+		v.verifyNext()
+	}
+	require.Equal(t, uint64(102), v.VerifiedWatermark())
+
+	v.RewindFrom(101)
+	assert.Equal(t, uint64(100), v.VerifiedWatermark())
+
+	for slot := uint64(101); slot <= 102; slot++ {
+		digest, block := digestFor(slot, vhash(byte(slot+10)), vsig(byte(slot+10)), 6000, false, []uint64{2}, []uint64{3}, []byte{0})
+		v.Record(digest)
+		src.blocks[slot] = block
+	}
+	v.SetExecutedTip(200)
+	for range 2 {
+		v.verifyNext()
+	}
+	assert.Equal(t, uint64(102), v.VerifiedWatermark())
+	assert.Nil(t, v.Failure())
+}
+
 func TestVerifierOutageTimeDoesNotBecomeStallTime(t *testing.T) {
 	ResetVerificationStatus(true, 0)
 	defer ResetVerificationStatus(false, 0)
