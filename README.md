@@ -19,6 +19,8 @@ The `run` command starts Mithril as a live full node - it bootstraps from a Sola
 
 This branch supports two protocol paths. `network.cluster = "alpenglow"` (the default) uses native turbine, certificate-driven fork choice, speculative replay, and rooted-durable storage. `mainnet-beta`, `testnet`, and `devnet` retain Mithril's established verifying-only RPC replay and per-slot AccountsDB persistence. Validator/block-production mode is deliberately available only on Alpenglow; the classic clusters remain verifying nodes.
 
+Classic nodes can opt into finalized rooted storage for the local [rooted event feed](docs/rooted-event-feed.md).
+
 Mithril in its `alpenglow-dev` branch can be run via a command of the following form:
 ```
 ./mithril run   --bootstrap new-snapshot   --cluster alpenglow   --accounts-path /mnt/mithril-ag-accounts   --ledger-path /mnt/mithril-ag-ledger   --block-source turbine   --turbine-bind-addr 0.0.0.0:8025   --turbine-gossip-entrypoint 74.50.90.234:9000   --turbine-gossip-bind-addr 0.0.0.0:8020   --turbine-advertised-ip X.Y.X.Y  --consensus-mode validator   --alpenglow-observer-bind-addr 0.0.0.0:8010   --tpu-quic-bind-addr 0.0.0.0:8011   --validator-advertised-ip X.Y.X.Y   --identity-keypair ./validator-keypair.json   --vote-account-keypair ./vote-account-keypair.json   --rpc https://rpc.ag.validator1.net
