@@ -3,6 +3,7 @@ package rpcclient
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -10,6 +11,13 @@ import (
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 )
+
+func requireLiveRPC(t *testing.T) {
+	t.Helper()
+	if os.Getenv("MITHRIL_LIVE_RPC_TESTS") != "1" {
+		t.Skip("set MITHRIL_LIVE_RPC_TESTS=1 to run public RPC integration tests")
+	}
+}
 
 func TestSanitizeEndpointForDisplay(t *testing.T) {
 	const raw = "HTTPS://user:password@rpc.example.com:8899/private/path?api-key=secret#fragment"
@@ -50,6 +58,7 @@ func TestSanitizeErrorForDisplay(t *testing.T) {
 }
 
 func TestBlockFetch_Confirmed(t *testing.T) {
+	requireLiveRPC(t)
 	fetcher := NewRpcClient("https://api.mainnet-beta.solana.com/")
 
 	result, err := fetcher.GetBlockConfirmed(1234)
@@ -71,6 +80,7 @@ func TestBlockFetch_Confirmed(t *testing.T) {
 }
 
 func TestBlockFetch_Finalized(t *testing.T) {
+	requireLiveRPC(t)
 	fetcher := NewRpcClient("https://api.mainnet-beta.solana.com/")
 
 	result, err := fetcher.GetBlockFinalized(1234)
@@ -92,6 +102,7 @@ func TestBlockFetch_Finalized(t *testing.T) {
 }
 
 func TestBlockFetch_LatestConfirmed(t *testing.T) {
+	requireLiveRPC(t)
 	fetcher := NewRpcClient("https://api.mainnet-beta.solana.com/")
 
 	result, err := fetcher.GetLatestBlockConfirmed()
@@ -115,6 +126,7 @@ func TestBlockFetch_LatestConfirmed(t *testing.T) {
 }
 
 func TestBlockFetch_LatestFinalized(t *testing.T) {
+	requireLiveRPC(t)
 	fetcher := NewRpcClient("https://api.mainnet-beta.solana.com/")
 
 	result, err := fetcher.GetLatestBlockFinalized()

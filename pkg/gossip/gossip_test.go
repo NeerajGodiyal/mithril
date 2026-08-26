@@ -130,7 +130,7 @@ func TestClientAdvertisesAlpenglowSocket(t *testing.T) {
 		t.Fatalf("alpenglow addr = %s, want %s", got, want)
 	}
 	if contact.TPUVoteAddr != nil || contact.TPUVoteQuicAddr != nil {
-		t.Fatalf("Alpenglow tag 13 must not be duplicated into TPU vote tags 9/12: udp=%v quic=%v", contact.TPUVoteAddr, contact.TPUVoteQuicAddr)
+		t.Fatal("Alpenglow Votor endpoint was duplicated into legacy TPU vote tags")
 	}
 }
 
@@ -382,6 +382,37 @@ func TestPingPongRoundTrip(t *testing.T) {
 	}
 	if decoded.Kind != packetPong || !decoded.Pong.Verify() {
 		t.Fatalf("decoded pong did not verify")
+	}
+}
+
+func TestPushContactSendFailureIsBestEffort(t *testing.T) {
+	client, err := NewClient(Config{
+		Entrypoint:   "127.0.0.1:8000",
+		BindAddr:     "127.0.0.1:0",
+		TVUAddr:      "127.0.0.1:8001",
+		AdvertisedIP: "127.0.0.1",
+		ShredVersion: 4321,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	if err := client.initializeContact(conn.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatalf("initializeContact: %v", err)
+	}
+	client.recordPeer(client.entrypoint)
+	if err := conn.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := client.pushContact(conn); err != nil {
+		t.Fatalf("pushContact returned transient peer send error: %v", err)
+	}
+	if got := client.Stats().TxErrors; got != 1 {
+		t.Fatalf("TxErrors = %d, want 1", got)
 	}
 }
 
