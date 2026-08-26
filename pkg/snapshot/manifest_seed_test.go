@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/Overclock-Validator/mithril/pkg/base58"
 	"github.com/Overclock-Validator/mithril/pkg/epochstakes"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/state"
@@ -48,4 +49,17 @@ func TestPopulateManifestSeedKeepsManifestEpochFrame(t *testing.T) {
 	if persisted.Epoch != 1073 {
 		t.Fatalf("persisted epoch = %d, want 1073", persisted.Epoch)
 	}
+}
+
+func TestPopulateManifestSeedReplacesSnapshotBlockID(t *testing.T) {
+	blockID := [32]byte{1, 2, 3}
+	mithrilState := &state.MithrilState{ManifestParentAlpenglowBlockID: "stale"}
+	manifest := &SnapshotManifest{Bank: &DeserializableVersionedBank{}, BlockID: &blockID}
+
+	PopulateManifestSeed(mithrilState, manifest)
+	require.Equal(t, base58.Encode(blockID[:]), mithrilState.ManifestParentAlpenglowBlockID)
+
+	manifest.BlockID = nil
+	PopulateManifestSeed(mithrilState, manifest)
+	require.Empty(t, mithrilState.ManifestParentAlpenglowBlockID)
 }

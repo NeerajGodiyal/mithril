@@ -113,6 +113,21 @@ func TestResumeContextRoundTrip(t *testing.T) {
 	}
 }
 
+func TestManifestParentAlpenglowBlockIDRoundTrip(t *testing.T) {
+	orig := MithrilState{ManifestParentAlpenglowBlockID: base58.Encode(bh(0xAB))}
+	data, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got MithrilState
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ManifestParentAlpenglowBlockID != orig.ManifestParentAlpenglowBlockID {
+		t.Fatalf("manifest parent Alpenglow block ID = %q, want %q", got.ManifestParentAlpenglowBlockID, orig.ManifestParentAlpenglowBlockID)
+	}
+}
+
 // mockBankhashDb is an in-memory BankhashGetter for validation tests.
 type mockBankhashDb struct {
 	hashes map[uint64][]byte
