@@ -11,6 +11,45 @@ import (
 	"github.com/mr-tron/base58"
 )
 
+func TestLoadStateMigratesV3StorageProfile(t *testing.T) {
+	tests := []struct {
+		name           string
+		cluster        string
+		lastRootedSlot uint64
+		wantRooted     bool
+	}{
+		{name: "legacy Alpenglow", cluster: "alpenglow", wantRooted: true},
+		{name: "classic per-slot", cluster: "mainnet-beta"},
+		{name: "existing rooted watermark", cluster: "devnet", lastRootedSlot: 42, wantRooted: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			data, err := json.Marshal(&MithrilState{
+				StateSchemaVersion: 3,
+				Stage:              "ready",
+				Cluster:            test.cluster,
+				LastRootedSlot:     test.lastRootedSlot,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, StateFileName), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := LoadState(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.StateSchemaVersion != CurrentStateSchemaVersion || got.RootedDurable != test.wantRooted {
+				t.Fatalf("LoadState() = version %d rooted %t, want version %d rooted %t",
+					got.StateSchemaVersion, got.RootedDurable, CurrentStateSchemaVersion, test.wantRooted)
+			}
+		})
+	}
+}
+
 // LastRootedContext (the resume bundle as of the last rooted slot) must survive a JSON round-trip
 // through the state file unchanged.
 func TestResumeContextRoundTrip(t *testing.T) {
@@ -49,6 +88,14 @@ func TestResumeContextRoundTrip(t *testing.T) {
 				File:    "checkpoint-100-deadbeef.bin",
 				Size:    1234,
 				SHA256:  "deadbeef",
+			},
+			RootedEventBatch: &RootedEventBatchRef{
+				Version:     1,
+				FromSlot:    96,
+				ThroughSlot: 100,
+				File:        "rooted-events-96-100-cafebabe.bin",
+				Size:        5678,
+				SHA256:      "cafebabe",
 			},
 		},
 	}
@@ -95,16 +142,18 @@ func TestGetResumeSlot_RootedVsLegacy(t *testing.T) {
 		snapshotSlot   uint64
 		lastSlot       uint64
 		lastRootedSlot uint64
+		rootedDurable  bool
 		want           uint64
 	}{
-		{"rooted: resume from R+1 not C+1", 50, 110, 100, 101},
-		{"rooted: R just behind C", 50, 101, 100, 101},
-		{"legacy: resume from LastSlot+1", 50, 110, 0, 111},
-		{"fresh: resume from SnapshotSlot+1", 50, 0, 0, 51},
+		{"rooted: resume from R+1 not C+1", 50, 110, 100, true, 101},
+		{"rooted: R just behind C", 50, 101, 100, true, 101},
+		{"rooted before first fold: resume from snapshot", 50, 110, 0, true, 51},
+		{"legacy: resume from LastSlot+1", 50, 110, 0, false, 111},
+		{"fresh: resume from SnapshotSlot+1", 50, 0, 0, false, 51},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &MithrilState{SnapshotSlot: tt.snapshotSlot, LastSlot: tt.lastSlot, LastRootedSlot: tt.lastRootedSlot}
+			s := &MithrilState{SnapshotSlot: tt.snapshotSlot, LastSlot: tt.lastSlot, LastRootedSlot: tt.lastRootedSlot, RootedDurable: tt.rootedDurable}
 			if got := s.GetResumeSlot(); got != tt.want {
 				t.Fatalf("GetResumeSlot()=%d, want %d", got, tt.want)
 			}
@@ -120,15 +169,17 @@ func TestDurableHighWater(t *testing.T) {
 		snapshotSlot   uint64
 		lastSlot       uint64
 		lastRootedSlot uint64
+		rootedDurable  bool
 		want           uint64
 	}{
-		{"rooted", 50, 110, 100, 100},
-		{"legacy replayed", 50, 110, 0, 110},
-		{"legacy fresh", 50, 0, 0, 50},
+		{"rooted", 50, 110, 100, true, 100},
+		{"rooted before first fold", 50, 110, 0, true, 50},
+		{"legacy replayed", 50, 110, 0, false, 110},
+		{"legacy fresh", 50, 0, 0, false, 50},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &MithrilState{SnapshotSlot: tt.snapshotSlot, LastSlot: tt.lastSlot, LastRootedSlot: tt.lastRootedSlot}
+			s := &MithrilState{SnapshotSlot: tt.snapshotSlot, LastSlot: tt.lastSlot, LastRootedSlot: tt.lastRootedSlot, RootedDurable: tt.rootedDurable}
 			if got := s.DurableHighWater(); got != tt.want {
 				t.Fatalf("DurableHighWater()=%d, want %d", got, tt.want)
 			}
@@ -142,7 +193,7 @@ func TestDurableHighWater(t *testing.T) {
 // batch can carry rows for slots above a partially-advanced state file).
 func TestValidateAgainstBankhashDB_RootedMode(t *testing.T) {
 	t.Run("clean: db high-water == R", func(t *testing.T) {
-		s := &MithrilState{LastSlot: 110, LastRootedSlot: 100, LastRootedBankhash: base58.Encode(bh(0xAA))}
+		s := &MithrilState{RootedDurable: true, LastSlot: 110, LastRootedSlot: 100, LastRootedBankhash: base58.Encode(bh(0xAA))}
 		db := &mockBankhashDb{hashes: map[uint64][]byte{100: bh(0xAA)}}
 		if err := s.ValidateAgainstBankhashDB(db); err != nil {
 			t.Fatalf("expected clean, got: %v", err)
@@ -153,7 +204,7 @@ func TestValidateAgainstBankhashDB_RootedMode(t *testing.T) {
 		// Batch folds write bankhash rows NoSync and RecoverFoldState is the
 		// commit authority — rows beyond the state file's R are expected after
 		// a hard kill, not evidence of a torn write.
-		s := &MithrilState{LastSlot: 110, LastRootedSlot: 100, LastRootedBankhash: base58.Encode(bh(0xAA))}
+		s := &MithrilState{RootedDurable: true, LastSlot: 110, LastRootedSlot: 100, LastRootedBankhash: base58.Encode(bh(0xAA))}
 		db := &mockBankhashDb{hashes: map[uint64][]byte{100: bh(0xAA), 101: bh(0xBB)}}
 		if err := s.ValidateAgainstBankhashDB(db); err != nil {
 			t.Fatalf("bankhash rows beyond R must be tolerated, got: %v", err)
@@ -161,7 +212,7 @@ func TestValidateAgainstBankhashDB_RootedMode(t *testing.T) {
 	})
 
 	t.Run("missing: no bankhash at R", func(t *testing.T) {
-		s := &MithrilState{LastSlot: 110, LastRootedSlot: 100, LastRootedBankhash: base58.Encode(bh(0xAA))}
+		s := &MithrilState{RootedDurable: true, LastSlot: 110, LastRootedSlot: 100, LastRootedBankhash: base58.Encode(bh(0xAA))}
 		db := &mockBankhashDb{hashes: map[uint64][]byte{}}
 		if err := s.ValidateAgainstBankhashDB(db); err == nil {
 			t.Fatal("expected error for missing bankhash at R, got nil")
@@ -169,10 +220,18 @@ func TestValidateAgainstBankhashDB_RootedMode(t *testing.T) {
 	})
 
 	t.Run("mismatch: db bankhash at R differs from state", func(t *testing.T) {
-		s := &MithrilState{LastSlot: 110, LastRootedSlot: 100, LastRootedBankhash: base58.Encode(bh(0xAA))}
+		s := &MithrilState{RootedDurable: true, LastSlot: 110, LastRootedSlot: 100, LastRootedBankhash: base58.Encode(bh(0xAA))}
 		db := &mockBankhashDb{hashes: map[uint64][]byte{100: bh(0xBB)}}
 		if err := s.ValidateAgainstBankhashDB(db); err == nil {
 			t.Fatal("expected error for bankhash mismatch at R, got nil")
+		}
+	})
+
+	t.Run("before first fold uses snapshot manifest frontier", func(t *testing.T) {
+		s := &MithrilState{RootedDurable: true, SnapshotSlot: 100, LastSlot: 110}
+		db := &mockBankhashDb{hashes: map[uint64][]byte{110: bh(0xAA), 111: bh(0xBB)}}
+		if err := s.ValidateAgainstBankhashDB(db); err != nil {
+			t.Fatalf("RAM-only rows above the snapshot are not durable corruption: %v", err)
 		}
 	})
 }

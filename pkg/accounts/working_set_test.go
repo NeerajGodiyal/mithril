@@ -33,6 +33,37 @@ func TestWorkingSetLookupBatchPreservesOrderAndMisses(t *testing.T) {
 	assert.Same(t, latest, out[3])
 }
 
+func TestWorkingSetLookupAtDoesNotReadFutureSlot(t *testing.T) {
+	w := NewWorkingSet()
+	w.Add(5, []*Account{wsAcct(1, 500)})
+	w.Add(7, []*Account{wsAcct(1, 700), wsAcct(2, 200)})
+
+	acct, ok := w.LookupAt(6, wsKey(1))
+	require.True(t, ok)
+	assert.Equal(t, uint64(500), acct.Lamports)
+	_, ok = w.LookupAt(6, wsKey(2))
+	assert.False(t, ok)
+
+	out := make([]*Account, 2)
+	w.LookupBatchAt(6, []solana.PublicKey{{1}, {2}}, out)
+	assert.Equal(t, uint64(500), out[0].Lamports)
+	assert.Nil(t, out[1])
+}
+
+func TestWorkingSetViewSurvivesFutureAddAndUnwind(t *testing.T) {
+	w := NewWorkingSet()
+	w.Add(5, []*Account{wsAcct(1, 500)})
+	view := w.ViewAt(5)
+	w.Add(7, []*Account{wsAcct(1, 700)})
+	w.EvictFrom(5)
+
+	acct, ok := view.Lookup(wsKey(1))
+	require.True(t, ok)
+	assert.Equal(t, uint64(500), acct.Lamports)
+	_, ok = w.Lookup(wsKey(1))
+	assert.False(t, ok)
+}
+
 func BenchmarkWorkingSetLookupBlock(b *testing.B) {
 	const keyCount = 30_000
 	w := NewWorkingSet()

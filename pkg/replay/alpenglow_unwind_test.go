@@ -37,10 +37,10 @@ func testUnwindBankSysvars(t *testing.T, slot uint64, epochRewardsMarker uint64)
 // (configureInitialBlockFromResume or the ReplayBlocks seed path), (3) restore
 // it on the in-loop unwind, and (4) bump the count below.
 func TestResumeContextFieldTripwire(t *testing.T) {
-	// TransactionStatusCheckpoint is the one durability-only field: startup and
-	// rewind consume it before ResumeState is built. It intentionally does not
-	// enter bank execution state, but remains part of this conscious field count.
-	const wired = 24 // 23 execution fields + 1 durability-only checkpoint ref
+	// TransactionStatusCheckpoint and RootedEventBatch are durability-only:
+	// startup/streaming consume them outside bank execution state, but both
+	// remain part of this conscious field count.
+	const wired = 25 // 23 execution fields + 2 durability-only sidecar refs
 	if n := reflect.TypeOf(state.ResumeContext{}).NumField(); n != wired {
 		t.Fatalf("state.ResumeContext has %d fields but %d are wired through the resume/unwind restoration path — wire the new field(s) end-to-end, then update this count", n, wired)
 	}

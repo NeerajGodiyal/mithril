@@ -149,6 +149,10 @@ func TestSegmentManifestRoundTripAndTornDetection(t *testing.T) {
 	assert.Equal(t, m.ResumeCtx, contextOnly.ResumeCtx)
 	assert.Empty(t, contextOnly.Records, "retention scan must not allocate or decode account records")
 	assert.Empty(t, contextOnly.Bankhashes, "retention scan only needs the resume context")
+	verifiedContext, err := ReadSegmentManifestContextVerified(segmentManifestPath(dir, 130, 42))
+	require.NoError(t, err)
+	assert.Equal(t, m.ResumeCtx, verifiedContext.ResumeCtx)
+	assert.Empty(t, verifiedContext.Records)
 
 	// Flip one byte -> torn.
 	path := segmentManifestPath(dir, 130, 42)
@@ -158,6 +162,30 @@ func TestSegmentManifestRoundTripAndTornDetection(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, data, 0o644))
 	_, err = ReadSegmentManifest(path)
 	assert.ErrorIs(t, err, ErrTornManifest)
+	_, err = ReadSegmentManifestContextVerified(path)
+	assert.ErrorIs(t, err, ErrTornManifest)
+}
+
+func TestVerifiedManifestContextStaysBoundToOpenedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := segmentManifestPath(dir, 130, 42)
+	original := &SegmentManifest{
+		Version: segManifestVersion, Kind: ManifestKindFold, BatchSeq: 1,
+		ThroughSlot: 130, FileId: 42, ResumeCtx: []byte(`{"slot":130}`),
+	}
+	replacement := *original
+	replacement.BatchSeq = 2
+	replacement.ResumeCtx = []byte(`{"slot":999}`)
+	require.NoError(t, WriteSegmentManifest(dir, original))
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+	require.NoError(t, os.Rename(path, path+".old"))
+	require.NoError(t, WriteSegmentManifest(dir, &replacement))
+
+	got, err := readSegmentManifestContext(f, true)
+	require.NoError(t, err)
+	assert.Equal(t, original.ResumeCtx, got.ResumeCtx)
 }
 
 func BenchmarkReadSegmentManifestContext(b *testing.B) {
