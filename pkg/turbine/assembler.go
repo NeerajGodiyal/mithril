@@ -18,6 +18,7 @@ import (
 var (
 	ErrDuplicateShred               = errors.New("duplicate data shred")
 	ErrConflictingShred             = errors.New("conflicting data shred")
+	ErrConflictingShredMetadata     = errors.New("conflicting shred metadata")
 	ErrSlotIncomplete               = errors.New("slot incomplete")
 	ErrSlotOverflow                 = errors.New("slot has too many data shreds")
 	ErrNonCanonicalAlpenglowBlockID = errors.New("non-canonical alpenglow block id")
@@ -303,11 +304,13 @@ func (a *SlotAssembler) addShredFrom(shred *Shred, fromRepair bool) (*slotComple
 		if errors.Is(err, ErrDuplicateShred) {
 			return nil, nil
 		}
-		if errors.Is(err, ErrConflictingShred) {
+		if errors.Is(err, ErrConflictingShred) || errors.Is(err, ErrConflictingShredMetadata) {
 			if a.handleConflictingShredLocked(state) {
 				return nil, err
 			}
-			return nil, nil
+			if errors.Is(err, ErrConflictingShred) {
+				return nil, nil
+			}
 		}
 		state.noteError(err)
 		return nil, err
@@ -327,11 +330,13 @@ func (a *SlotAssembler) addShredFrom(shred *Shred, fromRepair bool) (*slotComple
 			if errors.Is(err, ErrDuplicateShred) {
 				continue
 			}
-			if errors.Is(err, ErrConflictingShred) {
+			if errors.Is(err, ErrConflictingShred) || errors.Is(err, ErrConflictingShredMetadata) {
 				if a.handleConflictingShredLocked(state) {
 					return nil, err
 				}
-				continue
+				if errors.Is(err, ErrConflictingShred) {
+					continue
+				}
 			}
 			state.noteError(err)
 			return nil, err
@@ -850,6 +855,10 @@ func (s *slotState) addDataShred(shred *Shred) error {
 	if s.shredVer != shred.Version {
 		return fmt.Errorf("mixed shred versions for slot %d: %d and %d", shred.Slot, s.shredVer, shred.Version)
 	}
+	if shred.LastInSlot() && s.haveLast && s.lastIndex != shred.Index {
+		return fmt.Errorf("%w: slot %d has terminal shred indices %d and %d",
+			ErrConflictingShredMetadata, shred.Slot, s.lastIndex, shred.Index)
+	}
 	if !s.firstParent {
 		s.parentSlot = shred.ParentSlot()
 		s.firstParent = true
@@ -1022,8 +1031,11 @@ func (s *slotState) addCodingShred(shred *Shred) error {
 		return fmt.Errorf("mixed shred versions for slot %d: %d and %d", shred.Slot, s.shredVer, shred.Version)
 	}
 	fec := s.fecSet(shred.FECSetIndex)
-	if _, exists := fec.coding[shred.Position]; exists {
-		return ErrDuplicateShred
+	if existing := fec.coding[shred.Position]; existing != nil {
+		if bytes.Equal(existing.Payload, shred.Payload) {
+			return ErrDuplicateShred
+		}
+		return fmt.Errorf("%w: slot %d coding position %d", ErrConflictingShredMetadata, shred.Slot, shred.Position)
 	}
 	if err := fec.acceptShred(shred); err != nil {
 		return err
@@ -1464,7 +1476,7 @@ func (f *fecState) acceptShred(shred *Shred) error {
 		copy(f.signature[:], shred.Signature[:])
 		f.haveSig = true
 	} else if f.signature != shred.Signature {
-		return fmt.Errorf("mixed FEC signatures for slot %d fec_set=%d", f.slot, f.fecSetIndex)
+		return fmt.Errorf("%w: mixed FEC signatures for slot %d fec_set=%d", ErrConflictingShredMetadata, f.slot, f.fecSetIndex)
 	}
 
 	switch shred.Type {
@@ -1476,10 +1488,10 @@ func (f *fecState) acceptShred(shred *Shred) error {
 		if f.dataVariant == 0 {
 			f.dataVariant = shred.Variant
 		} else if f.dataVariant != shred.Variant {
-			return fmt.Errorf("mixed data shred variants for slot %d fec_set=%d: 0x%02x and 0x%02x", f.slot, f.fecSetIndex, f.dataVariant, shred.Variant)
+			return fmt.Errorf("%w: mixed data shred variants for slot %d fec_set=%d: 0x%02x and 0x%02x", ErrConflictingShredMetadata, f.slot, f.fecSetIndex, f.dataVariant, shred.Variant)
 		}
 		if f.codeVariant != 0 && f.codeVariant != expected {
-			return fmt.Errorf("mixed data/code shred variants for slot %d fec_set=%d: data=0x%02x code=0x%02x", f.slot, f.fecSetIndex, shred.Variant, f.codeVariant)
+			return fmt.Errorf("%w: mixed data/code shred variants for slot %d fec_set=%d: data=0x%02x code=0x%02x", ErrConflictingShredMetadata, f.slot, f.fecSetIndex, shred.Variant, f.codeVariant)
 		}
 	case ShredTypeCode:
 		expected, ok := merkleCounterpartVariant(shred.Variant, ShredTypeData)
@@ -1489,10 +1501,10 @@ func (f *fecState) acceptShred(shred *Shred) error {
 		if f.codeVariant == 0 {
 			f.codeVariant = shred.Variant
 		} else if f.codeVariant != shred.Variant {
-			return fmt.Errorf("mixed coding shred variants for slot %d fec_set=%d: 0x%02x and 0x%02x", f.slot, f.fecSetIndex, f.codeVariant, shred.Variant)
+			return fmt.Errorf("%w: mixed coding shred variants for slot %d fec_set=%d: 0x%02x and 0x%02x", ErrConflictingShredMetadata, f.slot, f.fecSetIndex, f.codeVariant, shred.Variant)
 		}
 		if f.dataVariant != 0 && f.dataVariant != expected {
-			return fmt.Errorf("mixed data/code shred variants for slot %d fec_set=%d: data=0x%02x code=0x%02x", f.slot, f.fecSetIndex, f.dataVariant, shred.Variant)
+			return fmt.Errorf("%w: mixed data/code shred variants for slot %d fec_set=%d: data=0x%02x code=0x%02x", ErrConflictingShredMetadata, f.slot, f.fecSetIndex, f.dataVariant, shred.Variant)
 		}
 	}
 	return nil
@@ -1505,7 +1517,7 @@ func (f *fecState) setLayout(layout fecLayout) error {
 		return nil
 	}
 	if f.layout != layout {
-		return fmt.Errorf("mixed FEC layouts for slot %d fec_set=%d: %+v and %+v", f.slot, f.fecSetIndex, f.layout, layout)
+		return fmt.Errorf("%w: mixed FEC layouts for slot %d fec_set=%d: %+v and %+v", ErrConflictingShredMetadata, f.slot, f.fecSetIndex, f.layout, layout)
 	}
 	return nil
 }
