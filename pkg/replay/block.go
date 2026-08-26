@@ -2688,6 +2688,9 @@ func ReplayBlocks(
 			mlog.Log.Warnf("%v", result.Error)
 			return false
 		}
+		if trailingVerifier != nil {
+			trailingVerifier.RewindFrom(sw.Slot)
+		}
 
 		for slot := range alpenglowExecutedBlockIDs {
 			if slot >= sw.Slot {

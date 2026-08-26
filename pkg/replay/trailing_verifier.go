@@ -267,6 +267,41 @@ func (v *TrailingVerifier) PruneThrough(slot uint64) {
 	v.publishStatusLocked()
 }
 
+// RewindFrom discards verifier state for an abandoned fork suffix. Without
+// this, the verifier can compare a finalized replacement block against the
+// digest captured from the branch that replay just unwound.
+func (v *TrailingVerifier) RewindFrom(slot uint64) {
+	if v == nil {
+		return
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	kept := v.order[:0]
+	for _, recorded := range v.order {
+		if recorded >= slot {
+			delete(v.pending, recorded)
+			continue
+		}
+		kept = append(kept, recorded)
+	}
+	v.order = kept
+	floor := uint64(0)
+	if slot > 0 {
+		floor = slot - 1
+	}
+	if v.verified > floor {
+		v.verified = floor
+	}
+	if v.executedTip >= slot {
+		v.executedTip = floor
+	}
+	if v.firstSlot == 0 || v.firstSlot >= slot {
+		v.firstSlot = slot
+	}
+	v.publishStatusLocked()
+}
+
 // Run drives verification until ctx is done. One slot per permit, oldest
 // first, capped at MaxRPS.
 func (v *TrailingVerifier) Run(ctx context.Context) {
