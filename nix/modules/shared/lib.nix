@@ -62,6 +62,7 @@
         alpenglow_max_message_bytes = cfg.configSchema.consensusAlpenglowMaxMessageBytes;
       };
       rpc = {
+        bind_address = cfg.configSchema.rpcBindAddress;
         port = cfg.configSchema.rpcPort;
       };
       tuning = {

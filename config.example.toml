@@ -471,13 +471,16 @@ name = "mithril"
 # [rpc] - Mithril RPC Server
 # ============================================================================
 #
-# Mithril exposes a Solana-compatible JSON-RPC interface on all interfaces,
-# allowing other tools to query Mithril's account state directly.
+# Mithril provides a Solana-compatible JSON-RPC interface on the configured
+# listener. It defaults to loopback.
 #
 # Query with: curl http://localhost:8899 -X POST -H "Content-Type: application/json" \
 #   -d '{"jsonrpc":"2.0","id":1,"method":"getBlockHeight"}'
 
 [rpc]
+    # Listener IP. Defaults to loopback; an exact non-loopback IP adds remote
+    # access while the same port remains available locally.
+    bind_address = "127.0.0.1"
     # Port for Mithril's RPC interface (0 = disabled)
     port = 8899
 

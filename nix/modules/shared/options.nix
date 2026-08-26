@@ -338,6 +338,12 @@
         description = "RPC server port (0 disables).";
       };
 
+      rpcBindAddress = lib.mkOption {
+        type = lib.types.str;
+        default = "127.0.0.1";
+        description = "Primary RPC listener IP; exact non-loopback binds also retain a loopback listener.";
+      };
+
       tuningZstdDecoderConcurrency = lib.mkOption {
         type = lib.types.nullOr lib.types.int;
         default = null;
