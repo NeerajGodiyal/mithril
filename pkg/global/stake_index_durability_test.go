@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
@@ -91,4 +92,28 @@ func TestFlushPendingStakePubkeysThroughRepairsPartialTailBeforeAppend(t *testin
 		{Pubkey: pendingPubkey},
 		{Pubkey: pubkey, FileId: 11, Offset: 22},
 	}, entries)
+}
+
+func TestFlushPendingStakePubkeysThroughRepairsTornHeader(t *testing.T) {
+	for size := 1; size < 8; size++ {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			resetStakeIndexTestState()
+			defer resetStakeIndexTestState()
+
+			dir := t.TempDir()
+			path := filepath.Join(dir, StakePubkeyIndexFileName)
+			torn := make([]byte, size)
+			copy(torn, accountsdb.StakeIndexMagic[:])
+			require.NoError(t, os.WriteFile(path, torn, 0o644))
+			pubkey := solana.PublicKey{byte(size)}
+			EnqueuePendingStakePubkey(8, pubkey)
+
+			flushed, err := FlushPendingStakePubkeysThrough(dir, 8)
+			require.NoError(t, err)
+			require.Equal(t, 1, flushed)
+			entries, err := LoadStakePubkeyIndex(dir)
+			require.NoError(t, err)
+			require.Equal(t, []accountsdb.StakeIndexEntry{{Pubkey: pubkey}}, entries)
+		})
+	}
 }

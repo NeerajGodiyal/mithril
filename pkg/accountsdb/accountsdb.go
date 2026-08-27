@@ -144,22 +144,16 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 		return nil, err
 	}
 
-	// attempt to open largest_file_id file
+	// Read the whole value so malformed or trailing data cannot be accepted, and
+	// so no descriptor remains open for the lifetime of AccountsDB.
 	largestFileIdFn := fmt.Sprintf("%s/largest_file_id", accountsDbDir)
-	lfi, err := os.Open(largestFileIdFn)
+	largestFileIdBytes, err := os.ReadFile(largestFileIdFn)
 	if err != nil {
-		mlog.Log.Infof("failed to open %s\n", largestFileIdFn)
+		mlog.Log.Infof("failed to read %s\n", largestFileIdFn)
 		return nil, err
 	}
-
-	largestFileIdBytes := make([]byte, 8)
-	bytesRead, err := lfi.Read(largestFileIdBytes)
-	if err != nil {
-		mlog.Log.Infof("error reading %s: %s\n", largestFileIdFn, err)
-		return nil, err
-	} else if bytesRead != 8 {
-		mlog.Log.Infof("error reading %s: expected 8 bytes, got %d\n", largestFileIdFn, bytesRead)
-		return nil, fmt.Errorf("only got %d bytes", bytesRead)
+	if len(largestFileIdBytes) != 8 {
+		return nil, fmt.Errorf("largest file ID has %d bytes, want 8", len(largestFileIdBytes))
 	}
 
 	largestFileId := binary.LittleEndian.Uint64(largestFileIdBytes)
@@ -173,7 +167,10 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 	bankhashDir := filepath.Join(accountsDbDir, "bankhash_db")
 	bankhashDb, err := pebble.Open(bankhashDir, &pebble.Options{Logger: silentLogger{}})
 	if err != nil {
-		return nil, fmt.Errorf("opening bankhashDir=%s: %w", bankhashDir, err)
+		return nil, errors.Join(
+			fmt.Errorf("opening bankhashDir=%s: %w", bankhashDir, err),
+			db.Close(),
+		)
 	}
 
 	accountsDb := &AccountsDb{

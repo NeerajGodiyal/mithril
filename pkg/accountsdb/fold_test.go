@@ -426,6 +426,37 @@ func TestRecoverFoldStateFreshStore(t *testing.T) {
 	assert.Empty(t, res.ReplayedBatches)
 }
 
+func TestOpenDbReleasesIndexWhenBankhashOpenFails(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "accounts"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "largest_file_id"), make([]byte, 8), 0o644))
+	indexDir := filepath.Join(dir, "mithril_db")
+	index, err := pebble.Open(indexDir, NewAccountsIndexPebbleOptions(nil))
+	require.NoError(t, err)
+	require.NoError(t, index.Close())
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "bankhash_db"), []byte("not a directory"), 0o644))
+
+	_, err = OpenDb(dir)
+	require.Error(t, err)
+	reopened, reopenErr := pebble.Open(indexDir, NewAccountsIndexPebbleOptions(nil))
+	require.NoError(t, reopenErr, "failed OpenDb must release the index lock")
+	require.NoError(t, reopened.Close())
+}
+
+func TestOpenDbRejectsMalformedLargestFileID(t *testing.T) {
+	tests := map[string]int{"short": 7, "trailing": 9}
+	for name, size := range tests {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.Mkdir(filepath.Join(dir, "accounts"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "largest_file_id"), make([]byte, size), 0o644))
+
+			_, err := OpenDb(dir)
+			require.ErrorContains(t, err, "largest file ID")
+		})
+	}
+}
+
 // FileIds are never reused across a crash (I7): the high-water mark persists
 // before any data byte, so an aborted fold still consumes its fileId.
 func TestCommitBatchNeverReusesFileIdAfterCrash(t *testing.T) {

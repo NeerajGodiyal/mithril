@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/gagliardetto/solana-go"
@@ -66,11 +67,17 @@ const StakeIndexRecordSize = 48 // 32-byte pubkey + 8-byte fileId + 8-byte offse
 // WriteStakePubkeyIndex writes stake index entries.
 // Format: 8-byte header ("STKI" + version uint32 LE) + N × 48-byte records.
 func WriteStakePubkeyIndex(path string, entries []StakeIndexEntry) error {
-	f, err := os.Create(path)
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	temporary := f.Name()
+	defer os.Remove(temporary)
+	if err := f.Chmod(0o644); err != nil {
+		f.Close()
+		return err
+	}
 
 	buf := bufio.NewWriterSize(f, 1<<20)
 
@@ -93,7 +100,21 @@ func WriteStakePubkeyIndex(path string, entries []StakeIndexEntry) error {
 		}
 	}
 
-	return buf.Flush()
+	if err := buf.Flush(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return err
+	}
+	return fsyncDir(dir)
 }
 
 // BuildIndexEntriesFromAppendVecs parses an appendvec and returns:

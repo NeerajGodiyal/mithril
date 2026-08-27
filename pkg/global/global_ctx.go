@@ -506,6 +506,15 @@ func recoverIncompleteStakeIndexTail(f *os.File, size int64) (int64, error) {
 		return 0, nil
 	}
 	var header [8]byte
+	if size < int64(len(header)) {
+		if err := f.Truncate(0); err != nil {
+			return 0, fmt.Errorf("recovering partial stake pubkey index header: %w", err)
+		}
+		if err := f.Sync(); err != nil {
+			return 0, fmt.Errorf("syncing recovered stake pubkey index header: %w", err)
+		}
+		return 0, nil
+	}
 	if _, err := f.ReadAt(header[:], 0); err != nil {
 		return 0, fmt.Errorf("reading stake pubkey index header: %w", err)
 	}
