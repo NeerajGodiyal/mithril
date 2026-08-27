@@ -1801,14 +1801,12 @@ func runLive(c *cobra.Command, args []string) {
 		snapshotBuildStartedAt = time.Now().UTC()
 		mlog.Log.Infof("mode=new-snapshot: Downloading fresh snapshot")
 		if accountsPath != "" {
-			// Record rebuild in history before cleanup (history file is preserved)
+			// Record the rebuild before the snapshot builder replaces the store.
 			if mithrilState != nil {
 				state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), getBranch(), "new-snapshot mode")
 			} else {
 				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), getBranch(), "new-snapshot mode (no prior state)")
 			}
-			mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
-			snapshot.CleanAccountsDbDir(accountsPath)
 		}
 		// Clean existing snapshots (respecting retention setting)
 		if snapshotDownloadPath != "" {
@@ -1853,8 +1851,6 @@ func runLive(c *cobra.Command, args []string) {
 			} else {
 				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), getBranch(), "new-incremental mode (no prior state)")
 			}
-			mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
-			snapshot.CleanAccountsDbDir(accountsPath)
 		}
 		snapshotBuildStartedAt = time.Now().UTC()
 		accountsDb, manifest, err = buildFromExistingSnapshot(ctx, existingSnap, snapshotDownloadPath, accountsPath, blockstorePath, rpcEndpoints)
@@ -1875,14 +1871,12 @@ func runLive(c *cobra.Command, args []string) {
 		snapshotBuildStartedAt = time.Now().UTC()
 		mlog.Log.Infof("mode=snapshot: Will rebuild AccountsDB from snapshot")
 		if accountsPath != "" {
-			// Record rebuild in history before cleanup (history file is preserved)
+			// Record the rebuild before the snapshot builder replaces the store.
 			if mithrilState != nil {
 				state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), getBranch(), "snapshot mode")
 			} else {
 				state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), getBranch(), "snapshot mode (no prior state)")
 			}
-			mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
-			snapshot.CleanAccountsDbDir(accountsPath)
 		}
 
 		// Check for existing fresh snapshot
@@ -1982,11 +1976,9 @@ func runLive(c *cobra.Command, args []string) {
 						}
 					}
 					if accountsPath != "" {
-						// Record rebuild in history before cleanup (history file is preserved)
+						// Record the rebuild before the snapshot builder replaces the store.
 						// mithrilState is guaranteed non-nil here (we prompted because it was stale)
 						state.RecordRebuild(accountsPath, mithrilState.LastSlot, mithrilState.LastBankhash, getVersion(), getCommit(), getBranch(), "user chose rebuild (stale AccountsDB)")
-						mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
-						snapshot.CleanAccountsDbDir(accountsPath)
 					}
 					// choice 3 forces a fresh download: skip the local-reuse check.
 					if choice == 2 {
@@ -2095,8 +2087,6 @@ func runLive(c *cobra.Command, args []string) {
 				} else {
 					state.RecordRebuild(accountsPath, 0, "", getVersion(), getCommit(), getBranch(), reason)
 				}
-				mlog.Log.Infof("Cleaning up previous AccountsDB artifacts in %s", accountsPath)
-				snapshot.CleanAccountsDbDir(accountsPath)
 			}
 
 			// Check for existing fresh snapshot

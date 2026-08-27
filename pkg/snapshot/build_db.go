@@ -28,6 +28,7 @@ const (
 	DefaultSnapshotAppendVecCopyingWorkers    = 32
 	DefaultSnapshotIndexShards                = 64
 	DefaultSnapshotMaxConcurrentFlushers      = 8
+	snapshotPendingManifestName               = "manifest.pending"
 )
 
 var (
@@ -41,36 +42,314 @@ var (
 // CleanAccountsDbDir removes all artifacts from a previous incomplete snapshot run.
 // This prevents corruption from Ctrl+C or partial downloads.
 // Exported so it can be called early in startup before any failures.
-func CleanAccountsDbDir(accountsDbDir string) {
-	// List of all files/directories that may be left from a previous incomplete run
+func CleanAccountsDbDir(accountsDbDir string) error {
+	if accountsDbDir == "" {
+		return fmt.Errorf("refusing to clean empty AccountsDB path")
+	}
+	cleanRoot := filepath.Clean(accountsDbDir)
+	if cleanRoot == "." || cleanRoot == string(os.PathSeparator) {
+		return fmt.Errorf("refusing to clean unsafe AccountsDB path %q", accountsDbDir)
+	}
+	pathInfo, err := os.Lstat(cleanRoot)
+	if err != nil {
+		return fmt.Errorf("inspect AccountsDB cleanup root: %w", err)
+	}
+	if !pathInfo.IsDir() || pathInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("AccountsDB cleanup root is not a real directory")
+	}
+	root, err := os.OpenRoot(cleanRoot)
+	if err != nil {
+		return fmt.Errorf("open AccountsDB cleanup root: %w", err)
+	}
+	defer root.Close()
+	pinnedInfo, err := root.Lstat(".")
+	if err != nil || !os.SameFile(pathInfo, pinnedInfo) {
+		return fmt.Errorf("AccountsDB cleanup root changed while opening")
+	}
+	dir, err := root.Open(".")
+	if err != nil {
+		return fmt.Errorf("open AccountsDB cleanup directory: %w", err)
+	}
+	defer dir.Close()
+	return cleanAccountsDbRoot(
+		root.RemoveAll,
+		root.Lstat,
+		func() ([]os.DirEntry, error) {
+			opened, openErr := root.Open(".")
+			if openErr != nil {
+				return nil, openErr
+			}
+			defer opened.Close()
+			return opened.ReadDir(-1)
+		},
+		dir.Sync,
+	)
+}
+
+func cleanAccountsDbRoot(
+	removeAll func(string) error,
+	lstat func(string) (os.FileInfo, error),
+	readDir func() ([]os.DirEntry, error),
+	syncDir func() error,
+) error {
+	removeAndVerify := func(name string) error {
+		if err := removeAll(name); err != nil {
+			return fmt.Errorf("remove AccountsDB artifact %q: %w", name, err)
+		}
+		if _, err := lstat(name); err == nil {
+			return fmt.Errorf("remove AccountsDB artifact %q: path still exists", name)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("verify removal of AccountsDB artifact %q: %w", name, err)
+		}
+		return nil
+	}
+
+	if err := removeAndVerify("mithril_state.json"); err != nil {
+		return err
+	}
+	if err := syncDir(); err != nil {
+		return fmt.Errorf("persist AccountsDB state invalidation: %w", err)
+	}
+
 	artifacts := []string{
 		"accounts",
 		txstatus.SnapshotSeedFileName,
-		// Rooted-durable replay writes immutable transaction-status sidecars
-		// beside AccountsDB. A snapshot rebuild replaces their chain lineage,
-		// so retaining them would waste space and make stale diagnostics look
-		// actionable.
 		"transaction-status-checkpoints",
 		"mithril_db",
 		"mithril_db_log_shards",
 		"bankhash_db",
+		"bank_hash",
+		"bootstrap_high_file_id",
 		"largest_file_id",
+		"stake_pubkeys.idx",
 		"manifest",
-		"mithril_state.json", // State file for tracking valid builds and replay progress
+		snapshotPendingManifestName,
 	}
 	for _, artifact := range artifacts {
-		path := filepath.Join(accountsDbDir, artifact)
-		if err := os.RemoveAll(path); err != nil {
-			mlog.Log.Errorf("failed to remove %s: %v", path, err)
+		if err := removeAndVerify(artifact); err != nil {
+			return err
 		}
 	}
-	partials, _ := filepath.Glob(filepath.Join(accountsDbDir, ".snapshot-status-cache-*.partial"))
-	for _, partial := range partials {
-		if err := os.Remove(partial); err != nil && !os.IsNotExist(err) {
-			mlog.Log.Errorf("failed to remove stale status-cache partial %s: %v", partial, err)
+	entries, err := readDir()
+	if err != nil {
+		return fmt.Errorf("list stale snapshot artifacts: %w", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if (strings.HasPrefix(name, ".snapshot-status-cache-") ||
+			strings.HasPrefix(name, ".snapshot-artifact-")) && strings.HasSuffix(name, ".partial") {
+			if err := removeAndVerify(name); err != nil {
+				return err
+			}
 		}
 	}
+	if err := syncDir(); err != nil {
+		return fmt.Errorf("persist AccountsDB cleanup: %w", err)
+	}
+	return nil
+}
 
+func syncSnapshotDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open snapshot directory for fsync: %w", err)
+	}
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+		return fmt.Errorf("fsync snapshot directory: %w", err)
+	}
+	if err := dir.Close(); err != nil {
+		return fmt.Errorf("close snapshot directory: %w", err)
+	}
+	return nil
+}
+
+type validatedSnapshotSelection struct {
+	manifest       *SnapshotManifest
+	bytes          []byte
+	archiveHash    [32]byte
+	hasArchiveHash bool
+}
+
+func finalizeSnapshotBootstrap(
+	ctx context.Context,
+	accountsDbDir string,
+	largestFileID uint64,
+	selected validatedSnapshotSelection,
+	stakeEntries []accountsdb.StakeIndexEntry,
+) (*accountsdb.AccountsDb, error) {
+	manifest := selected.manifest
+	if manifest == nil || manifest.Bank == nil || manifest.LtHash == nil || !selected.hasArchiveHash {
+		return nil, fmt.Errorf("snapshot does not provide a verifiable AccountsLtHash identity")
+	}
+	if len(selected.bytes) == 0 {
+		return nil, fmt.Errorf("validated snapshot manifest is empty")
+	}
+	var largestFileIDBytes [8]byte
+	binary.LittleEndian.PutUint64(largestFileIDBytes[:], largestFileID)
+	for _, artifact := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "largest_file_id", data: largestFileIDBytes[:]},
+		{name: "bootstrap_high_file_id", data: largestFileIDBytes[:]},
+		{name: "bank_hash", data: manifest.Bank.Hash[:]},
+	} {
+		if err := writeAtomicSnapshotArtifact(filepath.Join(accountsDbDir, artifact.name), artifact.data, 0o644); err != nil {
+			return nil, fmt.Errorf("write snapshot bootstrap artifact %s: %w", artifact.name, err)
+		}
+	}
+	if err := accountsdb.WriteStakePubkeyIndex(filepath.Join(accountsDbDir, "stake_pubkeys.idx"), stakeEntries); err != nil {
+		return nil, fmt.Errorf("write stake pubkey index: %w", err)
+	}
+	if err := syncSnapshotDirectory(accountsDbDir); err != nil {
+		return nil, err
+	}
+	bankhashDB, err := pebble.Open(filepath.Join(accountsDbDir, "bankhash_db"), &pebble.Options{})
+	if err != nil {
+		return nil, fmt.Errorf("open snapshot bankhash database: %w", err)
+	}
+	if err := bankhashDB.Close(); err != nil {
+		return nil, fmt.Errorf("close snapshot bankhash database: %w", err)
+	}
+	if err := writeAtomicSnapshotArtifact(
+		filepath.Join(accountsDbDir, snapshotPendingManifestName), selected.bytes, 0o644,
+	); err != nil {
+		return nil, fmt.Errorf("write pending snapshot manifest: %w", err)
+	}
+	return verifySnapshotBootstrap(ctx, accountsDbDir, selected)
+}
+
+func verifySnapshotBootstrap(
+	ctx context.Context,
+	accountsDbDir string,
+	selected validatedSnapshotSelection,
+) (*accountsdb.AccountsDb, error) {
+	accountsDB, err := accountsdb.OpenDb(accountsDbDir)
+	if err != nil {
+		return nil, err
+	}
+	state, capitalization, _, err := accountsDB.CalculateSnapshotState(ctx)
+	if err == nil && !state.Equals(selected.manifest.LtHash) {
+		err = fmt.Errorf("snapshot account state does not match its manifest AccountsLtHash")
+	}
+	if err == nil && capitalization != selected.manifest.Bank.Capitalization {
+		err = fmt.Errorf("snapshot capitalization %d does not match manifest %d", capitalization, selected.manifest.Bank.Capitalization)
+	}
+	if err == nil && !bytes.Equal(state.Checksum(), selected.archiveHash[:]) {
+		err = fmt.Errorf("snapshot account state does not match its archive filename hash")
+	}
+	if err != nil {
+		accountsDB.CloseDb()
+		return nil, err
+	}
+	if err := installSnapshotManifest(accountsDbDir, selected.bytes); err != nil {
+		accountsDB.CloseDb()
+		return nil, err
+	}
+	if err := clearSnapshotPendingManifest(accountsDbDir); err != nil {
+		accountsDB.CloseDb()
+		return nil, err
+	}
+	return accountsDB, nil
+}
+
+func resumeSnapshotBootstrap(
+	ctx context.Context,
+	accountsDbDir string,
+	selected validatedSnapshotSelection,
+) (*accountsdb.AccountsDb, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	if selected.manifest == nil || selected.manifest.Bank == nil || selected.manifest.LtHash == nil ||
+		!selected.hasArchiveHash || len(selected.bytes) == 0 {
+		return nil, false, fmt.Errorf("snapshot does not provide a verifiable AccountsLtHash identity")
+	}
+	rootInfo, err := os.Lstat(accountsDbDir)
+	if err != nil {
+		return nil, false, fmt.Errorf("inspect snapshot resume root: %w", err)
+	}
+	if !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, false, fmt.Errorf("snapshot resume root is not a real directory")
+	}
+	root, err := os.OpenRoot(accountsDbDir)
+	if err != nil {
+		return nil, false, fmt.Errorf("open snapshot resume root: %w", err)
+	}
+	defer root.Close()
+	openedInfo, err := root.Lstat(".")
+	if err != nil || !os.SameFile(rootInfo, openedInfo) {
+		return nil, false, fmt.Errorf("snapshot resume root changed while opening")
+	}
+	pending, matches, err := snapshotResumeManifestMatches(root, snapshotPendingManifestName, selected.bytes)
+	if err != nil {
+		return nil, true, err
+	}
+	if !pending || !matches {
+		return nil, false, nil
+	}
+	installed, matches, err := snapshotResumeManifestMatches(root, "manifest", selected.bytes)
+	if err != nil {
+		return nil, true, err
+	}
+	if installed {
+		if !matches {
+			return nil, false, nil
+		}
+		accountsDB, err := accountsdb.OpenDb(accountsDbDir)
+		if err != nil {
+			return nil, true, err
+		}
+		if err := clearSnapshotPendingManifest(accountsDbDir); err != nil {
+			accountsDB.CloseDb()
+			return nil, true, err
+		}
+		return accountsDB, true, nil
+	}
+	accountsDB, err := verifySnapshotBootstrap(ctx, accountsDbDir, selected)
+	return accountsDB, true, err
+}
+
+func snapshotResumeManifestMatches(root *os.Root, name string, expected []byte) (bool, bool, error) {
+	info, err := root.Lstat(name)
+	if os.IsNotExist(err) {
+		return false, false, nil
+	}
+	if err != nil {
+		return true, false, fmt.Errorf("inspect snapshot resume manifest: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return true, false, fmt.Errorf("snapshot resume manifest is not a regular file")
+	}
+	if info.Size() != int64(len(expected)) {
+		return true, false, nil
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return true, false, fmt.Errorf("open snapshot resume manifest: %w", err)
+	}
+	openedInfo, statErr := file.Stat()
+	if statErr != nil || !os.SameFile(info, openedInfo) {
+		_ = file.Close()
+		return true, false, fmt.Errorf("snapshot resume manifest changed while opening")
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, int64(len(expected))+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return true, false, readErr
+	}
+	if closeErr != nil {
+		return true, false, closeErr
+	}
+	return true, bytes.Equal(data, expected), nil
+}
+
+func clearSnapshotPendingManifest(accountsDbDir string) error {
+	if err := os.Remove(filepath.Join(accountsDbDir, snapshotPendingManifestName)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove pending snapshot manifest: %w", err)
+	}
+	return syncSnapshotDirectory(accountsDbDir)
 }
 
 // CleanSnapshotDownloadDir removes old snapshot files based on retention settings.
@@ -265,30 +544,81 @@ func BuildAccountsDbPaths(
 	finishBootstrap := statsd.BeginSnapshotBootstrap()
 	defer finishBootstrap()
 
-	// Clean any leftover artifacts from previous incomplete runs (e.g., Ctrl+C)
-	CleanAccountsDbDir(accountsDbDir)
+	fullSlot, err := selectedFullSnapshotSlot(snapshotFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	var incrementalBase, incrementalSlot uint64
+	if incrementalSnapshotFile != "" {
+		incrementalBase, incrementalSlot, err = selectedIncrementalSnapshotSlots(incrementalSnapshotFile)
+		if err != nil {
+			return nil, nil, err
+		}
+		if incrementalBase != fullSlot {
+			return nil, nil, fmt.Errorf("incremental snapshot base %d does not match full snapshot slot %d", incrementalBase, fullSlot)
+		}
+	}
 
 	mlog.Log.Infof("Parsing full snapshot manifest...")
-	manifest, err := UnmarshalManifestFromSnapshot(ctx, snapshotFile, accountsDbDir)
+	manifest, manifestBytes, err := readManifestFromSnapshot(ctx, snapshotFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading snapshot manifest: %v", err)
+	}
+	if manifest.Bank.Slot != fullSlot {
+		return nil, nil, fmt.Errorf("full snapshot manifest root %d does not match selected slot %d", manifest.Bank.Slot, fullSlot)
+	}
+	if err := validateSnapshotArchiveHash(snapshotFile, manifest); err != nil {
+		return nil, nil, err
 	}
 	mlog.Log.Infof("Parsed full snapshot manifest")
 	if OnFullSnapshotManifestParsed != nil {
 		OnFullSnapshotManifestParsed(manifest)
 	}
 
+	selected := validatedSnapshotSelection{manifest: manifest, bytes: manifestBytes}
+	if manifest.LtHash != nil {
+		selected.archiveHash, err = snapshotArchiveHash(snapshotFile)
+		if err != nil {
+			return nil, nil, err
+		}
+		selected.hasArchiveHash = true
+	}
 	var incrementalManifest *SnapshotManifest
 	if incrementalSnapshotFile != "" {
 		mlog.Log.FileOnlyf("Parsing incremental snapshot manifest...")
-		incrementalManifest, err = UnmarshalManifestFromSnapshot(ctx, incrementalSnapshotFile, accountsDbDir)
+		incrementalManifest, selected.bytes, err = readManifestFromSnapshot(ctx, incrementalSnapshotFile)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading incremental snapshot manifest: %v", err)
+		}
+		if incrementalManifest.Bank.Slot != incrementalSlot {
+			return nil, nil, fmt.Errorf("incremental snapshot manifest root %d does not match selected slot %d", incrementalManifest.Bank.Slot, incrementalSlot)
+		}
+		if err := validateSnapshotArchiveHash(incrementalSnapshotFile, incrementalManifest); err != nil {
+			return nil, nil, err
+		}
+		if err := validateIncrementalManifestBase(manifest, incrementalManifest); err != nil {
+			return nil, nil, err
 		}
 		mlog.Log.FileOnlyf("Parsed incremental snapshot manifest")
 		if OnIncrementalManifestParsed != nil {
 			OnIncrementalManifestParsed(incrementalManifest)
 		}
+		selected.manifest = incrementalManifest
+		if incrementalManifest.LtHash != nil {
+			selected.archiveHash, err = snapshotArchiveHash(incrementalSnapshotFile)
+			if err != nil {
+				return nil, nil, err
+			}
+			selected.hasArchiveHash = true
+		}
+	}
+	if accountsDB, resumed, err := resumeSnapshotBootstrap(ctx, accountsDbDir, selected); err != nil {
+		return nil, nil, fmt.Errorf("resume snapshot bootstrap: %w", err)
+	} else if resumed {
+		return accountsDB, selected.manifest, nil
+	}
+	if err := CleanAccountsDbDir(accountsDbDir); err != nil {
+		return nil, nil, err
 	}
 
 	start := time.Now()
@@ -389,57 +719,44 @@ func BuildAccountsDbPaths(
 	if err != nil {
 		return nil, nil, fmt.Errorf("initializing pebble from SST files: %w", err)
 	}
-	index.Close()
-
-	mlog.Log.Infof("Snapshot processed in %s.", fmtDuration(time.Since(start)))
-
-	var largestFileIdBytes [8]byte
-	binary.LittleEndian.PutUint64(largestFileIdBytes[:], largestFileId.Load())
-
-	path := filepath.Join(accountsDbDir, "largest_file_id")
-	if err := os.WriteFile(path, largestFileIdBytes[:], 0644); err != nil {
-		mlog.Log.Errorf("error while writing largest file ID=%d to %s: %s", largestFileId.Load(), path, err)
-		return nil, nil, err
+	if err := index.Close(); err != nil {
+		return nil, nil, fmt.Errorf("close snapshot account index: %w", err)
 	}
-
-	// bootstrap_high_file_id: write-once record of the highest fileId produced
-	// by snapshot bootstrap. The batch-fold engine uses it to classify data
-	// files: anything newer without a manifest is an undecided orphan.
-	bootstrapHighPath := filepath.Join(accountsDbDir, "bootstrap_high_file_id")
-	if err := os.WriteFile(bootstrapHighPath, largestFileIdBytes[:], 0644); err != nil {
-		mlog.Log.Errorf("error while writing bootstrap high file ID to %s: %s", bootstrapHighPath, err)
-		return nil, nil, err
-	}
-
-	bankHashOutputFileName := filepath.Join(accountsDbDir, "bank_hash")
-	if err := os.WriteFile(bankHashOutputFileName, manifest.Bank.Hash[:], 0644); err != nil {
-		mlog.Log.Errorf("error writing bank hash=%x to file=%s: %s", manifest.Bank.Hash, bankHashOutputFileName, err)
-		return nil, nil, err
-	}
-
-	// Write stake pubkey index file (with appendvec location hints)
-	stakeIndexPath := filepath.Join(accountsDbDir, "stake_pubkeys.idx")
-	if err := accountsdb.WriteStakePubkeyIndex(stakeIndexPath, stakeCollector.entries); err != nil {
-		return nil, nil, fmt.Errorf("writing stake pubkey index: %w", err)
-	}
-
-	bankhashDir := filepath.Join(accountsDbDir, "bankhash_db")
-	bankhashDb, err := pebble.Open(bankhashDir, &pebble.Options{})
-	if err != nil {
-		return nil, nil, fmt.Errorf("opening bankhashDir=%s: %w", bankhashDir, err)
-	}
-	bankhashDb.Close()
-
-	accountsDb, err := accountsdb.OpenDb(accountsDbDir)
+	mlog.Log.Infof("Snapshot extracted and indexed in %s; verifying canonical account state.", fmtDuration(time.Since(start)))
+	accountsDB, err := finalizeSnapshotBootstrap(
+		ctx, accountsDbDir, largestFileId.Load(), selected, stakeCollector.entries,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
+	mlog.Log.Infof("Snapshot canonical account state verified.")
+	return accountsDB, selected.manifest, nil
+}
 
-	if incrementalManifest != nil {
-		return accountsDb, incrementalManifest, nil
-	} else {
-		return accountsDb, manifest, nil
+func validateIncrementalManifestBase(full, incremental *SnapshotManifest) error {
+	if full == nil || full.Bank == nil || full.AccountsDb == nil ||
+		incremental == nil || incremental.Bank == nil || incremental.AccountsDb == nil {
+		return fmt.Errorf("snapshot manifest pair is missing required bank or accounts fields")
 	}
+	persistence := incremental.BankIncrementalSnapshotPersistence
+	if persistence == nil {
+		if full.LtHash == nil || incremental.LtHash == nil {
+			return fmt.Errorf("incremental snapshot at slot %d has neither legacy base identity nor AccountsLtHash identity", incremental.Bank.Slot)
+		}
+		return nil
+	}
+	if persistence.FullSlot != full.Bank.Slot {
+		return fmt.Errorf("incremental snapshot at slot %d names full base %d, expected %d",
+			incremental.Bank.Slot, persistence.FullSlot, full.Bank.Slot)
+	}
+	if persistence.FullHash != full.AccountsDb.BankHashInfo.SnapshotHash {
+		return fmt.Errorf("incremental snapshot at slot %d names a different full snapshot hash", incremental.Bank.Slot)
+	}
+	if persistence.FullCapitalization != full.Bank.Capitalization {
+		return fmt.Errorf("incremental snapshot at slot %d names full capitalization %d, expected %d",
+			incremental.Bank.Slot, persistence.FullCapitalization, full.Bank.Capitalization)
+	}
+	return nil
 }
 
 // identify appendvec files, whose path is of the form "accounts/SLOT.ID"
