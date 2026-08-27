@@ -1543,7 +1543,7 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 		for i := 0; i < min(3, len(matchingNodes)); i++ {
 			node := matchingNodes[i]
 			mlog.Log.Infof("  #%d: %s (end slot: %d, %.1f MB/s)",
-				i+1, node.Result.RPC, node.Result.IncSlot, node.S1.MedianMBs)
+				i+1, rpcclient.SanitizeEndpointForDisplay(node.Result.RPC), node.Result.IncSlot, node.S1.MedianMBs)
 		}
 	}
 
@@ -1563,7 +1563,7 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 
 		if i > 0 {
 			mlog.Log.Infof("Trying fallback incremental source #%d: %s (end slot: %d)",
-				i+1, node.Result.RPC, node.Result.IncSlot)
+				i+1, rpcclient.SanitizeEndpointForDisplay(node.Result.RPC), node.Result.IncSlot)
 		}
 
 		if snapCfg.Verbose {
