@@ -4,11 +4,35 @@ import (
 	"math"
 	"testing"
 
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCanonicalizeAlpenglowVoteAccountMatchesAgaveConstructor(t *testing.T) {
+	var key, owner solana.PublicKey
+	key[0], owner[0] = 1, 2
+	acct := &accounts.Account{
+		Key:        key,
+		Lamports:   42,
+		Data:       []byte{3, 4},
+		Owner:      owner,
+		Executable: true,
+		RentEpoch:  math.MaxUint64,
+	}
+
+	canonicalizeAlpenglowVoteAccount(acct)
+
+	assert.Equal(t, key, acct.Key)
+	assert.Equal(t, uint64(42), acct.Lamports)
+	assert.Equal(t, []byte{3, 4}, acct.Data)
+	assert.Equal(t, [32]byte(owner), acct.Owner)
+	assert.False(t, acct.Executable)
+	assert.Zero(t, acct.RentEpoch)
+}
 
 func TestIncrementAlpenglowCreditsNewEpoch(t *testing.T) {
 	var credits []sealevel.EpochCredits
@@ -48,16 +72,27 @@ func TestCalculateAlpenglowRewardSplit(t *testing.T) {
 }
 
 func TestCalcSlotTimestampNanosInclusiveRange(t *testing.T) {
-	// producer_ns - slot_range_duration(target+1, bank) with constant 200ms:
-	// (bank - target) * alpenglowNsPerSlot
 	const producer int64 = 1783653042790683871
-	got := calcSlotTimestampNanos(965552, 965560, producer)
-	want := producer - int64(965560-965552)*int64(alpenglowNsPerSlot)
+	schedule := &sealevel.SysvarEpochSchedule{SlotsPerEpoch: 100, FirstNormalEpoch: 0}
+	got := calcSlotTimestampNanos(nil, schedule, 965552, 965560, producer)
+	want := producer - int64(965560-965552)*int64(legacyNsPerSlot)
 	assert.Equal(t, want, got)
-	assert.Equal(t, int64(1783653041), got/1_000_000_000)
+	assert.Equal(t, int64(1783653039), got/1_000_000_000)
 
-	assert.Equal(t, producer, calcSlotTimestampNanos(965560, 965560, producer))
-	assert.Equal(t, int64(0), calcSlotTimestampNanos(10, 20, 100))
+	assert.Equal(t, producer, calcSlotTimestampNanos(nil, schedule, 965560, 965560, producer))
+	assert.Equal(t, int64(math.MinInt64), calcSlotTimestampNanos(nil, schedule, 10, 20, math.MinInt64+1))
+	assert.Equal(t, int64(math.MinInt64), calcSlotTimestampNanos(nil, schedule, 0, math.MaxUint64, producer))
+}
+
+func TestCalcSlotTimestampNanosCrossesSlotTimeTransition(t *testing.T) {
+	schedule := &sealevel.SysvarEpochSchedule{SlotsPerEpoch: 100, FirstNormalEpoch: 0}
+	f := features.NewFeaturesDefault()
+	// Activation in epoch 1 becomes effective at the first slot of epoch 2.
+	f.EnableFeature(features.ReduceSlotTimeTo200ms, 150)
+
+	const producer int64 = 10_000_000_000
+	// target+1..=bank is slots 199..202: 400ms + 3*200ms.
+	assert.Equal(t, producer-1_000_000_000, calcSlotTimestampNanos(f, schedule, 198, 202, producer))
 }
 
 func TestMaybeUpdateVotesV4AdvancesLastTimestamp(t *testing.T) {
