@@ -291,7 +291,7 @@ func newReadyStateForBootstrap(snapshotSlot, snapshotEpoch uint64, buildMode, cl
 	if err := validateGenesisHashString("ready state", genesisHash); err != nil {
 		return nil, err
 	}
-	return state.NewReadyStateWithOpts(state.NewReadyStateOpts{
+	ready := state.NewReadyStateWithOpts(state.NewReadyStateOpts{
 		SnapshotSlot:  snapshotSlot,
 		SnapshotEpoch: snapshotEpoch,
 		BuildMode:     buildMode,
@@ -299,7 +299,9 @@ func newReadyStateForBootstrap(snapshotSlot, snapshotEpoch uint64, buildMode, cl
 		GenesisHash:   genesisHash,
 		WriterVersion: getVersion(),
 		WriterCommit:  getCommit(),
-	}), nil
+	})
+	ready.RootedDurable = cluster == "alpenglow"
+	return ready, nil
 }
 
 func saveReadyStateForBootstrap(accountsPath string, manifest *snapshot.SnapshotManifest, buildMode, cluster, genesisHash string, buildStartedAt time.Time) (*state.MithrilState, error) {
@@ -318,6 +320,16 @@ func saveReadyStateForBootstrap(accountsPath string, manifest *snapshot.Snapshot
 		return nil, fmt.Errorf("save ready state: %w", err)
 	}
 	return mithrilState, nil
+}
+
+func validateReadyStorageProfile(mithrilState *state.MithrilState, rootedDurable bool) error {
+	if mithrilState == nil {
+		return fmt.Errorf("ready state is unavailable")
+	}
+	if mithrilState.RootedDurable != rootedDurable {
+		return fmt.Errorf("ready state rooted-durable profile is %t, but selected network requires %t", mithrilState.RootedDurable, rootedDurable)
+	}
+	return nil
 }
 
 func validateAccountsGenesisForBootstrap(hasValidState bool, storedGenesis, assertedLegacyGenesis, currentGenesis, buildMode string) (priorGenesis string, mismatch bool, err error) {
@@ -2262,6 +2274,9 @@ postBootstrap:
 	}
 	if config.IsSet("storage.rooted_durable") && config.GetBool("storage.rooted_durable") != alpenglowMode {
 		klog.Fatalf("storage.rooted_durable must be %t for network.cluster=%s", alpenglowMode, cluster)
+	}
+	if err := validateReadyStorageProfile(mithrilState, alpenglowMode); err != nil {
+		klog.Fatalf("AccountsDB storage profile mismatch: %v; preserve this AccountsDB and restart with its original network profile or rebuild from snapshot into a distinct empty root", err)
 	}
 	accountsDb.RootedDurable = alpenglowMode
 	if config.IsSet("storage.fork_aware") {

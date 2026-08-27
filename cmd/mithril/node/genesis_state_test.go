@@ -22,7 +22,18 @@ func TestNewReadyStateForBootstrapAlwaysBindsChain(t *testing.T) {
 			if !got.IsReady() || got.SnapshotSlot != 2233733 || got.SnapshotEpoch != 41 {
 				t.Fatalf("ready state has wrong snapshot metadata: %+v", got)
 			}
+			if !got.RootedDurable {
+				t.Fatalf("Alpenglow ready state did not persist rooted-durable profile: %+v", got)
+			}
 		})
+	}
+
+	classic, err := newReadyStateForBootstrap(2233733, 41, "snapshot", "mainnet-beta", testNodeGenesisHash)
+	if err != nil {
+		t.Fatalf("new classic ready state: %v", err)
+	}
+	if classic.RootedDurable {
+		t.Fatalf("classic ready state persisted rooted-durable profile: %+v", classic)
 	}
 }
 
@@ -32,6 +43,29 @@ func TestNewReadyStateForBootstrapRejectsUnboundBuild(t *testing.T) {
 	}
 	if _, err := newReadyStateForBootstrap(1, 0, "new-snapshot", "", testNodeGenesisHash); err == nil {
 		t.Fatal("ready state accepted an empty cluster")
+	}
+}
+
+func TestValidateReadyStorageProfile(t *testing.T) {
+	tests := []struct {
+		name          string
+		state         *state.MithrilState
+		rootedDurable bool
+		wantErr       bool
+	}{
+		{name: "Alpenglow", state: &state.MithrilState{RootedDurable: true}, rootedDurable: true},
+		{name: "classic", state: &state.MithrilState{}, rootedDurable: false},
+		{name: "Alpenglow state in classic", state: &state.MithrilState{RootedDurable: true}, wantErr: true},
+		{name: "classic state in Alpenglow", state: &state.MithrilState{}, rootedDurable: true, wantErr: true},
+		{name: "missing state", rootedDurable: true, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateReadyStorageProfile(test.state, test.rootedDurable)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validateReadyStorageProfile() error = %v, want error %t", err, test.wantErr)
+			}
+		})
 	}
 }
 
