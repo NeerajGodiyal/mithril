@@ -284,6 +284,9 @@ func (bhv *BlockHashVec) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	}
 
 	hasLastHash, err := decoder.ReadBool()
+	if err != nil {
+		return err
+	}
 	if hasLastHash {
 		lastHash, err := decoder.ReadBytes(32)
 		if err != nil {
@@ -299,8 +302,11 @@ func (bhv *BlockHashVec) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numAges, 56, "blockhash age"); err != nil {
+		return err
+	}
 
-	bhv.HashAndAge = make([]HashAgePair, 0, numAges)
+	bhv.HashAndAge = make([]HashAgePair, 0, int(numAges))
 	for count := uint64(0); count < numAges; count++ {
 		var age HashAgePair
 		err = age.UnmarshalWithDecoder(decoder)
@@ -391,6 +397,9 @@ func (voteAcct *VoteAccount) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	if err != nil {
 		return err
 	}
+	if dataLen > uint64(decoder.Remaining()) {
+		return fmt.Errorf("snapshot vote account data length %d exceeds %d remaining bytes", dataLen, decoder.Remaining())
+	}
 
 	if dataLen > 0 {
 		positionAfter := decoder.Position() + uint(dataLen)
@@ -398,48 +407,47 @@ func (voteAcct *VoteAccount) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 		var voteState sealevel.VoteStateVersions
 		err = voteState.UnmarshalWithDecoder(decoder)
 		decoder.SetPosition(positionAfter)
+		if err != nil {
+			return fmt.Errorf("decode snapshot vote account state: %w", err)
+		}
 
 		var voteTimestamp sealevel.BlockTimestamp
 
-		if err == nil {
-			switch voteState.Type {
-			case sealevel.VoteStateVersionCurrent:
-				{
-					voteTimestamp = voteState.Current.LastTimestamp
-					voteAcct.NodePubkey = voteState.Current.NodePubkey
-				}
+		switch voteState.Type {
+		case sealevel.VoteStateVersionCurrent:
+			{
+				voteTimestamp = voteState.Current.LastTimestamp
+				voteAcct.NodePubkey = voteState.Current.NodePubkey
+			}
 
-			case sealevel.VoteStateVersionV0_23_5:
-				{
-					voteTimestamp = voteState.V0_23_5.LastTimestamp
-					voteAcct.NodePubkey = voteState.V0_23_5.NodePubkey
-				}
+		case sealevel.VoteStateVersionV0_23_5:
+			{
+				voteTimestamp = voteState.V0_23_5.LastTimestamp
+				voteAcct.NodePubkey = voteState.V0_23_5.NodePubkey
+			}
 
-			case sealevel.VoteStateVersionV1_14_11:
-				{
-					voteTimestamp = voteState.V1_14_11.LastTimestamp
-					voteAcct.NodePubkey = voteState.V1_14_11.NodePubkey
-				}
+		case sealevel.VoteStateVersionV1_14_11:
+			{
+				voteTimestamp = voteState.V1_14_11.LastTimestamp
+				voteAcct.NodePubkey = voteState.V1_14_11.NodePubkey
+			}
 
-			case sealevel.VoteStateVersionV4:
-				{
-					voteTimestamp = voteState.V4.LastTimestamp
-					voteAcct.NodePubkey = voteState.V4.NodePubkey
-					if voteState.V4.BlsPubkeyCompressed != nil {
-						blsPubkey := *voteState.V4.BlsPubkeyCompressed
-						voteAcct.BlsPubkeyCompressed = &blsPubkey
-					}
-				}
-
-			default:
-				{
-					panic("shouldn't be possible - programming error")
+		case sealevel.VoteStateVersionV4:
+			{
+				voteTimestamp = voteState.V4.LastTimestamp
+				voteAcct.NodePubkey = voteState.V4.NodePubkey
+				if voteState.V4.BlsPubkeyCompressed != nil {
+					blsPubkey := *voteState.V4.BlsPubkeyCompressed
+					voteAcct.BlsPubkeyCompressed = &blsPubkey
 				}
 			}
 
-			voteAcct.LastTimestampTs = voteTimestamp.Timestamp
-			voteAcct.LastTimestampSlot = voteTimestamp.Slot
+		default:
+			return fmt.Errorf("unsupported vote state version %d", voteState.Type)
 		}
+
+		voteAcct.LastTimestampTs = voteTimestamp.Timestamp
+		voteAcct.LastTimestampSlot = voteTimestamp.Slot
 	}
 
 	var owner []byte
@@ -495,8 +503,11 @@ func (stakes *Stakes) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numVoteAccts, 97, "vote account"); err != nil {
+		return err
+	}
 
-	stakes.VoteAccounts = make([]VoteAccountsPair, 0, numVoteAccts)
+	stakes.VoteAccounts = make([]VoteAccountsPair, 0, int(numVoteAccts))
 	for count := uint64(0); count < numVoteAccts; count++ {
 		var pair VoteAccountsPair
 		err = pair.UnmarshalWithDecoder(decoder)
@@ -511,8 +522,11 @@ func (stakes *Stakes) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numStakeDelegations, 96, "stake delegation"); err != nil {
+		return err
+	}
 
-	stakes.Delegations = make([]DelegationPair, 0, numStakeDelegations)
+	stakes.Delegations = make([]DelegationPair, 0, int(numStakeDelegations))
 	for count := uint64(0); count < numStakeDelegations; count++ {
 		var delegationPair DelegationPair
 		err = delegationPair.UnmarshalWithDecoder(decoder)
@@ -588,8 +602,11 @@ func (stakes *Stake) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numVoteAccts, 97, "vote account"); err != nil {
+		return err
+	}
 
-	stakes.VoteAccounts = make([]VoteAccountsPair, 0, numVoteAccts)
+	stakes.VoteAccounts = make([]VoteAccountsPair, 0, int(numVoteAccts))
 	for count := uint64(0); count < numVoteAccts; count++ {
 		var pair VoteAccountsPair
 		err = pair.UnmarshalWithDecoder(decoder)
@@ -604,8 +621,11 @@ func (stakes *Stake) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numStakeDelegations, 104, "stake account"); err != nil {
+		return err
+	}
 
-	stakes.StakeDelegations = make(map[solana.PublicKey]StakePair)
+	stakes.StakeDelegations = make(map[solana.PublicKey]StakePair, int(numStakeDelegations))
 	for count := uint64(0); count < numStakeDelegations; count++ {
 		var stakeDelegationPair StakePair
 		err = stakeDelegationPair.UnmarshalWithDecoder(decoder)
@@ -664,6 +684,9 @@ func (unusedAccts *UnusedAccounts) UnmarshalWithDecoder(decoder *bin.Decoder) er
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numUnused1, 32, "unused account set 1"); err != nil {
+		return err
+	}
 
 	for count := uint64(0); count < numUnused1; count++ {
 		_, err = decoder.ReadBytes(32)
@@ -680,6 +703,9 @@ func (unusedAccts *UnusedAccounts) UnmarshalWithDecoder(decoder *bin.Decoder) er
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numUnused2, 32, "unused account set 2"); err != nil {
+		return err
+	}
 
 	for count := uint64(0); count < numUnused2; count++ {
 		_, err = decoder.ReadBytes(32)
@@ -694,6 +720,9 @@ func (unusedAccts *UnusedAccounts) UnmarshalWithDecoder(decoder *bin.Decoder) er
 	var numUnused3 uint64
 	numUnused3, err = decoder.ReadUint64(bin.LE)
 	if err != nil {
+		return err
+	}
+	if err := validateManifestCount(decoder, numUnused3, 40, "unused account set 3"); err != nil {
 		return err
 	}
 
@@ -715,6 +744,9 @@ func (nodeVoteAccts *NodeVoteAccounts) UnmarshalWithDecoder(decoder *bin.Decoder
 	var numVoteAccts uint64
 	numVoteAccts, err = decoder.ReadUint64(bin.LE)
 	if err != nil {
+		return err
+	}
+	if err := validateManifestCount(decoder, numVoteAccts, 32, "node vote account"); err != nil {
 		return err
 	}
 
@@ -786,6 +818,9 @@ func (epochStakes *EpochStakes) UnmarshalWithDecoder(decoder *bin.Decoder) error
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numAccts, 48, "node-to-vote account"); err != nil {
+		return err
+	}
 
 	//epochStakes.NodeIdToVoteAccounts = make([]NodeVoteAccountsPair, 0, numAccts)
 	for count := uint64(0); count < numAccts; count++ {
@@ -800,6 +835,9 @@ func (epochStakes *EpochStakes) UnmarshalWithDecoder(decoder *bin.Decoder) error
 	var numEpochAuthVoters uint64
 	numEpochAuthVoters, err = decoder.ReadUint64(bin.LE)
 	if err != nil {
+		return err
+	}
+	if err := validateManifestCount(decoder, numEpochAuthVoters, 64, "epoch authorized voter"); err != nil {
 		return err
 	}
 
@@ -835,7 +873,7 @@ func (versionedEpochStakes *VersionedEpochStakes) UnmarshalWithDecoder(decoder *
 	}
 
 	if version != 0 {
-		panic("only 'Current' version (0) currently supported")
+		return fmt.Errorf("unsupported epoch stakes version %d", version)
 	}
 
 	err = versionedEpochStakes.Stakes.UnmarshalWithDecoder(decoder)
@@ -853,8 +891,11 @@ func (versionedEpochStakes *VersionedEpochStakes) UnmarshalWithDecoder(decoder *
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numAccts, 48, "versioned node-to-vote account"); err != nil {
+		return err
+	}
 
-	versionedEpochStakes.NodeIdToVoteAccounts = make([]NodeVoteAccountsPair, 0, numAccts)
+	versionedEpochStakes.NodeIdToVoteAccounts = make([]NodeVoteAccountsPair, 0, int(numAccts))
 	for count := uint64(0); count < numAccts; count++ {
 		var pair NodeVoteAccountsPair
 		err = pair.UnmarshalWithDecoder(decoder)
@@ -869,8 +910,11 @@ func (versionedEpochStakes *VersionedEpochStakes) UnmarshalWithDecoder(decoder *
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numEpochAuthVoters, 64, "versioned epoch authorized voter"); err != nil {
+		return err
+	}
 
-	versionedEpochStakes.EpochAuthorizedVoters = make([]PubkeyPair, 0, numEpochAuthVoters)
+	versionedEpochStakes.EpochAuthorizedVoters = make([]PubkeyPair, 0, int(numEpochAuthVoters))
 	for count := uint64(0); count < numEpochAuthVoters; count++ {
 		var pair PubkeyPair
 		err = pair.UnmarshalWithDecoder(decoder)
@@ -908,6 +952,9 @@ func (dsv *DeserializableVersionedBank) UnmarshalWithDecoder(decoder *bin.Decode
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numAncestors, 16, "ancestor"); err != nil {
+		return err
+	}
 
 	//dsv.Ancestors = make([]SlotPair, 0, numAncestors)
 	for count := uint64(0); count < numAncestors; count++ {
@@ -942,15 +989,18 @@ func (dsv *DeserializableVersionedBank) UnmarshalWithDecoder(decoder *bin.Decode
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numHardForks, 16, "hard fork"); err != nil {
+		return err
+	}
 
-	//dsv.HardForks = make([]SlotPair, 0, numHardForks)
+	dsv.HardForks = make([]SlotPair, 0, int(numHardForks))
 	for count := uint64(0); count < numHardForks; count++ {
 		var hardFork SlotPair
 		err = hardFork.UnmarshalWithDecoder(decoder)
 		if err != nil {
 			return err
 		}
-		//dsv.HardForks = append(dsv.HardForks, hardFork)
+		dsv.HardForks = append(dsv.HardForks, hardFork)
 	}
 
 	dsv.TransactionCount, err = decoder.ReadUint64(bin.LE)
@@ -1090,6 +1140,9 @@ func (dsv *DeserializableVersionedBank) UnmarshalWithDecoder(decoder *bin.Decode
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numEpochStakes, 8, "epoch stakes"); err != nil {
+		return err
+	}
 
 	//dsv.EpochStakes = make([]EpochStakesPair, 0, numEpochStakes)
 	for count := uint64(0); count < numEpochStakes; count++ {
@@ -1131,8 +1184,11 @@ func (slotAcctVecs *SlotAcctVecs) UnmarshalWithDecoder(decoder *bin.Decoder) err
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numAcctVecs, 16, "account storage"); err != nil {
+		return err
+	}
 
-	slotAcctVecs.AcctVecs = make([]AcctVec, 0, numAcctVecs)
+	slotAcctVecs.AcctVecs = make([]AcctVec, 0, int(numAcctVecs))
 	for count := uint64(0); count < numAcctVecs; count++ {
 		var acctVec AcctVec
 		err = acctVec.UnmarshalWithDecoder(decoder)
@@ -1179,18 +1235,21 @@ func (info *BankHashInfo) UnmarshalWithDecoder(decoder *bin.Decoder) error {
 	hash, err = decoder.ReadBytes(32)
 	if err != nil {
 		util.VerboseHandleError(err)
+		return err
 	}
 	copy(info.Hash[:], hash)
 
 	hash, err = decoder.ReadBytes(32)
 	if err != nil {
 		util.VerboseHandleError(err)
+		return err
 	}
 	copy(info.SnapshotHash[:], hash)
 
 	err = info.Stats.UnmarshalWithDecoder(decoder)
 	if err != nil {
 		util.VerboseHandleError(err)
+		return err
 	}
 
 	return nil
@@ -1257,8 +1316,11 @@ func (acctDbFields *AccountsDbFields) UnmarshalWithDecoder(decoder *bin.Decoder)
 		util.VerboseHandleError(err)
 		return err
 	}
+	if err := validateManifestCount(decoder, numStorages, 16, "storage slot"); err != nil {
+		return err
+	}
 
-	acctDbFields.Storages = make(map[uint64]SlotAcctVecs)
+	acctDbFields.Storages = make(map[uint64]SlotAcctVecs, int(numStorages))
 
 	for count := uint64(0); count < numStorages; count++ {
 		var slotAcctVecs SlotAcctVecs
@@ -1267,13 +1329,16 @@ func (acctDbFields *AccountsDbFields) UnmarshalWithDecoder(decoder *bin.Decoder)
 			util.VerboseHandleError(err)
 			return err
 		}
+		if _, duplicate := acctDbFields.Storages[slotAcctVecs.Slot]; duplicate {
+			return fmt.Errorf("snapshot manifest repeats storage slot %d", slotAcctVecs.Slot)
+		}
 		acctDbFields.Storages[slotAcctVecs.Slot] = slotAcctVecs
 	}
 
 	acctDbFields.Version, err = decoder.ReadUint64(bin.LE)
 	if err != nil {
 		util.VerboseHandleError(err)
-		//return err
+		return err
 	}
 
 	acctDbFields.Slot, err = decoder.ReadUint64(bin.LE)
@@ -1290,7 +1355,10 @@ func (acctDbFields *AccountsDbFields) UnmarshalWithDecoder(decoder *bin.Decoder)
 	numHistoricalRoots, err = decoder.ReadUint64(bin.LE)
 	if err != nil {
 		util.VerboseHandleError(err)
-		return nil
+		return err
+	}
+	if err := validateManifestCount(decoder, numHistoricalRoots, 8, "historical root"); err != nil {
+		return err
 	}
 
 	//acctDbFields.HistoricalRoots = make([]uint64, 0, numHistoricalRoots)
@@ -1300,7 +1368,7 @@ func (acctDbFields *AccountsDbFields) UnmarshalWithDecoder(decoder *bin.Decoder)
 		_, err = decoder.ReadUint64(bin.LE)
 		if err != nil {
 			util.VerboseHandleError(err)
-			return nil
+			return err
 		}
 		//acctDbFields.HistoricalRoots = append(acctDbFields.HistoricalRoots, historicalRoot)
 	}
@@ -1309,7 +1377,10 @@ func (acctDbFields *AccountsDbFields) UnmarshalWithDecoder(decoder *bin.Decoder)
 	numHistoricalRootsWithHash, err = decoder.ReadUint64(bin.LE)
 	if err != nil {
 		util.VerboseHandleError(err)
-		return nil
+		return err
+	}
+	if err := validateManifestCount(decoder, numHistoricalRootsWithHash, 40, "historical root hash"); err != nil {
+		return err
 	}
 
 	//acctDbFields.HistoricalRootsWithHash = make([]SlotMapPair, 0)
@@ -1318,7 +1389,7 @@ func (acctDbFields *AccountsDbFields) UnmarshalWithDecoder(decoder *bin.Decoder)
 		err = pair.UnmarshalWithDecoder(decoder)
 		if err != nil {
 			util.VerboseHandleError(err)
-			return nil
+			return err
 		}
 		//acctDbFields.HistoricalRootsWithHash = append(acctDbFields.HistoricalRootsWithHash, pair)
 	}
@@ -1346,9 +1417,7 @@ func (epochRewardStatus *SerializableEpochRewardStatus) UnmarshalWithDecoder(dec
 		}
 
 	default:
-		{
-			panic("invalid snapshot")
-		}
+		return fmt.Errorf("unsupported epoch reward status %d", epochRewardStatus.Type)
 	}
 
 	return nil
@@ -1367,8 +1436,11 @@ func (startBlockHeightAndRewards *StartBlockHeightAndRewards) UnmarshalWithDecod
 	if err != nil {
 		return err
 	}
+	if err := validateManifestCount(decoder, numStakeRewardsByPartition, 76, "stake reward"); err != nil {
+		return err
+	}
 
-	startBlockHeightAndRewards.StakeRewardsByPartition = make(map[solana.PublicKey]SerializableStakeRewards)
+	startBlockHeightAndRewards.StakeRewardsByPartition = make(map[solana.PublicKey]SerializableStakeRewards, int(numStakeRewardsByPartition))
 
 	//startBlockHeightAndRewards.StakeRewardsByPartition = make([]SerializableStakeRewards, 0, numStakeRewardsByPartition)
 	for count := uint64(0); count < numStakeRewardsByPartition; count++ {
@@ -1504,7 +1576,7 @@ func (snapshot *SnapshotManifest) UnmarshalWithDecoder(decoder *bin.Decoder) err
 	}
 
 	if numVersionedEpochStakes != 0 {
-		snapshot.VersionedEpochStakes = make([]VersionedEpochStakesPair, 0, numVersionedEpochStakes)
+		snapshot.VersionedEpochStakes = make([]VersionedEpochStakesPair, 0, int(numVersionedEpochStakes))
 		for range numVersionedEpochStakes {
 			var pair VersionedEpochStakesPair
 			err = pair.UnmarshalWithDecoder(decoder)

@@ -25,11 +25,12 @@ type AppendVecAccount struct {
 }
 
 const (
-	hdrLen         = 136
-	dataLenOffset  = 8
-	pubkeyOffset   = 16
-	lamportsOffset = 48
-	ownerOffset    = 64
+	hdrLen                     = 136
+	dataLenOffset              = 8
+	pubkeyOffset               = 16
+	lamportsOffset             = 48
+	ownerOffset                = 64
+	maxAppendVecAccountDataLen = uint64(10 * 1024 * 1024)
 )
 
 type appendVecParser struct {
@@ -127,19 +128,27 @@ func GetAppendVecDataLen(f *os.File, offset uint64) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return binary.LittleEndian.Uint64(hdrBytes[:]), nil
+	dataLen := binary.LittleEndian.Uint64(hdrBytes[:])
+	if dataLen > maxAppendVecAccountDataLen {
+		return 0, fmt.Errorf("appendvec account data length %d exceeds maximum %d", dataLen, maxAppendVecAccountDataLen)
+	}
+	return dataLen, nil
 }
 
 func (acct *AppendVecAccount) Unmarshal(buf io.Reader) error {
 	var err error
 	var hdrBytes [hdrLen]byte
-	_, err = buf.Read(hdrBytes[:])
+	_, err = io.ReadFull(buf, hdrBytes[:])
 	if err != nil {
 		return err
 	}
 
+	dataLen, err := validateAppendVecAccountHeader(&hdrBytes)
+	if err != nil {
+		return err
+	}
 	acct.WriteVersion = binary.LittleEndian.Uint64(hdrBytes[:8])
-	acct.DataLen = binary.LittleEndian.Uint64(hdrBytes[8:16])
+	acct.DataLen = dataLen
 	copy(acct.Pubkey[:], hdrBytes[16:48])
 	acct.Lamports = binary.LittleEndian.Uint64(hdrBytes[48:56])
 	acct.RentEpoch = binary.LittleEndian.Uint64(hdrBytes[56:64])
@@ -149,9 +158,20 @@ func (acct *AppendVecAccount) Unmarshal(buf io.Reader) error {
 	copy(acct.Hash[:], hdrBytes[104:136])
 
 	acct.Data = make([]byte, acct.DataLen)
-	_, err = buf.Read(acct.Data)
+	_, err = io.ReadFull(buf, acct.Data)
 
 	return err
+}
+
+func validateAppendVecAccountHeader(header *[hdrLen]byte) (uint64, error) {
+	dataLen := binary.LittleEndian.Uint64(header[dataLenOffset : dataLenOffset+8])
+	if dataLen > maxAppendVecAccountDataLen {
+		return 0, fmt.Errorf("appendvec account data length %d exceeds maximum %d", dataLen, maxAppendVecAccountDataLen)
+	}
+	if header[96] > 1 {
+		return 0, fmt.Errorf("appendvec account has invalid executable value %d", header[96])
+	}
+	return dataLen, nil
 }
 
 var padding [2048]byte
