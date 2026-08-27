@@ -25,8 +25,7 @@ var agMigrationEpochCredit = sealevel.EpochCredits{
 	PrevCredits: math.MaxUint64,
 }
 
-// alpenglowNsPerSlot is the fixed slot duration used when deriving reward/final
-// LastTimestamp from footer producer time (200ms).
+// alpenglowNsPerSlot is the active community-cluster slot duration.
 const alpenglowNsPerSlot = 200_000_000
 
 // ApplyAlpenglowVoteRewards updates vote account state from validated footer reward and final certs.
@@ -215,11 +214,11 @@ func ApplyAlpenglowVoteRewards(
 	}
 	var rewardSlotTimestampNs int64
 	if len(rewardValidators) > 0 {
-		rewardSlotTimestampNs = calcSlotTimestampNanos(rewardSlot, block.Slot, producerTimeNanos)
+		rewardSlotTimestampNs = calcSlotTimestampNanos(slotCtx.Features, epochSchedule, rewardSlot, block.Slot, producerTimeNanos)
 	}
 	var finalSlotTimestampNs int64
 	if len(finalSigners) > 0 {
-		finalSlotTimestampNs = calcSlotTimestampNanos(finalSlot, block.Slot, producerTimeNanos)
+		finalSlotTimestampNs = calcSlotTimestampNanos(slotCtx.Features, epochSchedule, finalSlot, block.Slot, producerTimeNanos)
 	}
 	var accountMutationStart time.Time
 	if rewardDetails != nil {
@@ -274,6 +273,7 @@ func ApplyAlpenglowVoteRewards(
 		if !applied {
 			continue
 		}
+		canonicalizeAlpenglowVoteAccount(acct)
 		if err := slotCtx.SetAccount(votePubkey, acct); err != nil {
 			return fmt.Errorf("slot %d vote rewards: set account %s: %w", block.Slot, votePubkey, err)
 		}
@@ -302,6 +302,7 @@ func ApplyAlpenglowVoteRewards(
 		if !applied {
 			return fmt.Errorf("slot %d vote rewards: leader vote %s: apply returned false", block.Slot, leaderVote)
 		}
+		canonicalizeAlpenglowVoteAccount(acct)
 		if err := slotCtx.SetAccount(leaderVote, acct); err != nil {
 			return fmt.Errorf("slot %d vote rewards: set leader vote %s: %w", block.Slot, leaderVote, err)
 		}
@@ -316,6 +317,13 @@ func ApplyAlpenglowVoteRewards(
 		atomic.AddUint64(&rewardDetails.VoteAccountsUpdated, uint64(voteAccountsUpdated))
 	}
 	return nil
+}
+
+// Agave serializes footer-updated vote state into AccountSharedData::new,
+// whose canonical account fields are executable=false and rent_epoch=0.
+func canonicalizeAlpenglowVoteAccount(acct *accounts.Account) {
+	acct.Executable = false
+	acct.RentEpoch = 0
 }
 
 func loadAccountLiveOrParentForReplay(slotCtx *sealevel.SlotCtx, pubkey solana.PublicKey) (*accounts.Account, error) {
@@ -443,16 +451,27 @@ func applyLeaderVoteReward(
 	return true, nil
 }
 
-// calcSlotTimestampNanos returns producer_ns - duration(targetSlot+1..=bankSlot).
-// Alpenglow community cluster uses 200ms slots for this derivation.
-func calcSlotTimestampNanos(targetSlot, bankSlot uint64, producerTimeNanos int64) int64 {
+// calcSlotTimestampNanos mirrors Agave's exact slot_range_duration_nanos for
+// targetSlot+1..=bankSlot, including next-epoch slot-time transitions.
+func calcSlotTimestampNanos(f *features.Features, epochSchedule *sealevel.SysvarEpochSchedule, targetSlot, bankSlot uint64, producerTimeNanos int64) int64 {
 	if targetSlot >= bankSlot {
 		return producerTimeNanos
 	}
-	slots := bankSlot - targetSlot
-	duration := int64(slots) * int64(alpenglowNsPerSlot)
-	if producerTimeNanos < duration {
-		return 0
+	if epochSchedule == nil {
+		f = nil
+	}
+	elapsed := classicSlotRangeDuration(f, epochSchedule, targetSlot+1, bankSlot)
+	const nanosPerSecond = int64(1_000_000_000)
+	if elapsed.Secs > uint64(math.MaxInt64/nanosPerSecond) {
+		return math.MinInt64
+	}
+	duration := int64(elapsed.Secs) * nanosPerSecond
+	if int64(elapsed.Nanos) > math.MaxInt64-duration {
+		return math.MinInt64
+	}
+	duration += int64(elapsed.Nanos)
+	if producerTimeNanos < math.MinInt64+duration {
+		return math.MinInt64
 	}
 	return producerTimeNanos - duration
 }
