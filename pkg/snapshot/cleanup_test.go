@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,6 +16,67 @@ func TestCleanAccountsDbDirRemovesTransactionStatusCheckpoints(t *testing.T) {
 	require.NoError(t, os.MkdirAll(checkpointDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(checkpointDir, "stale.bin"), []byte("stale"), 0o644))
 
-	CleanAccountsDbDir(root)
+	require.NoError(t, CleanAccountsDbDir(root))
 	assert.NoDirExists(t, checkpointDir)
+}
+
+func TestCleanAccountsDbDirRejectsUnsafeRoots(t *testing.T) {
+	require.Error(t, CleanAccountsDbDir(""))
+
+	parent := t.TempDir()
+	realRoot := filepath.Join(parent, "real")
+	linkedRoot := filepath.Join(parent, "linked")
+	require.NoError(t, os.Mkdir(realRoot, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(realRoot, "mithril_state.json"), []byte("ready"), 0o600))
+	require.NoError(t, os.Symlink(realRoot, linkedRoot))
+
+	require.Error(t, CleanAccountsDbDir(linkedRoot))
+	assert.FileExists(t, filepath.Join(realRoot, "mithril_state.json"))
+}
+
+func TestCleanAccountsDbDirInvalidatesStateBeforeArtifacts(t *testing.T) {
+	root := t.TempDir()
+	statePath := filepath.Join(root, "mithril_state.json")
+	accountsPath := filepath.Join(root, "accounts")
+	require.NoError(t, os.WriteFile(statePath, []byte("ready"), 0o600))
+	require.NoError(t, os.Mkdir(accountsPath, 0o755))
+
+	var events []string
+	err := cleanAccountsDbRoot(
+		func(name string) error {
+			events = append(events, "remove:"+name)
+			return os.RemoveAll(filepath.Join(root, name))
+		},
+		func(name string) (os.FileInfo, error) { return os.Lstat(filepath.Join(root, name)) },
+		func() ([]os.DirEntry, error) { return os.ReadDir(root) },
+		func() error {
+			events = append(events, "sync")
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(events), 4)
+	assert.Equal(t, "remove:mithril_state.json", events[0])
+	assert.Equal(t, "sync", events[1])
+	assert.Equal(t, "remove:accounts", events[2])
+	assert.Equal(t, "sync", events[len(events)-1])
+}
+
+func TestCleanAccountsDbDirStopsAfterStateSyncFailure(t *testing.T) {
+	root := t.TempDir()
+	statePath := filepath.Join(root, "mithril_state.json")
+	accountsPath := filepath.Join(root, "accounts")
+	require.NoError(t, os.WriteFile(statePath, []byte("ready"), 0o600))
+	require.NoError(t, os.Mkdir(accountsPath, 0o755))
+	sentinel := errors.New("injected directory sync failure")
+
+	err := cleanAccountsDbRoot(
+		func(name string) error { return os.RemoveAll(filepath.Join(root, name)) },
+		func(name string) (os.FileInfo, error) { return os.Lstat(filepath.Join(root, name)) },
+		func() ([]os.DirEntry, error) { return os.ReadDir(root) },
+		func() error { return sentinel },
+	)
+	require.ErrorIs(t, err, sentinel)
+	assert.NoFileExists(t, statePath)
+	assert.DirExists(t, accountsPath)
 }
