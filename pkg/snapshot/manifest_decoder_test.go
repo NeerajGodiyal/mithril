@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"bytes"
+	"math"
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
@@ -51,4 +52,51 @@ func TestManifestVoteAccountDecoderPreservesV4BLSPubkey(t *testing.T) {
 	require.Equal(t, bls, *decoded.BlsPubkeyCompressed)
 	require.Equal(t, int64(123), decoded.LastTimestampTs)
 	require.Equal(t, uint64(456), decoded.LastTimestampSlot)
+}
+
+func TestManifestDecoderRejectsUnsupportedVariants(t *testing.T) {
+	t.Run("epoch stakes", func(t *testing.T) {
+		var encoded bytes.Buffer
+		require.NoError(t, bin.NewBinEncoder(&encoded).WriteUint32(1, bin.LE))
+		var decoded VersionedEpochStakes
+		require.ErrorContains(t, decoded.UnmarshalWithDecoder(bin.NewBinDecoder(encoded.Bytes())), "unsupported epoch stakes version")
+	})
+
+	t.Run("epoch reward status", func(t *testing.T) {
+		var encoded bytes.Buffer
+		require.NoError(t, bin.NewBinEncoder(&encoded).WriteUint32(2, bin.LE))
+		var decoded SerializableEpochRewardStatus
+		require.ErrorContains(t, decoded.UnmarshalWithDecoder(bin.NewBinDecoder(encoded.Bytes())), "unsupported epoch reward status")
+	})
+}
+
+func TestManifestDecoderRejectsImpossibleCountsAndTruncation(t *testing.T) {
+	t.Run("blockhash count", func(t *testing.T) {
+		var encoded bytes.Buffer
+		encoder := bin.NewBinEncoder(&encoded)
+		require.NoError(t, encoder.WriteUint64(0, bin.LE))
+		require.NoError(t, encoder.WriteBool(false))
+		require.NoError(t, encoder.WriteUint64(math.MaxUint64, bin.LE))
+		var decoded BlockHashVec
+		require.ErrorContains(t, decoded.UnmarshalWithDecoder(bin.NewBinDecoder(encoded.Bytes())), "cannot fit")
+	})
+
+	t.Run("truncated accounts fields", func(t *testing.T) {
+		var encoded bytes.Buffer
+		require.NoError(t, bin.NewBinEncoder(&encoded).WriteUint64(0, bin.LE))
+		var decoded AccountsDbFields
+		require.Error(t, decoded.UnmarshalWithDecoder(bin.NewBinDecoder(encoded.Bytes())))
+	})
+}
+
+func TestManifestDecoderRejectsDuplicateStorageSlots(t *testing.T) {
+	var encoded bytes.Buffer
+	encoder := bin.NewBinEncoder(&encoded)
+	require.NoError(t, encoder.WriteUint64(2, bin.LE))
+	for range 2 {
+		require.NoError(t, encoder.WriteUint64(42, bin.LE))
+		require.NoError(t, encoder.WriteUint64(0, bin.LE))
+	}
+	var decoded AccountsDbFields
+	require.ErrorContains(t, decoded.UnmarshalWithDecoder(bin.NewBinDecoder(encoded.Bytes())), "repeats storage slot")
 }
