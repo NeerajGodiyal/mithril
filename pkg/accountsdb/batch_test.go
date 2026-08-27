@@ -60,6 +60,44 @@ func TestGetAccountsBatchGroupedReadsPreserveOrder(t *testing.T) {
 	assert.Equal(t, out[3].Data, out[4].Data)
 }
 
+func TestDurableReadsTreatMetadataBearingTombstoneAsMissing(t *testing.T) {
+	db, _ := newFoldTestDb(t)
+	defer db.CloseDb()
+
+	tombstone := foldAcct(1, 0, []byte{1, 2, 3})
+	tombstone.Owner = addresses.VoteProgramAddr
+	tombstone.Executable = true
+	tombstone.RentEpoch = 42
+	live := foldAcct(2, 10, []byte{4})
+	_, err := db.CommitBatch([]accounts.SlotDelta{{Slot: 100, Delta: []*accounts.Account{tombstone, live}}}, 100, nil, nil)
+	require.NoError(t, err)
+	db.CommonAcctsCache.Delete(tombstone.Key)
+	db.VoteAcctCache.Delete(tombstone.Key)
+	db.CommonAcctsCache.Delete(live.Key)
+
+	_, err = db.GetAccount(100, tombstone.Key)
+	require.ErrorIs(t, err, ErrNoAccount)
+
+	out, err := db.GetAccountsBatch(context.Background(), 100, []solana.PublicKey{tombstone.Key, live.Key})
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	require.Equal(t, tombstone.Key, out[0].Key)
+	require.Zero(t, out[0].Lamports)
+	require.Empty(t, out[0].Data)
+	require.Zero(t, out[0].Owner)
+	require.False(t, out[0].Executable)
+	require.Equal(t, uint64(math.MaxUint64), out[0].RentEpoch)
+	require.Equal(t, live.Key, out[1].Key)
+	require.Equal(t, uint64(10), out[1].Lamports)
+	require.False(t, db.CommonAcctsCache.Has(tombstone.Key))
+	require.False(t, db.VoteAcctCache.Has(tombstone.Key))
+
+	db.VoteAcctCache.Set(tombstone.Key, tombstone)
+	_, err = db.GetAccount(100, tombstone.Key)
+	require.ErrorIs(t, err, ErrNoAccount)
+	require.False(t, db.VoteAcctCache.Has(tombstone.Key))
+}
+
 func TestGetAccountsBatchStatsAndSmallBatchAdmissions(t *testing.T) {
 	db, _ := newFoldTestDb(t)
 	defer db.CloseDb()

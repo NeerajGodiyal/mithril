@@ -166,6 +166,10 @@ func (db *AccountsDb) getAccountsBatchWithStats(ctx context.Context, slot uint64
 	for i, pk := range pks {
 		if out[i] != nil {
 			stats.InProgressHits++
+			if out[i].Lamports == 0 {
+				stats.PlaceholderObjects++
+				out[i] = missingAccount(pk)
+			}
 			continue
 		}
 		if acct, ok, pending := db.getCachedAccountLocked(pk); ok {

@@ -346,6 +346,9 @@ func (accountsDb *AccountsDb) GetAccount(slot uint64, pubkey solana.PublicKey) (
 	defer accountsDb.appendVecReadMu.RUnlock()
 	accts := accountsDb.getStoreInProgressAccounts([]solana.PublicKey{pubkey})
 	if accts[0] != nil {
+		if accts[0].Lamports == 0 {
+			return nil, ErrNoAccount
+		}
 		return accts[0], nil
 	}
 	return accountsDb.getStoredAccountPinned(slot, pubkey)
@@ -365,6 +368,9 @@ func (accountsDb *AccountsDb) GetAccountWithStats(slot uint64, pubkey solana.Pub
 	stats.InProgressNanoseconds = uint64(time.Since(start).Nanoseconds())
 	if accts[0] != nil {
 		stats.InProgressHit = true
+		if accts[0].Lamports == 0 {
+			return nil, stats, ErrNoAccount
+		}
 		return accts[0], stats, nil
 	}
 	acct, err := accountsDb.getStoredAccountPinnedWithStats(slot, pubkey, &stats)
@@ -386,6 +392,9 @@ func (accountsDb *AccountsDb) getStoredAccountPinned(slot uint64, pubkey solana.
 	cachedAcct, hasAcct, cacheEpoch := accountsDb.getCachedAccountAndEpoch(pubkey)
 	if hasAcct {
 		r.End()
+		if cachedAcct == nil || cachedAcct.Lamports == 0 {
+			return nil, ErrNoAccount
+		}
 		return cachedAcct, nil
 	}
 	r.End()
@@ -402,6 +411,11 @@ func (accountsDb *AccountsDb) getStoredAccountPinned(slot uint64, pubkey solana.
 			}
 			return nil, fmt.Errorf("accountsdb: read %s failed after retry: %w", pubkey, err)
 		}
+	}
+	if acct == nil || acct.Lamports == 0 {
+		accountsDb.VoteAcctCache.Delete(pubkey)
+		accountsDb.CommonAcctsCache.Delete(pubkey)
+		return nil, ErrNoAccount
 	}
 	accountsDb.cacheReadAccount(pubkey, acct, cacheEpoch)
 	return acct, nil
@@ -424,6 +438,9 @@ func (accountsDb *AccountsDb) getStoredAccountPinnedWithStats(slot uint64, pubke
 		stats.PendingFoldHit = pending
 		stats.CacheHit = !pending
 		r.End()
+		if cachedAcct == nil || cachedAcct.Lamports == 0 {
+			return nil, ErrNoAccount
+		}
 		return cachedAcct, nil
 	}
 	r.End()
@@ -448,6 +465,11 @@ func (accountsDb *AccountsDb) getStoredAccountPinnedWithStats(slot uint64, pubke
 		}
 	}
 	stats.IndexAndAppendVecReadNanoseconds += uint64(time.Since(readStart).Nanoseconds())
+	if acct == nil || acct.Lamports == 0 {
+		accountsDb.VoteAcctCache.Delete(pubkey)
+		accountsDb.CommonAcctsCache.Delete(pubkey)
+		return nil, ErrNoAccount
+	}
 
 	publicationStart := time.Now()
 	waitNanoseconds, rejected := accountsDb.cacheReadAccountWithStats(pubkey, acct, cacheEpoch)
@@ -480,9 +502,16 @@ func (accountsDb *AccountsDb) getCachedAccountLocked(pubkey solana.PublicKey) (*
 		return version.acct, true, true
 	}
 	if acct, ok := accountsDb.VoteAcctCache.Get(pubkey); ok {
-		return acct, true, false
+		if acct != nil && acct.Lamports != 0 {
+			return acct, true, false
+		}
+		accountsDb.VoteAcctCache.Delete(pubkey)
 	}
 	acct, ok := accountsDb.CommonAcctsCache.Get(pubkey)
+	if ok && (acct == nil || acct.Lamports == 0) {
+		accountsDb.CommonAcctsCache.Delete(pubkey)
+		return nil, false, false
+	}
 	return acct, ok, false
 }
 
@@ -503,6 +532,11 @@ func (accountsDb *AccountsDb) cacheReadAccountWithStats(pubkey solana.PublicKey,
 func (accountsDb *AccountsDb) cacheReadAccountLocked(pubkey solana.PublicKey, acct *accounts.Account, expectedEpoch uint64) bool {
 	if expectedEpoch != accountsDb.readCacheEpoch || accountsDb.pendingFoldContainsLocked(pubkey) {
 		return false
+	}
+	if acct == nil || acct.Lamports == 0 {
+		accountsDb.VoteAcctCache.Delete(pubkey)
+		accountsDb.CommonAcctsCache.Delete(pubkey)
+		return true
 	}
 	if solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr {
 		accountsDb.VoteAcctCache.Set(pubkey, acct)
@@ -542,6 +576,11 @@ func (accountsDb *AccountsDb) cacheBatchReadAccount(
 	defer accountsDb.readCacheEpochMu.RUnlock()
 	if expectedEpoch != accountsDb.readCacheEpoch || accountsDb.pendingFoldContainsLocked(pubkey) {
 		return batchCacheEpochRejected, waitNanoseconds
+	}
+	if acct == nil || acct.Lamports == 0 {
+		accountsDb.VoteAcctCache.Delete(pubkey)
+		accountsDb.CommonAcctsCache.Delete(pubkey)
+		return batchCacheNone, waitNanoseconds
 	}
 	if solana.PublicKeyFromBytes(acct.Owner[:]) == addresses.VoteProgramAddr {
 		if accountsDb.VoteAcctCache.Set(pubkey, acct) {
