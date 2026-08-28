@@ -182,7 +182,7 @@ func TestSettledEpochBoundaryParentReadsRecordedInflationFromDurableStore(t *tes
 	t.Cleanup(db.CloseDb)
 
 	key := VoteRewardAccountAddr()
-	acct := &accounts.Account{Key: key, Data: encodeEpochInflationAccountState(EpochInflationAccountState{
+	acct := &accounts.Account{Key: key, Lamports: 1, Data: encodeEpochInflationAccountState(EpochInflationAccountState{
 		Current: EpochInflationState{
 			MaxPossibleValidatorReward: recordedBudget,
 			SlotsPerEpoch:              54_000,
