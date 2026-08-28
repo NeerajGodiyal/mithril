@@ -1328,6 +1328,8 @@ tests:
         values: '0+20x80'
       - series: 'mithril_replay_slot_duration_seconds_count{deployment_id="d1"}'
         values: '0+20x80'
+      - series: 'mithril_effective_slot_duration_seconds{deployment_id="d1"}'
+        values: '0.35+0x80'
       - series: 'process_start_time_seconds{job="mithril-node",deployment_id="d1"}'
         values: '1+1x80'
     alert_rule_test:
@@ -1338,7 +1340,7 @@ tests:
               deployment_id: d1
               severity: warning
             exp_annotations:
-              summary: "Replay p99 exceeds 400 milliseconds"
+              summary: "Replay p99 exceeds the effective slot duration"
       - eval_time: 1m
         alertname: MithrilNodeRestartLoop
         exp_alerts:
@@ -1348,6 +1350,43 @@ tests:
               severity: critical
             exp_annotations:
               summary: "The Mithril node restarted more than twice in 15 minutes"
+
+  - name: effective slot duration is required after monitoring is ready
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-node",deployment_id="d1"}'
+        values: '1+0x12'
+      - series: 'mithril_monitoring_schema_ready{deployment_id="d1"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilEffectiveSlotDurationInvalid
+        exp_alerts:
+          - exp_labels:
+              deployment_id: d1
+              severity: critical
+            exp_annotations:
+              summary: "The effective slot-duration metric is missing or invalid"
+
+  - name: replay latency waits for a stable slot duration window
+    interval: 15s
+    input_series:
+      - series: 'mithril_replay_slot_duration_seconds_bucket{le="0.1",deployment_id="d1"}'
+        values: '0+0x80'
+      - series: 'mithril_replay_slot_duration_seconds_bucket{le="0.35",deployment_id="d1"}'
+        values: '0+0x80'
+      - series: 'mithril_replay_slot_duration_seconds_bucket{le="1",deployment_id="d1"}'
+        values: '0+20x80'
+      - series: 'mithril_replay_slot_duration_seconds_bucket{le="+Inf",deployment_id="d1"}'
+        values: '0+20x80'
+      - series: 'mithril_replay_slot_duration_seconds_count{deployment_id="d1"}'
+        values: '0+20x80'
+      - series: 'mithril_effective_slot_duration_seconds{deployment_id="d1"}'
+        values: '0.4+0x12 0.35+0x68'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MithrilReplayLatencyHigh
+        exp_alerts: []
 
   - name: runtime and block-source schemas reject invalid values
     interval: 15s
