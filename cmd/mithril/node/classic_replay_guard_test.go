@@ -30,6 +30,24 @@ func TestClassicReplayGuardRequiresCleanCompletion(t *testing.T) {
 	require.False(t, interrupted)
 }
 
+func TestClassicReplayMarkerPolicy(t *testing.T) {
+	tests := []struct {
+		name          string
+		alpenglow     bool
+		rootedDurable bool
+		want          bool
+	}{
+		{name: "classic per-slot", want: true},
+		{name: "classic rooted-durable", rootedDurable: true},
+		{name: "alpenglow", alpenglow: true, rootedDurable: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.want, classicReplayMarkerRequired(test.alpenglow, test.rootedDurable))
+		})
+	}
+}
+
 func TestClassicReplayGuardRejectsExistingSymlink(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target")

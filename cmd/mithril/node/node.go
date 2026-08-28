@@ -1463,9 +1463,12 @@ func runLive(c *cobra.Command, args []string) {
 		klog.Fatalf("FATAL: %v. Re-run with --bootstrap new-snapshot to replace the unreadable state and AccountsDB.", err)
 	}
 	hasValidState := mithrilState != nil
-	classicReplayInterrupted, err := classicReplayWasInterrupted(accountsPath)
-	if err != nil {
-		klog.Fatalf("FATAL: %v", err)
+	classicReplayInterrupted := false
+	if classicReplayMarkerRequired(alpenglowMode, rootedDurableMode) {
+		classicReplayInterrupted, err = classicReplayWasInterrupted(accountsPath)
+		if err != nil {
+			klog.Fatalf("FATAL: %v", err)
+		}
 	}
 
 	// Read both bindings before mutating either location. The ledger marker
@@ -3092,7 +3095,7 @@ postBootstrap:
 		turbineAlpenglowAddr = alpenglowAddrForGossip(alpenglowObserverBindAddr)
 	}
 	var classicGuard *classicReplayGuard
-	if !alpenglowMode {
+	if classicReplayMarkerRequired(alpenglowMode, rootedDurableMode) {
 		classicGuard, err = beginClassicReplay(accountsPath, replay.CurrentRunID, uint64(startSlot))
 		if err != nil {
 			klog.Fatalf("start Classic replay: %v", err)

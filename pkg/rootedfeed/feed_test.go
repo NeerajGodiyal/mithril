@@ -132,6 +132,84 @@ func TestFollowerUsesPublishedHeadForIncrementalDiscovery(t *testing.T) {
 	require.ErrorContains(t, err, "manifest head")
 }
 
+func TestRelativeRootPublishesHeadBeforeRetention(t *testing.T) {
+	t.Chdir(t.TempDir())
+	root := "relative-accountsdb"
+	require.NoError(t, os.Mkdir(root, 0o755))
+	ref := writeClassicBatch(t, root, 1, 10, 9)
+	headers, err := retainedHeaders(root, 1)
+	require.NoError(t, err)
+	require.Len(t, headers, 1)
+
+	header := headers[0]
+	header.Path = filepath.Join(root, "accounts", filepath.Base(header.Path))
+	outside := header
+	outside.Path = filepath.Join(t.TempDir(), filepath.Base(header.Path))
+	require.ErrorContains(t, PublishManifestHead(root, outside), "non-canonical")
+	require.NoError(t, PublishManifestHead(root, header))
+
+	orphan, err := rootedevents.PrepareSidecar(root,
+		[]accounts.SlotDelta{{Slot: 50}},
+		map[uint64]rootedevents.SlotMeta{50: {
+			Slot: 50, ParentSlot: 49, Blockhash: testHash(50), ParentBlockhash: testHash(49),
+			Bankhash: testHash(150), FinalitySource: rootedevents.FinalityRPCFinalized,
+		}},
+	)
+	require.NoError(t, err)
+	retainer, err := NewRetainer(root, 0)
+	require.NoError(t, err)
+	_, err = retainer.Cleanup(ref)
+	require.NoError(t, err)
+	dir := filepath.Join(root, rootedevents.SidecarDirectory)
+	require.FileExists(t, filepath.Join(dir, ref.File))
+	require.NoFileExists(t, filepath.Join(dir, orphan.File))
+	require.FileExists(t, filepath.Join(dir, manifestHeadFile))
+}
+
+func TestPublicReadersRejectMalformedNewestManifestOutsideHorizon(t *testing.T) {
+	root := t.TempDir()
+	writeSourceState(t, root, "devnet", true)
+	writeClassicBatch(t, root, 1, 10, 9)
+	writeClassicBatch(t, root, 2, 12, 10)
+	writeClassicBatch(t, root, 3, 14, 12)
+	headers, err := retainedHeaders(root, 3)
+	require.NoError(t, err)
+	require.Len(t, headers, 3)
+	require.NoError(t, os.WriteFile(headers[2].Path, []byte("corrupt"), 0o600))
+
+	readers := []struct {
+		name string
+		read func() error
+	}{
+		{name: "available batches", read: func() error {
+			_, err := AvailableBatches(root, 1)
+			return err
+		}},
+		{name: "stream", read: func() error {
+			_, _, err := StreamAfter(root, 1, nil, nil)
+			return err
+		}},
+		{name: "framed stream", read: func() error {
+			_, _, err := StreamFramedAfter(root, 1, nil, nil, nil)
+			return err
+		}},
+		{name: "latest cursor", read: func() error {
+			_, err := LatestCursor(root, 1)
+			return err
+		}},
+	}
+	for _, reader := range readers {
+		t.Run(reader.name, func(t *testing.T) {
+			require.ErrorContains(t, reader.read(), "malformed header")
+		})
+	}
+
+	retainer, err := NewRetainer(root, 0)
+	require.NoError(t, err)
+	_, err = retainer.Cleanup(nil)
+	require.ErrorContains(t, err, "malformed header")
+}
+
 func TestFollowerRescansWhenPublishedHeadStalls(t *testing.T) {
 	root := t.TempDir()
 	writeClassicBatch(t, root, 1, 10, 9)

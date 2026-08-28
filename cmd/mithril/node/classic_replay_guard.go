@@ -20,6 +20,10 @@ type classicReplayGuard struct {
 	path string
 }
 
+func classicReplayMarkerRequired(alpenglowMode, rootedDurableMode bool) bool {
+	return !alpenglowMode && !rootedDurableMode
+}
+
 func classicReplayWasInterrupted(accountsPath string) (bool, error) {
 	_, err := os.Lstat(filepath.Join(accountsPath, accountsdb.ClassicReplayMarkerName))
 	if err == nil {

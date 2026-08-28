@@ -545,6 +545,11 @@ func retainedHeaders(accountsDBRoot string, retainBatches uint64) ([]accountsdb.
 	if err != nil {
 		return nil, fmt.Errorf("list rooted-event fold manifests: %w", err)
 	}
+	for _, header := range headers {
+		if header.BatchSeq == 0 {
+			return nil, fmt.Errorf("rooted-event fold manifest %s has a malformed header", header.Path)
+		}
+	}
 	if uint64(len(headers)) > retainBatches {
 		headers = headers[len(headers)-int(retainBatches):]
 	}
@@ -614,7 +619,11 @@ func PublishManifestHead(accountsDBRoot string, header accountsdb.ManifestHeader
 		return err
 	}
 	wantPath := filepath.Join(dir, accountsdb.SegmentDataName(header.ThroughSlot, header.FileId)+".manifest")
-	if filepath.Clean(header.Path) != wantPath {
+	headerPath, err := filepath.Abs(header.Path)
+	if err != nil {
+		return fmt.Errorf("resolve rooted-event manifest head path: %w", err)
+	}
+	if headerPath != wantPath {
 		return errors.New("publish rooted-event manifest head: non-canonical manifest path")
 	}
 	record := manifestHead{
