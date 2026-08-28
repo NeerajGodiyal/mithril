@@ -60,7 +60,27 @@ func TestFollowerOutcomeUsesCanonicalTransactionFailure(t *testing.T) {
 	}
 }
 
-func TestPublishSubmittedTransactionOutcomesUsesCommittedBlockEvidence(t *testing.T) {
+type receiptObservingSlotCtxSetter struct {
+	index                *txstatus.Index
+	success              solana.Signature
+	pending              solana.Signature
+	published            *sealevel.SlotCtx
+	successAtPublication txstatus.Status
+	pendingAtPublication txstatus.Status
+}
+
+func (setter *receiptObservingSlotCtxSetter) SetSlotCtx(slotCtx *sealevel.SlotCtx) {
+	setter.published = slotCtx
+	setter.successAtPublication, _ = lookupReceiptStatus(setter.index, setter.success)
+	setter.pendingAtPublication, _ = lookupReceiptStatus(setter.index, setter.pending)
+}
+
+func lookupReceiptStatus(index *txstatus.Index, signature solana.Signature) (txstatus.Status, bool) {
+	receipt, ok := index.Lookup(signature)
+	return receipt.Status, ok
+}
+
+func TestSubmittedTransactionOutcomesPublishAfterProcessedBank(t *testing.T) {
 	index, err := txstatus.NewIndex(txstatus.Config{MaxReceipts: 8, Retention: time.Hour})
 	if err != nil {
 		t.Fatalf("NewIndex: %v", err)
@@ -83,7 +103,22 @@ func TestPublishSubmittedTransactionOutcomesUsesCommittedBlockEvidence(t *testin
 			{Signatures: []solana.Signature{foreign}},
 		},
 	}
-	publishSubmittedTransactionOutcomes(index, block, []string{"", "InstructionError", ""})
+	stage := &submittedTransactionOutcomeStage{Sink: index}
+	publishSubmittedTransactionOutcomes(stage, block, []string{"", "InstructionError", ""})
+
+	for _, signature := range []solana.Signature{success, failed, pending} {
+		if receipt, _ := index.Lookup(signature); receipt.Status != txstatus.StatusSubmitted {
+			t.Fatalf("receipt %s changed before bank publication: %v", signature, receipt.Status)
+		}
+	}
+	processed := &sealevel.SlotCtx{Slot: block.Slot}
+	setter := &receiptObservingSlotCtxSetter{index: index, success: success, pending: pending}
+	publishAcceptedProcessedBank(setter, processed, stage)
+	if setter.published != processed ||
+		setter.successAtPublication != txstatus.StatusSubmitted ||
+		setter.pendingAtPublication != txstatus.StatusSubmitted {
+		t.Fatalf("receipts published before processed bank: %+v", setter)
+	}
 
 	if receipt, _ := index.Lookup(success); receipt.Status != txstatus.StatusLanded {
 		t.Fatalf("successful receipt status = %v", receipt.Status)

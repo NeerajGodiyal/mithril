@@ -6,21 +6,17 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/replay"
 )
 
-// A node that has detected its own replay divergence still answers account RPC
-// as though nothing were wrong. That is the case this gate exists for: a client
-// asking what an account holds cannot distinguish a correct answer from one
-// produced by a node that already knows its state disagrees with the cluster.
-// Evidence must fail closed unless the bank being served is covered by the
-// required verification. minContextSlot is only a lower freshness bound; it
-// cannot constrain a response to the last verified bank.
+// A node that has detected its own replay divergence must not answer account RPC
+// as though nothing were wrong. Trailing verification intentionally checks an
+// eligible watermark behind the processed tip, so even "complete" does not mean
+// the current bank was verified. Routine catch-up debt remains visible through
+// getVerificationStatus without making RPC intermittently unavailable. Known
+// divergence, a stalled verifier, or unavailable evidence still fails closed.
 type evidenceGateReason string
 
 const (
 	// evidenceGateOpen means the node may answer.
 	evidenceGateOpen evidenceGateReason = ""
-	// evidenceGateIncomplete means required verification has not caught up to
-	// the bank the RPC server would answer from.
-	evidenceGateIncomplete evidenceGateReason = "incomplete"
 	// evidenceGateDiverged means replay, footer, bank-hash or finality evidence
 	// disagreed. Terminal: VerificationStatus refuses to leave this state.
 	evidenceGateDiverged evidenceGateReason = "diverged"
@@ -48,10 +44,8 @@ type verificationSnapshotFunc func() (replay.VerificationState, bool, uint64, ui
 // function so the whole matrix is testable without a node.
 func gateForVerificationState(state replay.VerificationState) evidenceGateReason {
 	switch state {
-	case replay.VerificationComplete, replay.VerificationNotApplicable:
+	case replay.VerificationComplete, replay.VerificationIncomplete, replay.VerificationNotApplicable:
 		return evidenceGateOpen
-	case replay.VerificationIncomplete:
-		return evidenceGateIncomplete
 	case replay.VerificationDiverged:
 		return evidenceGateDiverged
 	case replay.VerificationStalled:

@@ -22,7 +22,7 @@ func TestGateForVerificationStateCoversEveryState(t *testing.T) {
 	}{
 		{replay.VerificationComplete, evidenceGateOpen},
 		{replay.VerificationNotApplicable, evidenceGateOpen},
-		{replay.VerificationIncomplete, evidenceGateIncomplete},
+		{replay.VerificationIncomplete, evidenceGateOpen},
 		{replay.VerificationDiverged, evidenceGateDiverged},
 		{replay.VerificationStalled, evidenceGateStalled},
 		{replay.VerificationUnavailable, evidenceGateUnavailable},
@@ -290,18 +290,22 @@ func TestGetHealthUsesTheSolanaWireShape(t *testing.T) {
 	}
 }
 
-func TestIncompleteVerificationRefusesCurrentBankEvidence(t *testing.T) {
+func TestIncompleteVerificationReportsCoverageDebtWithoutRefusing(t *testing.T) {
 	server := &RpcServer{verificationSnapshot: snapshotReturning(replay.VerificationIncomplete, 9, 10)}
 	status, err := server.GetVerificationStatus(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.EvidenceServed || status.Reason != string(evidenceGateIncomplete) {
+	if status.State != string(replay.VerificationIncomplete) || status.Healthy ||
+		!status.EvidenceServed || status.Reason != "" ||
+		status.VerifiedSlot != 9 || status.EligibleSlot != 10 {
 		t.Fatalf("incomplete verification reported %+v", status)
 	}
-	_, err = server.GetHealth(context.Background(), nil)
-	var unhealthy *NodeUnhealthyError
-	if !errors.As(err, &unhealthy) || unhealthy.Reason != string(evidenceGateIncomplete) {
-		t.Fatalf("incomplete health error = %v", err)
+	if reason, _, _ := server.evidenceGate("getAccountInfo"); reason != evidenceGateOpen {
+		t.Fatalf("normal verification lag refused evidence with %q", reason)
+	}
+	health, err := server.GetHealth(context.Background(), nil)
+	if err != nil || health != "ok" {
+		t.Fatalf("incomplete health = %q, %v; want ok", health, err)
 	}
 }

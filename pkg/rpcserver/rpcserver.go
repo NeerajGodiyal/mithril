@@ -442,16 +442,16 @@ func (rpcServer *RpcServer) serveHTTPForBind(w http.ResponseWriter, r *http.Requ
 		writeRPCRateError(w)
 		return
 	}
-	body, ok := readRPCRequestBody(w, r)
-	if !ok {
-		return
-	}
 	release, ok := rpcServer.acquireRequestSlots(local)
 	if !ok {
 		http.Error(w, "too many active requests", http.StatusServiceUnavailable)
 		return
 	}
 	defer release()
+	body, ok := readRPCRequestBody(w, r)
+	if !ok {
+		return
+	}
 
 	ctx := context.WithValue(r.Context(), rpcLocalRequestContextKey{}, local)
 	ctx, cancel := context.WithTimeout(ctx, rpcRequestContextTimeout)

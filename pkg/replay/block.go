@@ -66,6 +66,22 @@ func resetPublishedReplayState(rpcServer SlotCtxSetter) {
 	}
 }
 
+func invalidateClassicProcessedBank(rpcServer SlotCtxSetter, capturedBank bool) {
+	// Classic SlotCtx reads fall through to the mutable AccountsDB that
+	// ProcessBlock is about to update. Rooted-durable banks instead hold an
+	// immutable captured view whose own generation check handles promotion.
+	if rpcServer != nil && !capturedBank {
+		rpcServer.SetSlotCtx(nil)
+	}
+}
+
+func normalizedUnrootedState(tail *unrootedTail) unrootedState {
+	if tail == nil {
+		return nil
+	}
+	return tail
+}
+
 // BlockFetchOpts contains options for parallel block fetching
 type BlockFetchOpts struct {
 	MaxRPS          int    // Rate limit (requests per second), 0 = use default
@@ -3235,11 +3251,19 @@ func ReplayBlocks(
 		if lastSlotCtx != nil {
 			parentBankSysvars = lastSlotCtx.BankSysvars()
 		}
+		candidateTail := normalizedUnrootedState(unrootedTailState)
+		invalidateClassicProcessedBank(rpcServer, candidateTail != nil)
+		var candidateSubmittedTransactions txstatus.Sink
+		var submittedTransactionStage *submittedTransactionOutcomeStage
+		if submittedTransactions != nil {
+			submittedTransactionStage = &submittedTransactionOutcomeStage{Sink: submittedTransactions}
+			candidateSubmittedTransactions = submittedTransactionStage
+		}
 		var candidateSlotCtx *sealevel.SlotCtx
 		if block.FromLocalProduction {
-			candidateSlotCtx, err = adoptLocalLeaderBlock(block, unrootedTailState, transactionStatuses, persistedHashes, submittedTransactions)
+			candidateSlotCtx, err = adoptLocalLeaderBlock(block, candidateTail, transactionStatuses, persistedHashes, candidateSubmittedTransactions)
 		} else {
-			candidateSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, persistedHashes, unrootedTailState, transactionStatuses, submittedTransactions, alpenglowClock, parentBankSysvars)
+			candidateSlotCtx, err = ProcessBlock(acctsDb, block, epochSchedule, txParallelism, dbgOpts, persistedHashes, candidateTail, transactionStatuses, candidateSubmittedTransactions, alpenglowClock, parentBankSysvars)
 		}
 		processBlockEnd := time.Now()
 		metrics.GlobalBlockReplay.ProcessBlock.AddTiming(processBlockEnd.Sub(processBlockStart))
@@ -3324,9 +3348,7 @@ func ReplayBlocks(
 			highestExecutedSlot = block.Slot // bounds the promotion-gate walk (shared fold path)
 		}
 
-		if rpcServer != nil {
-			rpcServer.SetSlotCtx(lastSlotCtx)
-		}
+		publishAcceptedProcessedBank(rpcServer, lastSlotCtx, submittedTransactionStage)
 
 		replayCtx.Capitalization -= lastSlotCtx.LamportsBurnt
 
@@ -4720,6 +4742,60 @@ func publishSubmittedTransactionOutcomes(sink txstatus.Sink, block *b.Block, out
 		sink.Landed(tx.Signatures[0], block.Slot, outcomes[index])
 	}
 	sink.ObserveBlockHeight(block.BlockHeight)
+}
+
+type submittedTransactionLanding struct {
+	signature      solana.Signature
+	slot           uint64
+	executionError string
+}
+
+// submittedTransactionOutcomeStage delays receipt changes until consensus
+// accepts the candidate and its processed bank is published. The embedded sink
+// keeps the rest of txstatus.Sink unchanged; replay only intercepts these two
+// methods.
+type submittedTransactionOutcomeStage struct {
+	txstatus.Sink
+	landings     []submittedTransactionLanding
+	blockHeights []uint64
+}
+
+func (stage *submittedTransactionOutcomeStage) Landed(signature solana.Signature, slot uint64, executionError string) {
+	stage.landings = append(stage.landings, submittedTransactionLanding{
+		signature: signature, slot: slot, executionError: executionError,
+	})
+}
+
+func (stage *submittedTransactionOutcomeStage) ObserveBlockHeight(blockHeight uint64) {
+	stage.blockHeights = append(stage.blockHeights, blockHeight)
+}
+
+func (stage *submittedTransactionOutcomeStage) publish() {
+	if stage == nil || stage.Sink == nil {
+		return
+	}
+	for _, landing := range stage.landings {
+		stage.Sink.Landed(landing.signature, landing.slot, landing.executionError)
+	}
+	for _, blockHeight := range stage.blockHeights {
+		stage.Sink.ObserveBlockHeight(blockHeight)
+	}
+	stage.landings = nil
+	stage.blockHeights = nil
+}
+
+// publishAcceptedProcessedBank preserves the externally visible order: the
+// bank becomes readable before its receipts can report landing or expiry.
+// Replay calls this only after the consensus engine accepts the candidate.
+func publishAcceptedProcessedBank(
+	rpcServer SlotCtxSetter,
+	slotCtx *sealevel.SlotCtx,
+	stage *submittedTransactionOutcomeStage,
+) {
+	if rpcServer != nil {
+		rpcServer.SetSlotCtx(slotCtx)
+	}
+	stage.publish()
 }
 
 func validateBlockTransactionMetadata(block *b.Block) error {

@@ -601,9 +601,10 @@ func TestServeHTTPDispatchesTheMethodItValidated(t *testing.T) {
 	}
 }
 
-func TestServeHTTPReadsRemoteBodyBeforeTakingAdmissionSlot(t *testing.T) {
+func TestServeHTTPTakesAdmissionSlotsBeforeReadingRemoteBody(t *testing.T) {
 	rpcServer := rpcHandlerTestServer()
 	rpcServer.rpcService = newRPCService(rpcServer)
+	rpcServer.requestSlots = make(chan struct{}, 1)
 	rpcServer.remoteSlots = make(chan struct{}, 1)
 	external := rpcListenerHandler{server: rpcServer, bindIP: net.ParseIP("192.0.2.10")}
 	release := make(chan struct{})
@@ -621,6 +622,8 @@ func TestServeHTTPReadsRemoteBodyBeforeTakingAdmissionSlot(t *testing.T) {
 	}()
 	<-first.Body.(*blockingRequestBody).started
 
+	globalHeld := len(rpcServer.requestSlots)
+	remoteHeld := len(rpcServer.remoteSlots)
 	second := rpcHandlerTestRequest(http.MethodPost, strings.NewReader(`{"jsonrpc":"2.0","method":"getBlockHeight","params":[],"id":1}`))
 	second.Host = "192.0.2.10:8899"
 	second.RemoteAddr = "198.51.100.21:50000"
@@ -629,8 +632,11 @@ func TestServeHTTPReadsRemoteBodyBeforeTakingAdmissionSlot(t *testing.T) {
 	close(release)
 	<-firstDone
 
-	if secondRecorder.Code != http.StatusOK {
-		t.Fatalf("complete remote request status = %d, want %d", secondRecorder.Code, http.StatusOK)
+	if globalHeld != 1 || remoteHeld != 1 {
+		t.Fatalf("blocked body held global/remote slots = %d/%d, want 1/1", globalHeld, remoteHeld)
+	}
+	if secondRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("second remote request status = %d, want %d", secondRecorder.Code, http.StatusServiceUnavailable)
 	}
 }
 

@@ -25,13 +25,13 @@ type GetVerificationStatusResp struct {
 	// how far it could have reached. Their gap is the coverage debt.
 	VerifiedSlot uint64 `json:"verifiedSlot"`
 	EligibleSlot uint64 `json:"eligibleSlot"`
-	// Healthy is a convenience for callers that only branch two ways. It never
-	// replaces State: the components are returned alongside it so nobody has
-	// to make a decision from one boolean.
+	// Healthy means verification has caught up to its eligible watermark (or is
+	// not required). It never replaces State or means the current processed bank
+	// was verified; the watermarks describe the actual lagged coverage.
 	Healthy bool `json:"healthy"`
-	// EvidenceServed reports whether the node is currently answering evidence
-	// requests at all. When false, Reason names why in the same vocabulary the
-	// refusal itself uses.
+	// EvidenceServed reports whether gate policy currently permits evidence
+	// requests. Normal catch-up debt can leave this true while Healthy is false.
+	// When false, Reason names why in the refusal's vocabulary.
 	EvidenceServed bool   `json:"evidenceServed"`
 	Reason         string `json:"reason,omitempty"`
 }
@@ -59,6 +59,9 @@ func (rpcServer *RpcServer) GetVerificationStatus(
 func (rpcServer *RpcServer) GetHealth(
 	_ context.Context, _ jsonrpc.RawParams,
 ) (string, error) {
+	// This standard service-health endpoint follows refusal policy: ordinary
+	// catch-up lag stays available. Callers that need verification coverage use
+	// getVerificationStatus and its explicit state and watermarks.
 	snapshot := rpcServer.verificationSnapshot
 	if snapshot == nil {
 		snapshot = defaultVerificationSnapshot

@@ -20,6 +20,27 @@ func (s *recordingSlotCtxSetter) SetSlotCtx(slotCtx *sealevel.SlotCtx) {
 	s.contexts = append(s.contexts, slotCtx)
 }
 
+func TestInvalidateClassicProcessedBankPreservesCapturedBank(t *testing.T) {
+	classic := &recordingSlotCtxSetter{}
+	invalidateClassicProcessedBank(classic, false)
+	require.Equal(t, []*sealevel.SlotCtx{nil}, classic.contexts)
+
+	captured := &recordingSlotCtxSetter{}
+	invalidateClassicProcessedBank(captured, true)
+	require.Empty(t, captured.contexts)
+}
+
+func TestNormalizedUnrootedStateDoesNotBoxClassicNilTail(t *testing.T) {
+	var boxed unrootedState = (*unrootedTail)(nil)
+	if boxed == nil {
+		t.Fatal("test precondition failed: a typed nil must box as a non-nil interface")
+	}
+	require.Nil(t, normalizedUnrootedState(nil))
+
+	tail := &unrootedTail{}
+	require.Same(t, tail, normalizedUnrootedState(tail))
+}
+
 func TestChainTipTracksReplayedSlot(t *testing.T) {
 	t.Cleanup(ResetChainTip)
 	parentLtHash := new(lthash.LtHash).InitWithHash(make([]byte, 2048))

@@ -26,7 +26,7 @@ const (
 // only this one means "stop trusting this node", so the reason is machine
 // readable rather than prose.
 type NodeUnhealthyError struct {
-	// Reason is one of the evidenceGateReason values: incomplete, diverged,
+	// Reason is one of the refusing evidenceGateReason values: diverged,
 	// stalled, unavailable, or unknown_verification_state.
 	Reason string
 	// VerifiedSlot and EligibleSlot describe how far verification had reached,

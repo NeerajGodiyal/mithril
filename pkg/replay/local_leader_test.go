@@ -232,7 +232,7 @@ func TestAdoptLocalLeaderBlockEventFailureRestoresStatusAndPublishesNothing(t *t
 	require.Equal(t, uint64(10), tip)
 }
 
-func TestAdoptLocalLeaderBlockPublishesActualTransactionFailure(t *testing.T) {
+func TestAdoptLocalLeaderBlockStagesActualTransactionFailure(t *testing.T) {
 	t.Cleanup(ResetLocalLeaderCommits)
 	const slot = uint64(23)
 	tx := statusCacheTestTransaction(1, 2, 31)
@@ -245,9 +245,14 @@ func TestAdoptLocalLeaderBlockPublishesActualTransactionFailure(t *testing.T) {
 	index.Forwarded(tx.Signatures[0])
 	RegisterLocalLeaderCommitData(localLeaderTestSlotCtx(t, slot), nil, false, nil, false, []string{"InstructionError(0, InvalidInstructionData)"})
 
-	_, err = adoptLocalLeaderBlock(block, nil, NewTransactionStatusCache(), &persistedTracker{}, index)
+	stage := &submittedTransactionOutcomeStage{Sink: index}
+	_, err = adoptLocalLeaderBlock(block, nil, NewTransactionStatusCache(), &persistedTracker{}, stage)
 	require.NoError(t, err)
 	receipt, known := index.Lookup(tx.Signatures[0])
+	require.True(t, known)
+	require.Equal(t, txstatus.StatusSubmitted, receipt.Status)
+	stage.publish()
+	receipt, known = index.Lookup(tx.Signatures[0])
 	require.True(t, known)
 	require.Equal(t, txstatus.StatusLandedFailed, receipt.Status)
 	require.Equal(t, "InstructionError(0, InvalidInstructionData)", receipt.ExecutionError)
