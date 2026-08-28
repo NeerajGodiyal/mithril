@@ -2361,7 +2361,7 @@ func TestInformationalAlertsAreNotPostedButFaultsAre(t *testing.T) {
 	}
 }
 
-func TestProbeIntervalSupportsDisableAndLongGaps(t *testing.T) {
+func TestProbeIntervalSupportsDisableAndAlertCompatibleGaps(t *testing.T) {
 	tests := []struct {
 		seconds  int
 		want     time.Duration
@@ -2370,7 +2370,7 @@ func TestProbeIntervalSupportsDisableAndLongGaps(t *testing.T) {
 		{seconds: -1, want: 0, disabled: true},
 		{seconds: 0, want: DefaultProbeInterval},
 		{seconds: 60, want: time.Minute},
-		{seconds: 86_400, want: 24 * time.Hour},
+		{seconds: 3_600, want: time.Hour},
 	}
 	for _, test := range tests {
 		cfg := Config{ProbeIntervalSec: test.seconds}
@@ -2400,10 +2400,10 @@ func TestProbeIntervalValidationBounds(t *testing.T) {
 				seconds, rejected, shouldReject, err)
 		}
 	}
-	for _, ok := range []int{-1, 0, 60, 3_600, 86_400} {
+	for _, ok := range []int{-1, 0, 60, 3_600} {
 		check(ok, false)
 	}
-	for _, bad := range []int{-2, 59, 86_401} {
+	for _, bad := range []int{-2, 59, 3_601, 86_400} {
 		check(bad, true)
 	}
 }

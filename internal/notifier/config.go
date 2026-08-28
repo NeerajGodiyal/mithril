@@ -34,6 +34,7 @@ const (
 	DefaultDedupTTL          = alertRepeatInterval
 	DefaultWebhookTimeout    = 30 * time.Second
 	minConfiguredProbeTime   = time.Minute
+	maxConfiguredProbeTime   = time.Hour
 	maxConfiguredWebhookTime = DefaultWebhookTimeout
 )
 
@@ -211,12 +212,12 @@ func (c Config) validate() error {
 		c.SendTimeoutSec > int(maxConfiguredWebhookTime/time.Second) {
 		return errors.New("notifier config send_timeout_seconds must be between 0 and 30")
 	}
-	// -1 disables probing; 0 takes the default; a day is the longest useful
-	// gap before the staleness rule would fire anyway.
+	// -1 disables probing; 0 takes the default. The alert contract requires a
+	// successful canary within two hours, so configured probes cannot exceed one.
 	if c.ProbeIntervalSec < -1 ||
 		(c.ProbeIntervalSec > 0 && c.ProbeIntervalSec < int(minConfiguredProbeTime/time.Second)) ||
-		c.ProbeIntervalSec > 86_400 {
-		return errors.New("notifier config probe_interval_seconds must be -1 (disabled), 0 (default), or between 60 and 86400")
+		c.ProbeIntervalSec > int(maxConfiguredProbeTime/time.Second) {
+		return errors.New("notifier config probe_interval_seconds must be -1 (disabled), 0 (default), or between 60 and 3600")
 	}
 	if c.WebhookTimeoutSec < 0 ||
 		c.WebhookTimeoutSec > int(maxConfiguredWebhookTime/time.Second) {

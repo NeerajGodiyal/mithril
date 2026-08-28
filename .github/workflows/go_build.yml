@@ -46,3 +46,6 @@ jobs:
 
       - name: Build Mithril
         run: nix build .#mithril
+
+      - name: Check Nix modules and monitoring configuration
+        run: nix flake check

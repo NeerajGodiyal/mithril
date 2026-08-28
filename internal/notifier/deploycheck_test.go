@@ -60,3 +60,53 @@ func TestVerifyDeployConfigFlagsShippedTemplates(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifyDeployConfigScansSymlinkedDeploymentFiles(t *testing.T) {
+	realDir := t.TempDir()
+	config := filepath.Join(realDir, "alertmanager.yml")
+	if err := os.WriteFile(config, []byte(DeployPlaceholder+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkedDir := t.TempDir()
+	if err := os.Symlink(config, filepath.Join(linkedDir, "alertmanager.yml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyDeployConfig(linkedDir); err == nil {
+		t.Fatal("placeholder behind a deployment symlink was accepted")
+	}
+}
+
+func TestVerifyDeployConfigRejectsNestedSymlinkedDirectories(t *testing.T) {
+	realDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realDir, "targets.yml"), []byte(DeployPlaceholder+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.Symlink(realDir, filepath.Join(root, "targets")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := VerifyDeployConfig(root)
+	if err == nil || !strings.Contains(err.Error(), "symlinked directory") {
+		t.Fatalf("nested symlinked directory error = %v", err)
+	}
+}
+
+func TestVerifyDeployConfigRejectsOversizedFiles(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "prometheus.yml")
+	file, err := os.Create(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxDeployScanBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyDeployConfig(dir); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("oversized deployment config error = %v", err)
+	}
+}

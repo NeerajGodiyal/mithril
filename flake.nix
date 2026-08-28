@@ -151,6 +151,16 @@
         config-smoke = pkgs.runCommand "mithril-config-smoke" {} ''
           cp ${configSmoke} $out
         '';
+        monitoring-config = pkgs.runCommand "mithril-monitoring-config-check" {
+          nativeBuildInputs = [pkgs.prometheus.cli pkgs.prometheus-alertmanager];
+        } ''
+          promtool check config ${self}/prometheus/prometheus.yml
+          promtool check rules ${self}/prometheus/rules/mithril.yml
+          promtool test rules ${self}/prometheus/tests/mithril_alerts_test.yml
+          amtool check-config ${self}/prometheus/alertmanager.yml
+          amtool check-config ${self}/prometheus/alertmanager-with-ses.yml
+          touch $out
+        '';
       }
       // lib.optionalAttrs pkgs.stdenv.isLinux {
         nixos-module = pkgs.runCommand "nixos-module-eval" {} ''
