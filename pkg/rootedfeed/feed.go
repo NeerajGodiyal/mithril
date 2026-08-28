@@ -563,7 +563,9 @@ func (f *Follower) retainedHeaders() ([]accountsdb.ManifestHeader, error) {
 		last := f.headers[len(f.headers)-1]
 		switch {
 		case head.BatchSeq == last.BatchSeq && head == last:
-			return append([]accountsdb.ManifestHeader(nil), f.headers...), nil
+			// The head is advisory: a fold may have committed even when its
+			// post-commit head publication failed. Fall through to the cheap
+			// directory-version check before accepting an unchanged head.
 		case head.BatchSeq == last.BatchSeq+1:
 			f.headers = append(f.headers, head)
 			if uint64(len(f.headers)) > f.retainBatches {

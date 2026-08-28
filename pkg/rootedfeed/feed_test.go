@@ -132,6 +132,26 @@ func TestFollowerUsesPublishedHeadForIncrementalDiscovery(t *testing.T) {
 	require.ErrorContains(t, err, "manifest head")
 }
 
+func TestFollowerRescansWhenPublishedHeadStalls(t *testing.T) {
+	root := t.TempDir()
+	writeClassicBatch(t, root, 1, 10, 9)
+	headers, err := retainedHeaders(root, 2)
+	require.NoError(t, err)
+	require.NoError(t, PublishManifestHead(root, headers[0]))
+
+	follower, err := NewFollower(root, 2)
+	require.NoError(t, err)
+	last, _, err := follower.StreamAfter(nil, nil)
+	require.NoError(t, err)
+
+	// The next fold is committed, but its advisory head publication fails.
+	writeClassicBatch(t, root, 2, 12, 10)
+	got, count, err := follower.StreamAfter(last, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), count)
+	require.Equal(t, rootedevents.Cursor{Slot: 12, Ordinal: 0}, *got)
+}
+
 func TestFollowerRescansWhenCompactionRemovesCachedBoundary(t *testing.T) {
 	root := t.TempDir()
 	for sequence, slot := range map[uint64]uint64{1: 10, 2: 12, 3: 14} {
