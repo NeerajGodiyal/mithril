@@ -15,7 +15,8 @@ import (
 func TestReadTarRetainsStatusCacheForEveryBuilderOptionPath(t *testing.T) {
 	dir := t.TempDir()
 	archive := filepath.Join(dir, "snapshot.tar.zst")
-	payload := []byte("status-cache-seed")
+	root := uint64(42)
+	payload := encodeRootOnlyStatusCache(root)
 	writeStatusCacheArchive(t, archive, payload, 1)
 
 	tests := []struct {
@@ -34,6 +35,7 @@ func TestReadTarRetainsStatusCacheForEveryBuilderOptionPath(t *testing.T) {
 			options := readTarOptions{
 				isIncremental:   tt.isIncremental,
 				statusCachePath: destination,
+				statusCacheRoot: &root,
 			}
 			if tt.savePath {
 				options.savePath = filepath.Join(dir, tt.name, "saved.tar.zst")
@@ -50,6 +52,7 @@ func TestReadTarRequiresExactlyOneStatusCacheAndPreservesInstalledSeed(t *testin
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "status-cache")
 	installed := []byte("full-status-cache")
+	root := uint64(42)
 	if err := os.WriteFile(destination, installed, 0o644); err != nil {
 		t.Fatalf("write installed seed: %v", err)
 	}
@@ -57,16 +60,16 @@ func TestReadTarRequiresExactlyOneStatusCacheAndPreservesInstalledSeed(t *testin
 	missing := filepath.Join(dir, "missing.tar.zst")
 	writeStatusCacheArchive(t, missing, nil, 0)
 	if err := readTar(context.Background(), &sync.WaitGroup{}, missing, nil, readTarOptions{
-		isIncremental: true, statusCachePath: destination,
+		isIncremental: true, statusCachePath: destination, statusCacheRoot: &root,
 	}); err == nil {
 		t.Fatal("expected missing status-cache error")
 	}
 	assertStatusCacheFileBytes(t, destination, installed)
 
 	duplicate := filepath.Join(dir, "duplicate.tar.zst")
-	writeStatusCacheArchive(t, duplicate, []byte("new-status-cache"), 2)
+	writeStatusCacheArchive(t, duplicate, encodeRootOnlyStatusCache(root), 2)
 	if err := readTar(context.Background(), &sync.WaitGroup{}, duplicate, nil, readTarOptions{
-		isIncremental: true, statusCachePath: destination,
+		isIncremental: true, statusCachePath: destination, statusCacheRoot: &root,
 	}); err == nil {
 		t.Fatal("expected duplicate status-cache error")
 	}
@@ -77,14 +80,15 @@ func TestReadTarCorruptTailAfterStatusCachePreservesInstalledSeed(t *testing.T) 
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "status-cache")
 	installed := []byte("full-status-cache")
+	root := uint64(42)
 	if err := os.WriteFile(destination, installed, 0o644); err != nil {
 		t.Fatalf("write installed seed: %v", err)
 	}
 
 	archive := filepath.Join(dir, "corrupt-tail.tar.zst")
-	writeStatusCacheArchiveWithCorruptTail(t, archive, []byte("new-status-cache"))
+	writeStatusCacheArchiveWithCorruptTail(t, archive, encodeRootOnlyStatusCache(root))
 	if err := readTar(context.Background(), &sync.WaitGroup{}, archive, nil, readTarOptions{
-		isIncremental: true, statusCachePath: destination,
+		isIncremental: true, statusCachePath: destination, statusCacheRoot: &root,
 	}); err == nil {
 		t.Fatal("expected corrupt tar tail error")
 	}
@@ -97,6 +101,35 @@ func TestReadTarCorruptTailAfterStatusCachePreservesInstalledSeed(t *testing.T) 
 	if len(temporaries) != 0 {
 		t.Fatalf("temporary status-cache files remain after corrupt archive: %v", temporaries)
 	}
+}
+
+func TestReadTarValidatesStatusCacheRootBeforeInstall(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "status-cache")
+	installed := []byte("installed-status-cache")
+	if err := os.WriteFile(destination, installed, 0o644); err != nil {
+		t.Fatalf("write installed seed: %v", err)
+	}
+
+	archive := filepath.Join(dir, "snapshot.tar.zst")
+	writeStatusCacheArchive(t, archive, encodeRootOnlyStatusCache(42), 1)
+	wrongRoot := uint64(43)
+	if err := readTar(context.Background(), &sync.WaitGroup{}, archive, nil, readTarOptions{
+		statusCachePath: destination,
+		statusCacheRoot: &wrongRoot,
+	}); err == nil {
+		t.Fatal("expected status-cache root mismatch")
+	}
+	assertStatusCacheFileBytes(t, destination, installed)
+
+	expectedRoot := uint64(42)
+	if err := readTar(context.Background(), &sync.WaitGroup{}, archive, nil, readTarOptions{
+		statusCachePath: destination,
+		statusCacheRoot: &expectedRoot,
+	}); err != nil {
+		t.Fatalf("readTar with matching root: %v", err)
+	}
+	assertStatusCacheFileBytes(t, destination, encodeRootOnlyStatusCache(42))
 }
 
 func writeStatusCacheArchive(t *testing.T, filename string, payload []byte, copies int) {

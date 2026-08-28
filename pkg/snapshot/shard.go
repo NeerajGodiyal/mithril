@@ -47,7 +47,9 @@ type ShardLogger struct {
 	onProgress ShardProgressCallback
 
 	// closed flag to prevent sends after Close is called (defensive)
-	closed atomic.Bool
+	closed    atomic.Bool
+	closeOnce sync.Once
+	sendMu    sync.RWMutex
 }
 
 // shard represents a single log shard
@@ -65,11 +67,26 @@ type shard struct {
 // shards for logging entries. Entries are flushed to shardedSetter
 // when log reaches a certain size or on shard closure.
 func NewShardLogger(numShards int, filePrefix string) *ShardLogger {
+	sl, err := NewShardLoggerWithError(numShards, filePrefix)
+	if err != nil {
+		panic(fmt.Sprintf("shardlogger setup: %v", err))
+	}
+	return sl
+}
+
+// NewShardLoggerWithError is the recoverable constructor used by durable
+// bootstrap paths. NewShardLogger remains for callers that rely on its legacy
+// panic-on-setup-failure behavior.
+func NewShardLoggerWithError(numShards int, filePrefix string) (*ShardLogger, error) {
+	return newShardLogger(numShards, filePrefix, os.Create)
+}
+
+func newShardLogger(numShards int, filePrefix string, createFile func(string) (*os.File, error)) (*ShardLogger, error) {
 	if numShards <= 0 {
 		numShards = DefaultSnapshotIndexShards
 	}
 	if numShards > 1000 {
-		panic(fmt.Sprintf("numShards=%d > 1000 is too many shards", numShards))
+		return nil, fmt.Errorf("numShards=%d > 1000 is too many shards", numShards)
 	}
 	flushers := snapshotMaxConcurrentFlushers()
 	sl := &ShardLogger{
@@ -79,13 +96,22 @@ func NewShardLogger(numShards int, filePrefix string) *ShardLogger {
 		flushSem:   semaphore.NewWeighted(int64(flushers)),
 	}
 
+	for i := range numShards {
+		shard, err := newShard(i, filePrefix, sl.flushSem, sl, createFile)
+		if err != nil {
+			for _, opened := range sl.shards[:i] {
+				_ = opened.file.Close()
+			}
+			return nil, err
+		}
+		sl.shards[i] = shard
+	}
 	sl.wg.Add(numShards)
 	for i := range numShards {
-		sl.shards[i] = newShard(i, filePrefix, sl.flushSem, sl)
 		go sl.shards[i].processRequests(sl.wg)
 	}
 
-	return sl
+	return sl, nil
 }
 
 // SetProgressCallback sets a callback to receive progress updates during shard flushes.
@@ -105,11 +131,11 @@ func (sl *ShardLogger) BytesDone() int64 {
 }
 
 // newShard creates a new shard with the given ID
-func newShard(id int, filePrefix string, flushSem *semaphore.Weighted, parent *ShardLogger) *shard {
+func newShard(id int, filePrefix string, flushSem *semaphore.Weighted, parent *ShardLogger, createFile func(string) (*os.File, error)) (*shard, error) {
 	filename := filepath.Join(filePrefix, fmt.Sprintf("%03d", id))
-	file, err := os.Create(filename)
+	file, err := createFile(filename)
 	if err != nil {
-		panic(fmt.Sprintf("shardlogger setup: %v", err))
+		return nil, fmt.Errorf("create shard %d: %w", id, err)
 	}
 
 	s := &shard{
@@ -121,7 +147,7 @@ func newShard(id int, filePrefix string, flushSem *semaphore.Weighted, parent *S
 		parent:   parent,
 	}
 
-	return s
+	return s, nil
 }
 
 const vlen = /*Slot*/ 8 + /*FileId*/ 8 + /*Offset*/ 8
@@ -153,26 +179,30 @@ func (s *shard) processRequests(wg *sync.WaitGroup) {
 }
 
 func (s *shard) logToSST(ctx context.Context) error {
-	err := s.flushSem.Acquire(ctx, 1)
-	if err != nil {
-		return fmt.Errorf("acquiring flush semaphore: %w", err)
-	}
-	defer s.flushSem.Release(1)
-	// Close/flush
 	if err := s.writer.Flush(); err != nil {
+		_ = s.file.Close()
 		return fmt.Errorf("failed to flush writer: %w", err)
 	}
 	filename := s.file.Name()
 	if err := s.file.Close(); err != nil {
 		return fmt.Errorf("failed to close file: %w", err)
 	}
+	if err := s.flushSem.Acquire(ctx, 1); err != nil {
+		return fmt.Errorf("acquiring flush semaphore: %w", err)
+	}
+	defer s.flushSem.Release(1)
 
 	// Read contents from log
 	file, err := os.Open(filename)
 	if err != nil {
 		return fmt.Errorf("failed to reopen file for reading: %w", err)
 	}
-	defer file.Close()
+	inputOpen := true
+	defer func() {
+		if inputOpen {
+			_ = file.Close()
+		}
+	}()
 	fileInfo, err := file.Stat()
 	if err != nil {
 		return fmt.Errorf("stat %s: %w", filename, err)
@@ -208,15 +238,10 @@ func (s *shard) logToSST(ctx context.Context) error {
 			}
 		}
 	}
-
-	// Truncate file and replace file/writer pointers
-	newFile, err := os.Create(filename)
-	if err != nil {
-		return fmt.Errorf("failed to truncate file: %w", err)
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close shard log %s: %w", filename, err)
 	}
-	s.file = newFile
-	s.writer = bufio.NewWriter(newFile)
-	s.logSize = 0
+	inputOpen = false
 
 	// Sort
 	slices.SortFunc(pairs, func(a, b shardRequest) int {
@@ -239,9 +264,7 @@ func (s *shard) logToSST(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create %s: %w", sstFilename, err)
 	}
-	defer sstFile.Close()
 	w := sstable.NewWriter(objstorageprovider.NewFileWritable(sstFile), sstable.WriterOptions{})
-	defer w.Close()
 	lastWritten := -1
 	for i, kv := range pairs {
 		if lastWritten >= 0 && bytes.Equal(kv.k[:], pairs[lastWritten].k[:]) {
@@ -249,16 +272,24 @@ func (s *shard) logToSST(ctx context.Context) error {
 		}
 		kv.v.Marshal(&vBytes)
 		if err := w.Set(kv.k[:], vBytes[:]); err != nil {
+			_ = w.Close()
 			return fmt.Errorf("writing to SST: %w", err)
 		}
 		lastWritten = i
 	}
-
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("finish shard SST: %w", err)
+	}
+	if err := os.Remove(filename); err != nil {
+		return fmt.Errorf("remove shard log %s: %w", filename, err)
+	}
 	return nil
 }
 
 // EnqueueRequest adds a request to the appropriate shard
 func (sl *ShardLogger) EnqueueRequest(k solana.PublicKey, v accountsdb.AccountIndexEntry) {
+	sl.sendMu.RLock()
+	defer sl.sendMu.RUnlock()
 	if sl.closed.Load() {
 		mlog.Log.Errorf("unexpectedly still receiving requests after shard logger is closed!")
 		return // Already closed
@@ -280,13 +311,7 @@ func (sl *ShardLogger) Close(ctx context.Context) error {
 // CloseWithProgress closes all shards with optional progress callback.
 // The callback is called after each shard flush completes with (completed, total) counts.
 func (sl *ShardLogger) CloseWithProgress(ctx context.Context, onProgress func(completed, total int)) error {
-	// Mark as closed before closing channels to prevent late sends
-	sl.closed.Store(true)
-	for _, s := range sl.shards {
-		close(s.requests)
-	}
-
-	sl.wg.Wait()
+	sl.stopRequests()
 
 	total := len(sl.shards)
 	var completed atomic.Int32
@@ -302,4 +327,28 @@ func (sl *ShardLogger) CloseWithProgress(ctx context.Context, onProgress func(co
 		})
 	}
 	return flushWg.Wait()
+}
+
+// Abort stops the shard workers and closes their files without producing SSTs.
+// It is safe after CloseWithProgress and is used when bootstrap fails early.
+func (sl *ShardLogger) Abort() {
+	if sl == nil {
+		return
+	}
+	sl.stopRequests()
+	for _, s := range sl.shards {
+		_ = s.file.Close()
+	}
+}
+
+func (sl *ShardLogger) stopRequests() {
+	sl.closeOnce.Do(func() {
+		sl.sendMu.Lock()
+		sl.closed.Store(true)
+		for _, s := range sl.shards {
+			close(s.requests)
+		}
+		sl.sendMu.Unlock()
+		sl.wg.Wait()
+	})
 }

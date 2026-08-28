@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -641,7 +642,11 @@ func BuildAccountsDbPaths(
 	}
 	defer cleanupIndexWorkDir()
 	numShards := snapshotIndexShards()
-	sl := NewShardLogger(numShards, logsDir)
+	sl, err := NewShardLoggerWithError(numShards, logsDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create shard logger: %w", err)
+	}
+	defer sl.Abort()
 
 	// Create stake pubkey collector for building stake index during appendvec processing
 	stakeCollector := &stakeIndexCollector{
@@ -669,6 +674,7 @@ func BuildAccountsDbPaths(
 	err = readTar(ctx, wg, snapshotFile, pools, readTarOptions{
 		progress:        dp,
 		statusCachePath: retainedStatusCachePath(accountsDbDir),
+		statusCacheRoot: &manifest.Bank.Slot,
 	})
 
 	// Wait for ALL worker tasks from full snapshot to complete before starting incremental
@@ -693,7 +699,11 @@ func BuildAccountsDbPaths(
 	// Process incremental snapshot (if provided)
 	if incrementalSnapshotFile != "" {
 		err = readTar(ctx, wg, incrementalSnapshotFile, pools,
-			readTarOptions{isIncremental: true, statusCachePath: retainedStatusCachePath(accountsDbDir)})
+			readTarOptions{
+				isIncremental:   true,
+				statusCachePath: retainedStatusCachePath(accountsDbDir),
+				statusCacheRoot: &incrementalManifest.Bank.Slot,
+			})
 		// Wait for all incremental worker tasks to complete
 		workerErr = waitForSnapshotWorkers(wg, pools)
 		if err == nil {
@@ -775,6 +785,8 @@ type readTarOptions struct {
 	// Atomically retain the raw snapshots/status_cache member here. A
 	// successfully consumed incremental archive replaces the full seed.
 	statusCachePath string
+	// Root from the already validated manifest for this archive.
+	statusCacheRoot *uint64
 }
 
 func readTar(
@@ -783,16 +795,32 @@ func readTar(
 	filename string,
 	pools *snapshotWorkerPools,
 	options readTarOptions,
-) error {
+) (retErr error) {
 	dp := options.progress
 	savePath := options.savePath
 	statusCache := newStatusCacheCandidate(options.statusCachePath)
 	defer statusCache.cleanup()
+	// cleanupPartial removes the .partial download file on error/cancellation.
+	cleanupPartial := func(reason string) {
+		if savePath != "" {
+			mlog.Log.Infof("Cleaning up partial download (%s)", reason)
+			CleanupPartialDownload(savePath)
+		}
+	}
 	tarReader, bmr, closer, err := newSnapshotReaderWithProgress(ctx, filename, options.savePath)
 	if err != nil {
+		cleanupPartial("open error")
 		return err
 	}
-	defer closer.Close()
+	defer func() {
+		if closer == nil {
+			return
+		}
+		if closeErr := closer.Close(); closeErr != nil {
+			cleanupPartial("close error")
+			retErr = errors.Join(retErr, fmt.Errorf("close snapshot stream: %w", closeErr))
+		}
+	}()
 
 	// Set up download progress callback
 	if dp != nil {
@@ -802,14 +830,6 @@ func readTar(
 		bmr.SetProgressCallback(func(bytesRead, totalBytes int64) {
 			dp.Download.Add(bytesRead - dp.Download.Current())
 		})
-	}
-
-	// cleanupPartial removes the .partial download file on error/cancellation
-	cleanupPartial := func(reason string) {
-		if savePath != "" {
-			mlog.Log.Infof("Cleaning up partial download (%s)", reason)
-			CleanupPartialDownload(savePath)
-		}
 	}
 
 	for {
@@ -833,7 +853,7 @@ func readTar(
 			return err
 		}
 
-		if handled, tarBytesRead, captureErr := statusCache.capture(header, tarReader); handled {
+		if handled, tarBytesRead, captureErr := statusCache.capture(ctx, header, tarReader); handled {
 			if captureErr != nil {
 				cleanupPartial("status cache error")
 				return captureErr
@@ -881,8 +901,19 @@ func readTar(
 			return workerErr
 		}
 	}
+	if finisher, ok := closer.(interface{ Finish() error }); ok {
+		if err := finisher.Finish(); err != nil {
+			cleanupPartial("finish error")
+			return err
+		}
+	}
+	if err := closer.Close(); err != nil {
+		cleanupPartial("close error")
+		return fmt.Errorf("close snapshot stream: %w", err)
+	}
+	closer = nil
 
-	if err := statusCache.commit(); err != nil {
+	if err := statusCache.commit(ctx, options.statusCacheRoot); err != nil {
 		cleanupPartial("status cache commit error")
 		return err
 	}
@@ -1178,6 +1209,12 @@ func ingestSSTFiles(indexDir, logsDir string) (*pebble.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pebble.Open(%s): %w", indexDir, err)
 	}
+	success := false
+	defer func() {
+		if !success {
+			_ = db.Close()
+		}
+	}()
 
 	glob := filepath.Join(logsDir, "*.sst")
 	sstFiles, err := filepath.Glob(glob)
@@ -1192,5 +1229,6 @@ func ingestSSTFiles(indexDir, logsDir string) (*pebble.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ingesting SSTs: %w", err)
 	}
+	success = true
 	return db, nil
 }

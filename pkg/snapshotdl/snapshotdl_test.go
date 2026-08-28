@@ -1,10 +1,211 @@
 package snapshotdl
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	snaprpc "github.com/Overclock-Validator/solana-snapshot-finder-go/pkg/rpc"
 )
+
+func TestGetReferenceSlotContextSelectsHighestSlot(t *testing.T) {
+	server := func(slot int) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			if request.Method != http.MethodPost {
+				response.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(response, `{"jsonrpc":"2.0","id":1,"result":%d}`, slot)
+		}))
+	}
+	behind := server(41)
+	defer behind.Close()
+	ahead := server(43)
+	defer ahead.Close()
+
+	slot, err := GetReferenceSlotContext(context.Background(), SnapshotConfig{RPCAddresses: []string{behind.URL, ahead.URL}})
+	if err != nil {
+		t.Fatalf("GetReferenceSlotContext: %v", err)
+	}
+	if slot != 43 {
+		t.Fatalf("slot = %d, want 43", slot)
+	}
+}
+
+func TestGetReferenceSlotContextCancelsInFlightRequest(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(started)
+		select {
+		case <-request.Context().Done():
+		case <-release:
+		}
+	}))
+	defer func() {
+		close(release)
+		server.Close()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := GetReferenceSlotContext(ctx, SnapshotConfig{RPCAddresses: []string{server.URL}})
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("getSlot did not stop after cancellation")
+	}
+}
+
+func TestFullSnapshotDiscoveryHonorsCancellation(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(context.Context, SnapshotConfig) error
+	}{
+		{
+			name: "URL",
+			run: func(ctx context.Context, cfg SnapshotConfig) error {
+				_, _, _, err := GetSnapshotURL(ctx, cfg)
+				return err
+			},
+		},
+		{
+			name: "URL with info",
+			run: func(ctx context.Context, cfg SnapshotConfig) error {
+				_, err := GetSnapshotURLWithInfo(ctx, cfg)
+				return err
+			},
+		},
+		{
+			name: "download",
+			run: func(ctx context.Context, cfg SnapshotConfig) error {
+				_, _, _, err := DownloadSnapshotWithConfig(ctx, "", cfg)
+				return err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			started := make(chan struct{})
+			release := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+				close(started)
+				select {
+				case <-request.Context().Done():
+				case <-release:
+				}
+			}))
+			defer func() {
+				close(release)
+				server.Close()
+			}()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() {
+				done <- test.run(ctx, SnapshotConfig{RPCAddresses: []string{server.URL}})
+			}()
+			<-started
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("error = %v, want context.Canceled", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("full snapshot discovery did not stop after cancellation")
+			}
+		})
+	}
+}
+
+func TestGetIncrementalSnapshotURLContextCancelsSameSourceProbe(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(started)
+		select {
+		case <-request.Context().Done():
+		case <-release:
+		}
+	}))
+	defer func() {
+		close(release)
+		server.Close()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := GetIncrementalSnapshotURLContext(
+			ctx,
+			server.URL+"/snapshot-10-hash.tar.zst",
+			20,
+			10,
+			DefaultSnapshotConfig(),
+		)
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("incremental same-source probe did not stop after cancellation")
+	}
+}
+
+func TestGetIncrementalSnapshotURLContextCancelsClusterDiscovery(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(started)
+		select {
+		case <-request.Context().Done():
+		case <-release:
+		}
+	}))
+	defer func() {
+		close(release)
+		server.Close()
+	}()
+
+	cfg := DefaultSnapshotConfig()
+	cfg.RPCAddresses = []string{server.URL}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := GetIncrementalSnapshotURLContext(ctx, "/tmp/snapshot-10-hash.tar.zst", 20, 10, cfg)
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cluster discovery did not stop after cancellation")
+	}
+}
 
 func TestSnapshotNodeBlacklistMatchesCommonEndpointForms(t *testing.T) {
 	blacklist := newSnapshotNodeBlacklist([]string{

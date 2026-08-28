@@ -39,7 +39,7 @@ func validateIncrementalSnapshotPreflight(
 	fullManifest *SnapshotManifest,
 	snapCfg snapshotdl.SnapshotConfig,
 ) error {
-	if fresh, err := snapshotdl.GetReferenceSlot(snapCfg); err == nil && fresh > referenceSlot {
+	if fresh, err := snapshotdl.GetReferenceSlotContext(ctx, snapCfg); err == nil && fresh > referenceSlot {
 		referenceSlot = fresh
 	} else if err != nil && (referenceSlot <= 0 || uint64(referenceSlot) <= fullSnapshotSlot) {
 		return fmt.Errorf("refresh incremental freshness reference: %w", err)
@@ -47,8 +47,8 @@ func validateIncrementalSnapshotPreflight(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	source, locatedBase, locatedEnd, err := snapshotdl.GetIncrementalSnapshotURL(
-		fullSnapshotFile, referenceSlot, int(fullSnapshotSlot), snapCfg,
+	source, locatedBase, locatedEnd, err := snapshotdl.GetIncrementalSnapshotURLContext(
+		ctx, fullSnapshotFile, referenceSlot, int(fullSnapshotSlot), snapCfg,
 	)
 	if err != nil {
 		return err
@@ -154,7 +154,11 @@ func BuildAccountsDbAuto(
 		return nil, nil, err
 	}
 	defer cleanupIndexWorkDir()
-	sl := NewShardLogger(numShards, logsDir)
+	sl, err := NewShardLoggerWithError(numShards, logsDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create shard logger: %w", err)
+	}
+	defer sl.Abort()
 
 	// Create stake pubkey collector for building stake index during appendvec processing
 	stakeCollector := &stakeIndexCollector{
@@ -199,6 +203,7 @@ func BuildAccountsDbAuto(
 		savePath:        fullSavePath,
 		progress:        dp,
 		statusCachePath: retainedStatusCachePath(accountsDbDir),
+		statusCacheRoot: &manifest.Bank.Slot,
 	})
 	// A successful archive read is not a successful build until all three
 	// worker stages have drained without error.
@@ -230,7 +235,7 @@ func BuildAccountsDbAuto(
 	// callers' initial reference may even be the full slot itself — against
 	// which any incremental looks fresh and the staleness gate never fires
 	// (the bug that bootstrapped 81k slots behind on the Alpenglow cluster).
-	if fresh, rerr := snapshotdl.GetReferenceSlot(snapCfg); rerr == nil && fresh > referenceSlot {
+	if fresh, rerr := snapshotdl.GetReferenceSlotContext(ctx, snapCfg); rerr == nil && fresh > referenceSlot {
 		if referenceSlot > 0 && fresh > referenceSlot+1000 {
 			mlog.Log.Infof("refreshed incremental freshness reference: %d -> %d (tip advanced during full snapshot build)", referenceSlot, fresh)
 		}
@@ -242,7 +247,7 @@ func BuildAccountsDbAuto(
 	// Get incremental snapshot URL (tries same source first, then searches if needed)
 	mlog.Log.Infof("finding incremental snapshot matching full slot %d...", fullSnapshotSlot)
 	incrSnapshotDlStart := time.Now()
-	incrementalSnapshotPath, _, incrSlot, err := snapshotdl.GetIncrementalSnapshotURL(fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
+	incrementalSnapshotPath, _, incrSlot, err := snapshotdl.GetIncrementalSnapshotURLContext(ctx, fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
 	if err != nil {
 		// Return error instead of fatal exit so caller can handle gracefully
 		errMsg := fmt.Sprintf("failed to find incremental snapshot: %v", err)
@@ -270,7 +275,7 @@ func BuildAccountsDbAuto(
 		if incrAttempt > 0 {
 			// Re-discover incremental snapshot URL (sources may have changed)
 			mlog.Log.Infof("Incremental download failed, re-discovering sources (attempt %d/%d)...", incrAttempt+1, maxIncrRetries)
-			incrementalSnapshotPath, _, incrSlot, err = snapshotdl.GetIncrementalSnapshotURL(fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
+			incrementalSnapshotPath, _, incrSlot, err = snapshotdl.GetIncrementalSnapshotURLContext(ctx, fullSnapshotFile, referenceSlot, fullSnapshotSlot, snapCfg)
 			if err != nil {
 				mlog.Log.Errorf("Failed to re-discover incremental snapshot: %v", err)
 				continue
@@ -359,6 +364,7 @@ func BuildAccountsDbAuto(
 			savePath:        incrSavePath,
 			isIncremental:   true,
 			statusCachePath: retainedStatusCachePath(accountsDbDir),
+			statusCacheRoot: &incrementalManifestCopy.Bank.Slot,
 		})
 		workerErr = waitForSnapshotWorkers(wg, pools)
 		if workerErr != nil {
@@ -384,15 +390,19 @@ func BuildAccountsDbAuto(
 	// Show indexing progress for shard flush
 	indexProgress := progress.NewIndexingProgress("Flush (shard logs)")
 	indexProgress.Start(numShards)
-	sl.CloseWithProgress(ctx, func(completed, total int) {
+	if err := sl.CloseWithProgress(ctx, func(completed, total int) {
 		indexProgress.Update(completed, total)
-	})
+	}); err != nil {
+		return nil, nil, fmt.Errorf("closing shard logger: %w", err)
+	}
 	indexDir := filepath.Join(accountsDbDir, "mithril_db")
 	index, err := ingestSSTFiles(indexDir, logsDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("initializing pebble from SST files: %w", err)
 	}
-	index.Close()
+	if err := index.Close(); err != nil {
+		return nil, nil, fmt.Errorf("close snapshot account index: %w", err)
+	}
 
 	accountsDb, err := finalizeSnapshotBootstrap(
 		ctx, accountsDbDir, largestFileId.Load(), selected, stakeCollector.entries,

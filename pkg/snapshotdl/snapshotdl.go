@@ -2,10 +2,12 @@ package snapshotdl
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	stdlog "log"
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -674,7 +676,7 @@ func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, i
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
 	mlog.Log.Infof("Getting reference slot from RPC(s)...")
-	referenceSlot, preferredRPC, err := rpc.GetReferenceSlotFromMultiple(cfg.RPCAddresses)
+	referenceSlot, preferredRPC, err := getReferenceSlotFromMultipleContext(ctx, cfg.RPCAddresses)
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("error getting reference slot: %w", rpcclient.WrapErrorForDisplay(err))
 	}
@@ -682,9 +684,9 @@ func GetSnapshotURL(ctx context.Context, snapCfg SnapshotConfig) (string, int, i
 
 	// Step 2: Fetch cluster nodes
 	mlog.Log.Infof("Discovering RPC nodes from cluster...")
-	nodes := rpc.FetchClusterNodes(cfg, preferredRPC)
-	if len(nodes) == 0 {
-		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
+	nodes, err := fetchClusterNodesContext(ctx, cfg.RPCAddresses, preferredRPC)
+	if err != nil {
+		return "", 0, 0, err
 	}
 	nodes, configuredAdded := addConfiguredSnapshotRPCNodes(nodes, preferredRPC, cfg.RPCAddresses)
 	if configuredAdded > 0 {
@@ -798,7 +800,7 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 	blacklist := newSnapshotNodeBlacklist(snapCfg.NodeBlacklist)
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
-	referenceSlot, preferredRPC, err := rpc.GetReferenceSlotFromMultiple(cfg.RPCAddresses)
+	referenceSlot, preferredRPC, err := getReferenceSlotFromMultipleContext(ctx, cfg.RPCAddresses)
 	if err != nil {
 		return nil, fmt.Errorf("error getting reference slot: %w", rpcclient.WrapErrorForDisplay(err))
 	}
@@ -807,9 +809,9 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 	}
 
 	// Step 2: Fetch cluster nodes
-	nodes := rpc.FetchClusterNodes(cfg, preferredRPC)
-	if len(nodes) == 0 {
-		return nil, fmt.Errorf("no rpc nodes available from cluster")
+	nodes, err := fetchClusterNodesContext(ctx, cfg.RPCAddresses, preferredRPC)
+	if err != nil {
+		return nil, err
 	}
 	nodes, configuredAdded := addConfiguredSnapshotRPCNodes(nodes, preferredRPC, cfg.RPCAddresses)
 	if configuredAdded > 0 {
@@ -976,12 +978,184 @@ func GetSnapshotURLWithInfo(ctx context.Context, snapCfg SnapshotConfig) (*Snaps
 // snapshot's slot makes any incremental that merely extends past the full
 // look "fresh" (negative age) and defeats the staleness gate entirely.
 func GetReferenceSlot(snapCfg SnapshotConfig) (int, error) {
-	cfg := snapCfg.toInternalConfig("")
-	referenceSlot, _, err := rpc.GetReferenceSlotFromMultiple(cfg.RPCAddresses)
-	if err != nil {
-		return 0, fmt.Errorf("error getting reference slot: %w", err)
+	return GetReferenceSlotContext(context.Background(), snapCfg)
+}
+
+// GetReferenceSlotContext queries every configured RPC and returns the highest
+// slot while allowing startup cancellation to abort an in-flight request.
+func GetReferenceSlotContext(ctx context.Context, snapCfg SnapshotConfig) (int, error) {
+	referenceSlot, _, err := getReferenceSlotFromMultipleContext(ctx, snapCfg.RPCAddresses)
+	return referenceSlot, err
+}
+
+func getReferenceSlotFromMultipleContext(ctx context.Context, rpcAddresses []string) (int, string, error) {
+	if ctx == nil {
+		return 0, "", fmt.Errorf("reference slot context is nil")
 	}
-	return referenceSlot, nil
+	if err := ctx.Err(); err != nil {
+		return 0, "", err
+	}
+	if len(rpcAddresses) == 0 {
+		return 0, "", fmt.Errorf("no RPC addresses provided")
+	}
+
+	client := &http.Client{Timeout: 4 * time.Second}
+	highestSlot := 0
+	preferredRPC := ""
+	found := false
+	var lastErr error
+	for _, endpoint := range rpcAddresses {
+		if err := ctx.Err(); err != nil {
+			return 0, "", err
+		}
+		slot, err := getReferenceSlotContext(ctx, client, endpoint)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if !found || slot > highestSlot {
+			highestSlot = slot
+			preferredRPC = endpoint
+			found = true
+		}
+	}
+	if !found {
+		if err := ctx.Err(); err != nil {
+			return 0, "", err
+		}
+		return 0, "", fmt.Errorf("all RPC endpoints failed: %w", rpcclient.WrapErrorForDisplay(lastErr))
+	}
+	return highestSlot, preferredRPC, nil
+}
+
+func getReferenceSlotContext(ctx context.Context, client *http.Client, endpoint string) (int, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint,
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}`))
+	if err != nil {
+		return 0, fmt.Errorf("create getSlot request: invalid RPC endpoint")
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, ctxErr
+		}
+		return 0, fmt.Errorf("send getSlot request: %w", rpcclient.WrapErrorForDisplay(err))
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("getSlot returned HTTP %d", response.StatusCode)
+	}
+	var payload struct {
+		Result int `json:"result"`
+		Error  *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 1<<20))
+	if err := decoder.Decode(&payload); err != nil {
+		return 0, fmt.Errorf("decode getSlot response: %w", err)
+	}
+	if payload.Error != nil {
+		return 0, fmt.Errorf("getSlot RPC error %d", payload.Error.Code)
+	}
+	return payload.Result, nil
+}
+
+func fetchClusterNodesContext(ctx context.Context, rpcAddresses []string, preferredRPC string) ([]rpc.RPCNode, error) {
+	ordered := make([]string, 0, len(rpcAddresses))
+	seen := make(map[string]struct{}, len(rpcAddresses))
+	add := func(endpoint string) {
+		endpoint = strings.TrimSpace(endpoint)
+		if endpoint == "" {
+			return
+		}
+		if _, duplicate := seen[endpoint]; duplicate {
+			return
+		}
+		seen[endpoint] = struct{}{}
+		ordered = append(ordered, endpoint)
+	}
+	add(preferredRPC)
+	for _, endpoint := range rpcAddresses {
+		add(endpoint)
+	}
+	if len(ordered) == 0 {
+		return nil, fmt.Errorf("no RPC addresses provided")
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	var lastErr error
+	for _, endpoint := range ordered {
+		for attempt := 0; attempt < 5; attempt++ {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			nodes, err := getClusterNodesContext(ctx, client, endpoint)
+			if err == nil && len(nodes) > 0 {
+				return nodes, nil
+			}
+			lastErr = err
+			if attempt == 4 {
+				break
+			}
+			timer := time.NewTimer(2 * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return nil, fmt.Errorf("cluster-node discovery failed: %w", rpcclient.WrapErrorForDisplay(lastErr))
+}
+
+func getClusterNodesContext(ctx context.Context, client *http.Client, endpoint string) ([]rpc.RPCNode, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint,
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"getClusterNodes","params":[]}`))
+	if err != nil {
+		return nil, fmt.Errorf("create getClusterNodes request: invalid RPC endpoint")
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("send getClusterNodes request: %w", rpcclient.WrapErrorForDisplay(err))
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("getClusterNodes returned HTTP %d", response.StatusCode)
+	}
+	var payload struct {
+		Result []struct {
+			RPC     string `json:"rpc"`
+			Version string `json:"version"`
+		} `json:"result"`
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 16<<20))
+	if err := decoder.Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode getClusterNodes response: %w", err)
+	}
+	if payload.Error != nil {
+		return nil, fmt.Errorf("getClusterNodes RPC error %d", payload.Error.Code)
+	}
+	nodes := make([]rpc.RPCNode, 0, len(payload.Result))
+	for _, result := range payload.Result {
+		if strings.TrimSpace(result.RPC) == "" {
+			continue
+		}
+		nodes = append(nodes, rpc.RPCNode{Address: result.RPC, Version: result.Version})
+	}
+	if len(nodes) == 0 {
+		return nil, fmt.Errorf("getClusterNodes returned no RPC nodes")
+	}
+	return nodes, nil
 }
 
 // DownloadSnapshotWithConfig is like DownloadSnapshot but accepts custom config
@@ -992,7 +1166,7 @@ func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg Snapsh
 
 	// Step 1: Get reference slot from multiple RPCs for reliability
 	mlog.Log.Infof("Getting reference slot from RPC(s)...")
-	referenceSlot, preferredRPC, err := rpc.GetReferenceSlotFromMultiple(cfg.RPCAddresses)
+	referenceSlot, preferredRPC, err := getReferenceSlotFromMultipleContext(ctx, cfg.RPCAddresses)
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("error getting reference slot: %w", rpcclient.WrapErrorForDisplay(err))
 	}
@@ -1000,9 +1174,9 @@ func DownloadSnapshotWithConfig(ctx context.Context, path string, snapCfg Snapsh
 
 	// Step 2: Fetch cluster nodes
 	mlog.Log.Infof("Discovering RPC nodes from cluster...")
-	nodes := rpc.FetchClusterNodes(cfg, preferredRPC)
-	if len(nodes) == 0 {
-		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
+	nodes, err := fetchClusterNodesContext(ctx, cfg.RPCAddresses, preferredRPC)
+	if err != nil {
+		return "", 0, 0, err
 	}
 	nodes, configuredAdded := addConfiguredSnapshotRPCNodes(nodes, preferredRPC, cfg.RPCAddresses)
 	if configuredAdded > 0 {
@@ -1136,9 +1310,9 @@ func DownloadIncrementalSnapshotWithConfig(path string, referenceSlot int, fullS
 	if len(cfg.RPCAddresses) > 0 {
 		preferredRPC = cfg.RPCAddresses[0]
 	}
-	nodes := rpc.FetchClusterNodes(cfg, preferredRPC)
-	if len(nodes) == 0 {
-		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
+	nodes, err := fetchClusterNodesContext(ctx, cfg.RPCAddresses, preferredRPC)
+	if err != nil {
+		return "", 0, 0, err
 	}
 	nodes, configuredAdded := addConfiguredSnapshotRPCNodes(nodes, preferredRPC, cfg.RPCAddresses)
 	if configuredAdded > 0 {
@@ -1358,10 +1532,23 @@ func restrictToFreshestIncrementals(results []rpc.NodeResult, band int64) []rpc.
 //     b. Speed (faster downloads preferred when end slots are equal)
 //  4. Try multiple candidates for resilience (uses MaxSnapshotURLAttempts)
 func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSnapshotSlot int, snapCfg SnapshotConfig) (string, int, int, error) {
+	return GetIncrementalSnapshotURLContext(context.Background(), fullSnapshotURL, referenceSlot, fullSnapshotSlot, snapCfg)
+}
+
+// GetIncrementalSnapshotURLContext is GetIncrementalSnapshotURL with caller
+// cancellation propagated into snapshot URL probes. The external evaluation
+// and ranking calls do not accept a context, so cancellation is checked around
+// those bounded calls.
+func GetIncrementalSnapshotURLContext(ctx context.Context, fullSnapshotURL string, referenceSlot int, fullSnapshotSlot int, snapCfg SnapshotConfig) (string, int, int, error) {
+	if ctx == nil {
+		return "", 0, 0, fmt.Errorf("incremental snapshot context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", 0, 0, err
+	}
 	defer suppressStdlogOutput()()
 	cfg := snapCfg.toInternalConfig("")
 	blacklist := newSnapshotNodeBlacklist(snapCfg.NodeBlacklist)
-	ctx := context.Background()
 
 	// Extract the source node RPC from the full snapshot URL
 	// Example: "http://node.example.com:8899/snapshot-123-abc.tar.zst" -> "http://node.example.com:8899"
@@ -1381,6 +1568,9 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 		mlog.Log.FileOnlyf("Checking same source for incremental (base slot %d): %s",
 			fullSnapshotSlot, rpcclient.SanitizeEndpointForDisplay(sourceNodeRPC))
 		urlInfo, err := snapshot.GetSnapshotURL(ctx, sourceNodeRPC, "incremental")
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", 0, 0, ctxErr
+		}
 
 		if err == nil && urlInfo != nil && urlInfo.BaseSlot == fullSnapshotSlot {
 			// The shortcut only applies when the same-source incremental is
@@ -1410,7 +1600,16 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 	if len(cfg.RPCAddresses) > 0 {
 		preferredRPC = cfg.RPCAddresses[0]
 	}
-	nodes := rpc.FetchClusterNodes(cfg, preferredRPC)
+	if err := ctx.Err(); err != nil {
+		return "", 0, 0, err
+	}
+	nodes, fetchErr := fetchClusterNodesContext(ctx, cfg.RPCAddresses, preferredRPC)
+	if fetchErr != nil {
+		return "", 0, 0, fetchErr
+	}
+	if err := ctx.Err(); err != nil {
+		return "", 0, 0, err
+	}
 	if len(nodes) == 0 {
 		return "", 0, 0, fmt.Errorf("no rpc nodes available from cluster")
 	}
@@ -1426,7 +1625,13 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 	}
 
 	// Evaluate nodes
+	if err := ctx.Err(); err != nil {
+		return "", 0, 0, err
+	}
 	results, stats := rpc.EvaluateNodesWithVersionsAndStats(nodes, cfg, referenceSlot)
+	if err := ctx.Err(); err != nil {
+		return "", 0, 0, err
+	}
 	results, skipped = filterSnapshotNodeResults(results, blacklist)
 	logSnapshotBlacklist("evaluated", skipped, len(results))
 
@@ -1466,8 +1671,14 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 	var matchingNodes []rpc.RankedNode
 
 	// Pass 1: Apply normal incremental threshold
+	if err := ctx.Err(); err != nil {
+		return "", 0, 0, err
+	}
 	_, rankedNodes := rpc.SortBestRPCsFilteredBySlot(
 		baseMatchingResults, cfg, stats, int64(fullSnapshotSlot), referenceSlot)
+	if err := ctx.Err(); err != nil {
+		return "", 0, 0, err
+	}
 	for _, node := range rankedNodes {
 		matchingNodes = append(matchingNodes, node)
 	}
@@ -1482,8 +1693,14 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 		relaxedCfg := cfg
 		relaxedCfg.IncrementalThreshold = relaxedThreshold
 
+		if err := ctx.Err(); err != nil {
+			return "", 0, 0, err
+		}
 		_, rankedNodesRelaxed := rpc.SortBestRPCsFilteredBySlot(
 			baseMatchingResults, relaxedCfg, nil, int64(fullSnapshotSlot), referenceSlot)
+		if err := ctx.Err(); err != nil {
+			return "", 0, 0, err
+		}
 		for _, node := range rankedNodesRelaxed {
 			matchingNodes = append(matchingNodes, node)
 		}
@@ -1559,6 +1776,9 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 	var urlErr error
 
 	for i := 0; i < min(maxAttempts, len(matchingNodes)); i++ {
+		if err := ctx.Err(); err != nil {
+			return "", 0, 0, err
+		}
 		node := matchingNodes[i]
 
 		if i > 0 {
@@ -1572,6 +1792,9 @@ func GetIncrementalSnapshotURL(fullSnapshotURL string, referenceSlot int, fullSn
 		}
 
 		urlInfo, err := snapshot.GetSnapshotURL(ctx, node.Result.RPC, "incremental")
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", 0, 0, ctxErr
+		}
 		if err == nil && urlInfo != nil {
 			// Verify base slot still matches (could have changed since evaluation)
 			if urlInfo.BaseSlot == fullSnapshotSlot {

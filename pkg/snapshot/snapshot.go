@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -326,35 +327,34 @@ var (
 	ZstdDecoderConcurrency = runtime.NumCPU()
 )
 
-func readerForCompressionType(snapshotType int, bmr *bufmonreader) (r io.Reader, err error) {
+func readerForCompressionType(snapshotType int, bmr *bufmonreader) (io.Reader, io.Closer, error) {
 	if snapshotType == snapshotTypeZst {
 		zstdReader, err := zstd.NewReader(bmr, zstd.WithDecoderConcurrency(ZstdDecoderConcurrency))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		r = zstdReader
-	} else if snapshotType == snapshotTypeLz4 {
-		r = lz4.NewReader(bmr)
-	} else {
-		panic("unknown snapshot type")
+		readCloser := zstdReader.IOReadCloser()
+		return readCloser, readCloser, nil
 	}
-
-	return r, nil
+	if snapshotType == snapshotTypeLz4 {
+		return lz4.NewReader(bmr), nil, nil
+	}
+	return nil, nil, fmt.Errorf("unknown snapshot type %d", snapshotType)
 }
 
-func parseSnapshotType(snapshotFileName string) int {
-	var snapshotType int
-	fileExt := filepath.Ext(snapshotFileName)
+func parseSnapshotType(snapshotFileName string) (int, error) {
+	name, err := snapshotArchiveFilename(snapshotFileName)
+	if err != nil {
+		return 0, err
+	}
+	fileExt := filepath.Ext(name)
 
 	if fileExt == ".zst" {
-		snapshotType = snapshotTypeZst
+		return snapshotTypeZst, nil
 	} else if fileExt == ".lz4" {
-		snapshotType = snapshotTypeLz4
-	} else {
-		panic(fmt.Sprintf("unknown snapshot compression type - file ext: %s", fileExt))
+		return snapshotTypeLz4, nil
 	}
-
-	return snapshotType
+	return 0, fmt.Errorf("unknown snapshot compression type %q", fileExt)
 }
 
 func newSnapshotReader(ctx context.Context, filename string) (*tar.Reader, io.Closer, error) {
@@ -377,9 +377,11 @@ func newSnapshotReaderWithSave(ctx context.Context, filename string, savePath st
 // newSnapshotReaderWithProgress creates a tar reader and also returns the bufmonreader
 // for progress tracking. Use bufmonreader.SetProgressCallback() to receive progress updates.
 func newSnapshotReaderWithProgress(ctx context.Context, filename string, savePath string) (*tar.Reader, *bufmonreader, io.Closer, error) {
-	snapshotType := parseSnapshotType(filename)
+	snapshotType, err := parseSnapshotType(filename)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	var bmr *bufmonreader
-	var err error
 	if strings.HasPrefix(filename, "https://") || strings.HasPrefix(filename, "http://") {
 		bmr, err = NewBufMonReaderHTTPWithSave(ctx, filename, savePath)
 	} else {
@@ -392,12 +394,57 @@ func newSnapshotReaderWithProgress(ctx context.Context, filename string, savePat
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	reader, err := readerForCompressionType(snapshotType, bmr)
+	reader, compressionCloser, err := readerForCompressionType(snapshotType, bmr)
 	if err != nil {
+		_ = bmr.Close()
 		return nil, nil, nil, fmt.Errorf("opening compression reader: %v", err)
 	}
 
-	return tar.NewReader(reader), bmr, bmr, nil
+	closer := &snapshotStreamCloser{
+		reader:            reader,
+		compressionCloser: compressionCloser,
+		monitor:           bmr,
+	}
+	return tar.NewReader(reader), bmr, closer, nil
+}
+
+type snapshotStreamCloser struct {
+	reader            io.Reader
+	compressionCloser io.Closer
+	monitor           *bufmonreader
+	finished          bool
+	closed            bool
+}
+
+func (s *snapshotStreamCloser) Finish() error {
+	if s == nil || s.finished {
+		return nil
+	}
+	if _, err := io.Copy(io.Discard, s.reader); err != nil {
+		return fmt.Errorf("finish snapshot stream: %w", err)
+	}
+	if s.monitor != nil {
+		if err := s.monitor.validateComplete(); err != nil {
+			return err
+		}
+	}
+	s.finished = true
+	return nil
+}
+
+func (s *snapshotStreamCloser) Close() error {
+	if s == nil || s.closed {
+		return nil
+	}
+	s.closed = true
+	var errs []error
+	if s.compressionCloser != nil {
+		errs = append(errs, s.compressionCloser.Close())
+	}
+	if s.monitor != nil {
+		errs = append(errs, s.monitor.Close())
+	}
+	return errors.Join(errs...)
 }
 
 func LoadManifestFromFile(filename string) (*SnapshotManifest, error) {
