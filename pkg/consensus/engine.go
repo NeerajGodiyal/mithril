@@ -184,6 +184,7 @@ type Config struct {
 	AlpenglowBLSDST           string             // BLS hash-to-curve DST; empty keeps the default (must match cluster's solana-bls version)
 	AlpenglowShredVersion     uint16             // included in each Alpenglow BLS vote-signing payload
 	AlpenglowIdentity         ed25519.PrivateKey // validator identity for staked Votor QUIC; empty is passive observer mode
+	AlpenglowAllowPrivateAddr bool               // permit local/private Votor peers instead of Agave's global address space
 }
 
 // NewEngine constructs the Alpenglow observer engine — the only consensus
@@ -201,6 +202,7 @@ func NewEngine(cfg Config) (*AlpenglowObserverEngine, error) {
 		receiverMaxMessageBytes: cfg.AlpenglowMaxMessageBytes,
 		shredVersion:            cfg.AlpenglowShredVersion,
 		identity:                append(ed25519.PrivateKey(nil), cfg.AlpenglowIdentity...),
+		allowPrivateAddr:        cfg.AlpenglowAllowPrivateAddr,
 		recentBlockIDs:          make(map[uint64]solana.Hash),
 		invalidBlockIDs:         make(map[alpenglow.BlockID]struct{}),
 		observedReplayBlocks:    make(map[uint64]alpenglow.ReplayBlockObservation),
@@ -228,6 +230,7 @@ type AlpenglowObserverEngine struct {
 	receiverMaxMessageBytes int64
 	shredVersion            uint16
 	identity                ed25519.PrivateKey
+	allowPrivateAddr        bool
 	receiver                *alpenglow.Receiver
 	voterMu                 sync.RWMutex
 	voter                   *alpenglowVoter
@@ -318,12 +321,13 @@ func (e *AlpenglowObserverEngine) Start(ctx context.Context) error {
 	}
 
 	receiver, err := alpenglow.NewReceiver(alpenglow.ReceiverConfig{
-		BindAddr:        e.receiverBindAddr,
-		MaxMessageBytes: e.receiverMaxMessageBytes,
-		ShredVersion:    e.shredVersion,
-		Identity:        e.identity,
-		AdmitPeer:       e.admitVotorPeer,
-		AdmitMessage:    e.admitAuthenticatedVotorMessage,
+		BindAddr:           e.receiverBindAddr,
+		MaxMessageBytes:    e.receiverMaxMessageBytes,
+		ShredVersion:       e.shredVersion,
+		Identity:           e.identity,
+		GlobalAddressSpace: !e.allowPrivateAddr,
+		AdmitPeer:          e.admitVotorPeer,
+		AdmitMessage:       e.admitAuthenticatedVotorMessage,
 	}, observer)
 	if err != nil {
 		return err

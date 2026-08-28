@@ -208,6 +208,7 @@ rewind_horizon_batches = 64 # Fold batches of undo pointers kept actionable (~55
 # ── Network ──────────────────────────────────────────────────────────────
 [network]
 cluster = "alpenglow"     # Also supports mainnet-beta/testnet/devnet in verifying-only RPC mode
+allow_private_addr = false # Set true only for local/private Alpenglow clusters
 rpc = ["https://rpc.ag.validator1.net"]  # First = primary, rest = fallbacks. Validator mode uses it for control-plane data (tip/stakes/snapshots), never blocks; verifying mode may use block RPC.
 
 # ── Block source ─────────────────────────────────────────────────────────

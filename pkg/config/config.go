@@ -12,6 +12,7 @@ const LightbringerQuietDefault = true
 
 func ApplyDefaults(v *viper.Viper) {
 	v.SetDefault("lightbringer.quiet", LightbringerQuietDefault)
+	v.SetDefault("network.allow_private_addr", false)
 	// network.cluster and block.source default in the run command itself
 	// (Alpenglow/turbine, classic/RPC) — NOT here, because the lightbringer
 	// auto-switch needs to distinguish "operator chose a source" from "defaulted".

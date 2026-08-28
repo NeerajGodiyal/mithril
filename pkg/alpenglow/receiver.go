@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -27,6 +28,8 @@ const (
 	DefaultReceiverDatagramsPerSec = 50
 )
 
+var errInvalidVotorRemoteAddress = errors.New("invalid Alpenglow Votor remote address")
+
 type ReceiverConfig struct {
 	BindAddr        string
 	MaxMessageBytes int64
@@ -41,6 +44,9 @@ type ReceiverConfig struct {
 	MaxConnsPerIP         int
 	MaxConnsPerPeer       int
 	MaxDatagramsPerSecond int
+	// GlobalAddressSpace rejects private and loopback peers before QUIC starts
+	// the TLS handshake. False permits local/private cluster observers.
+	GlobalAddressSpace bool
 	// AdmitPeer is called with the Ed25519 identity authenticated by TLS before
 	// the connection is allowed to deliver datagrams. A nil callback admits any
 	// correctly encoded single-certificate Ed25519 identity.
@@ -85,9 +91,10 @@ type ReceiverStats struct {
 }
 
 type Receiver struct {
-	cfg      ReceiverConfig
-	observer *Observer
-	listener *quic.Listener
+	cfg       ReceiverConfig
+	observer  *Observer
+	listener  *quic.Listener
+	transport *quic.Transport
 
 	mu          sync.Mutex
 	closed      bool
@@ -113,13 +120,37 @@ func NewReceiver(cfg ReceiverConfig, observer *Observer) (*Receiver, error) {
 		return nil, fmt.Errorf("create Alpenglow Votor QUIC certificate: %w", err)
 	}
 
-	listener, err := quic.ListenAddr(cfg.BindAddr, &tls.Config{
+	udpAddr, err := net.ResolveUDPAddr("udp4", cfg.BindAddr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Alpenglow Votor QUIC address %s: %w", cfg.BindAddr, err)
+	}
+	packetConn, err := net.ListenUDP("udp4", udpAddr)
+	if err != nil {
+		return nil, fmt.Errorf("listen for Alpenglow Votor QUIC on %s: %w", cfg.BindAddr, err)
+	}
+	localIPs, err := receiverLocalIPv4s(packetConn.LocalAddr(), cfg.GlobalAddressSpace)
+	if err != nil {
+		_ = packetConn.Close()
+		return nil, fmt.Errorf("resolve local Alpenglow Votor addresses: %w", err)
+	}
+	transport := &quic.Transport{
+		Conn: packetConn,
+		ConnContext: func(ctx context.Context, client *quic.ClientInfo) (context.Context, error) {
+			if !receiverRemoteAddressAllowed(client.RemoteAddr, localIPs, cfg.GlobalAddressSpace) {
+				return nil, errInvalidVotorRemoteAddress
+			}
+			return ctx, nil
+		},
+	}
+	listener, err := transport.Listen(&tls.Config{
 		Certificates: []tls.Certificate{cert},
 		ClientAuth:   tls.RequireAnyClientCert,
 		NextProtos:   []string{VotorQUICALPN},
 		MinVersion:   tls.VersionTLS13,
 	}, newVotorQUICConfig())
 	if err != nil {
+		_ = transport.Close()
+		_ = packetConn.Close()
 		return nil, fmt.Errorf("listen for Alpenglow Votor QUIC on %s: %w", cfg.BindAddr, err)
 	}
 
@@ -127,6 +158,7 @@ func NewReceiver(cfg ReceiverConfig, observer *Observer) (*Receiver, error) {
 		cfg:         cfg,
 		observer:    observer,
 		listener:    listener,
+		transport:   transport,
 		conns:       make(map[*quic.Conn]receiverConnection),
 		connsByIP:   make(map[string]int),
 		connsByPeer: make(map[solana.PublicKey]int),
@@ -198,17 +230,24 @@ func (r *Receiver) Close() error {
 	}
 	r.mu.Unlock()
 
-	var err error
+	var closeErrors []error
 	if listener != nil {
-		err = listener.Close()
+		if err := listener.Close(); err != nil && !errors.Is(err, quic.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+			closeErrors = append(closeErrors, err)
+		}
 	}
 	for _, conn := range conns {
 		_ = conn.CloseWithError(0, "alpenglow receiver closed")
 	}
-	if errors.Is(err, quic.ErrServerClosed) {
-		return nil
+	if r.transport != nil {
+		if err := r.transport.Close(); err != nil && !errors.Is(err, quic.ErrTransportClosed) && !errors.Is(err, net.ErrClosed) {
+			closeErrors = append(closeErrors, err)
+		}
+		if err := r.transport.Conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			closeErrors = append(closeErrors, err)
+		}
 	}
-	return err
+	return errors.Join(closeErrors...)
 }
 
 func (r *Receiver) Stats() ReceiverStats {
@@ -429,15 +468,69 @@ func (r *Receiver) removeConn(conn *quic.Conn) {
 }
 
 func receiverRemoteIPv4(addr net.Addr) (string, bool) {
+	ip, ok := receiverIPv4(addr)
+	if !ok || ip.IsUnspecified() || ip.IsMulticast() {
+		return "", false
+	}
+	return ip.String(), true
+}
+
+func receiverRemoteAddressAllowed(addr net.Addr, localIPs map[netip.Addr]struct{}, global bool) bool {
+	ip, ok := receiverIPv4(addr)
+	if !ok || ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	if !global {
+		return true
+	}
+	if ip.IsPrivate() || ip.IsLoopback() {
+		return false
+	}
+	_, local := localIPs[ip]
+	return !local
+}
+
+func receiverIPv4(addr net.Addr) (netip.Addr, bool) {
 	udp, ok := addr.(*net.UDPAddr)
-	if !ok || udp.IP == nil || udp.IP.IsUnspecified() || udp.IP.IsMulticast() {
-		return "", false
+	if !ok || udp.IP == nil {
+		return netip.Addr{}, false
 	}
-	ipv4 := udp.IP.To4()
-	if ipv4 == nil {
-		return "", false
+	ip, ok := netip.AddrFromSlice(udp.IP)
+	if !ok {
+		return netip.Addr{}, false
 	}
-	return ipv4.String(), true
+	ip = ip.Unmap()
+	return ip, ip.Is4()
+}
+
+func receiverLocalIPv4s(bound net.Addr, global bool) (map[netip.Addr]struct{}, error) {
+	local := make(map[netip.Addr]struct{})
+	if !global {
+		return local, nil
+	}
+	ip, ok := receiverIPv4(bound)
+	if !ok {
+		return nil, fmt.Errorf("invalid bound address %v", bound)
+	}
+	if !ip.IsUnspecified() {
+		local[ip] = struct{}{}
+		return local, nil
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	for _, addr := range addrs {
+		prefix, err := netip.ParsePrefix(addr.String())
+		if err != nil {
+			continue
+		}
+		ip := prefix.Addr().Unmap()
+		if ip.Is4() {
+			local[ip] = struct{}{}
+		}
+	}
+	return local, nil
 }
 
 func (r *Receiver) isClosed() bool {

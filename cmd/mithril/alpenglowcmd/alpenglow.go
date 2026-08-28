@@ -27,6 +27,7 @@ var (
 	probeShredVersion      uint16
 	probeAlpenglowBind     string
 	probeMaxMessageBytes   int64
+	probeAllowPrivateAddr  bool
 	probeIdentityKeypair   string
 	probeVoteKeypair       string
 	probeWithdrawerKeypair string
@@ -57,6 +58,7 @@ func init() {
 	probeCmd.Flags().Uint16Var(&probeShredVersion, "shred-version", 0, "Shred version override (0 = discover from entrypoint)")
 	probeCmd.Flags().StringVar(&probeAlpenglowBind, "alpenglow-bind-addr", "", "QUIC address for passive Alpenglow Votor messages (default: config consensus.alpenglow_observer_bind_addr or 0.0.0.0:8002)")
 	probeCmd.Flags().Int64Var(&probeMaxMessageBytes, "alpenglow-max-message-bytes", 0, "Maximum Votor QUIC datagram payload size (0 = default)")
+	probeCmd.Flags().BoolVar(&probeAllowPrivateAddr, "allow-private-addr", false, "Allow private addresses for Alpenglow Votor peers")
 	probeCmd.Flags().StringVar(&probeIdentityKeypair, "identity-keypair", "", "Validator identity keypair to advertise in gossip (Solana keygen JSON)")
 	probeCmd.Flags().StringVar(&probeVoteKeypair, "vote-account-keypair", "", "Vote account keypair for diagnostics (Solana keygen JSON; not used for signing)")
 	probeCmd.Flags().StringVar(&probeWithdrawerKeypair, "authorized-withdrawer-keypair", "", "Authorized withdrawer keypair for diagnostics (Solana keygen JSON; not used for signing)")
@@ -108,11 +110,12 @@ func runProbe(cmd *cobra.Command, _ []string) error {
 	observer := alpenglow.NewObserver()
 	var turbineReceiver *turbine.UDPReceiver
 	votorReceiver, err := alpenglow.NewReceiver(alpenglow.ReceiverConfig{
-		BindAddr:        opts.alpenglowBind,
-		MaxMessageBytes: opts.maxMessageBytes,
-		ShredVersion:    opts.shredVersion,
-		Identity:        identity,
-		LogInterval:     0,
+		BindAddr:           opts.alpenglowBind,
+		MaxMessageBytes:    opts.maxMessageBytes,
+		ShredVersion:       opts.shredVersion,
+		Identity:           identity,
+		GlobalAddressSpace: !opts.allowPrivateAddr,
+		LogInterval:        0,
 		OnMessage: func(msg alpenglow.Message) {
 			seedTurbineBlockIDFromVotor(turbineReceiver, msg)
 		},
@@ -266,6 +269,7 @@ type probeOptions struct {
 	shredVersion      uint16
 	alpenglowBind     string
 	maxMessageBytes   int64
+	allowPrivateAddr  bool
 	identityKeypair   string
 	voteKeypair       string
 	withdrawerKeypair string
@@ -297,6 +301,7 @@ func probeOptionsFromConfig(cmd *cobra.Command) probeOptions {
 		shredVersion:      uint16Flag(cmd, "shred-version", "turbine.shred_version"),
 		alpenglowBind:     alpenglowBind,
 		maxMessageBytes:   maxMessageBytes,
+		allowPrivateAddr:  boolFlag(cmd, "allow-private-addr", "network.allow_private_addr"),
 		identityKeypair:   stringFlag(cmd, "identity-keypair", "validator.identity_keypair"),
 		voteKeypair:       stringFlag(cmd, "vote-account-keypair", "validator.vote_account_keypair"),
 		withdrawerKeypair: stringFlag(cmd, "authorized-withdrawer-keypair", "validator.authorized_withdrawer_keypair"),
@@ -363,6 +368,14 @@ func uint16Flag(cmd *cobra.Command, flagName, configKey string) uint16 {
 		return 0
 	}
 	return uint16(value)
+}
+
+func boolFlag(cmd *cobra.Command, flagName, configKey string) bool {
+	if cmd.Flags().Changed(flagName) {
+		value, _ := cmd.Flags().GetBool(flagName)
+		return value
+	}
+	return config.GetBool(configKey)
 }
 
 func advertisedAddrForListener(configured string, actual net.Addr) string {

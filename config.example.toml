@@ -157,6 +157,10 @@ name = "mithril"
     # "devnet" use the established verifying-only RPC replay path.
     cluster = "alpenglow"
 
+    # Match Agave's --allow-private-addr policy for Votor QUIC admission.
+    # Keep false on public networks; set true for local/private clusters.
+    allow_private_addr = false
+
     # RPC endpoints in priority order (first = primary, rest = fallbacks)
     #
     # Example with primary + fallback:

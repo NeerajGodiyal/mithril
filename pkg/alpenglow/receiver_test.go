@@ -5,6 +5,8 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"errors"
+	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -12,6 +14,69 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/require"
 )
+
+func TestReceiverRemoteAddressPolicy(t *testing.T) {
+	localIPs := map[netip.Addr]struct{}{netip.MustParseAddr("1.2.3.4"): {}}
+	tests := []struct {
+		name   string
+		addr   net.Addr
+		global bool
+		want   bool
+	}{
+		{name: "public", addr: &net.UDPAddr{IP: net.ParseIP("8.8.8.8"), Port: 8000}, global: true, want: true},
+		{name: "private global", addr: &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 8000}, global: true},
+		{name: "loopback global", addr: &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 8000}, global: true},
+		{name: "same local global", addr: &net.UDPAddr{IP: net.ParseIP("1.2.3.4"), Port: 8000}, global: true},
+		{name: "private unspecified", addr: &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 8000}, want: true},
+		{name: "same local unspecified", addr: &net.UDPAddr{IP: net.ParseIP("1.2.3.4"), Port: 8000}, want: true},
+		{name: "multicast", addr: &net.UDPAddr{IP: net.ParseIP("224.0.0.1"), Port: 8000}},
+		{name: "ipv6", addr: &net.UDPAddr{IP: net.ParseIP("2001:4860:4860::8888"), Port: 8000}},
+		{name: "non udp", addr: &net.TCPAddr{IP: net.ParseIP("8.8.8.8"), Port: 8000}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.want, receiverRemoteAddressAllowed(test.addr, localIPs, test.global))
+		})
+	}
+}
+
+func TestReceiverRejectsPrivatePeerBeforeHandshakeInGlobalAddressSpace(t *testing.T) {
+	admitPeerCalled := make(chan struct{}, 1)
+	receiver, err := NewReceiver(ReceiverConfig{
+		BindAddr:           "127.0.0.1:0",
+		GlobalAddressSpace: true,
+		LogInterval:        -1,
+		AdmitPeer: func(solana.PublicKey) bool {
+			admitPeerCalled <- struct{}{}
+			return true
+		},
+	}, NewObserver())
+	require.NoError(t, err)
+	runVotorReceiver(t, receiver)
+
+	identity := ed25519.NewKeyFromSeed(bytesOf(11, ed25519.SeedSize))
+	cert, err := newVotorQUICCertificate(identity)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := quic.DialAddr(ctx, receiver.Addr().String(), &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: true,
+		MinVersion:         tls.VersionTLS13,
+		NextProtos:         []string{VotorQUICALPN},
+	}, testVotorQUICConfig())
+	if conn != nil {
+		_ = conn.CloseWithError(0, "test done")
+	}
+	require.ErrorIs(t, err, &quic.TransportError{Remote: true, ErrorCode: quic.ConnectionRefused})
+	select {
+	case <-admitPeerCalled:
+		t.Fatal("private peer reached post-handshake identity admission")
+	default:
+	}
+	require.Zero(t, receiver.Stats().ConnectionsAccepted)
+	require.Zero(t, receiver.Stats().ConnectionsRejected)
+}
 
 func TestReceiverDecodesVotorVoteFromQUICDatagram(t *testing.T) {
 	clientIdentity := ed25519.NewKeyFromSeed(bytesOf(1, ed25519.SeedSize))
