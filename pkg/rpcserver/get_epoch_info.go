@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/filecoin-project/go-jsonrpc"
 )
 
@@ -29,7 +28,7 @@ func (rpcServer *RpcServer) GetEpochInfo(ctx context.Context, p jsonrpc.RawParam
 	if err != nil {
 		return GetEpochInfoResp{}, err
 	}
-	slotCtx := rpcServer.getSlotCtx()
+	slotCtx, lifecycle := rpcServer.getSlotCtxWithLifecycle()
 	if slotCtx == nil || rpcServer.epochSchedule == nil {
 		return GetEpochInfoResp{}, fmt.Errorf("node is not ready to provide epoch information")
 	}
@@ -47,8 +46,11 @@ func (rpcServer *RpcServer) GetEpochInfo(ctx context.Context, p jsonrpc.RawParam
 		Epoch:            epoch,
 		SlotIndex:        slotIndex,
 		SlotsInEpoch:     rpcServer.epochSchedule.SlotsInEpoch(epoch),
-		TransactionCount: global.TransactionCount(),
+		TransactionCount: slotCtx.TransactionCount,
 	}
 
+	if err := rpcServer.validateProcessedBankPublication(slotCtx, lifecycle, "getEpochInfo"); err != nil {
+		return GetEpochInfoResp{}, err
+	}
 	return resp, nil
 }

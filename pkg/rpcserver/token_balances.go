@@ -6,13 +6,12 @@ import (
 	"strings"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
-	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/gagliardetto/solana-go"
 )
 
 // SPL Token program IDs.
 var (
-	splTokenProgramID    = solana.MustPublicKeyFromBase58("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+	splTokenProgramID     = solana.MustPublicKeyFromBase58("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 	splToken2022ProgramID = solana.MustPublicKeyFromBase58("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
 )
 
@@ -20,15 +19,33 @@ var (
 // the legacy program and Token-2022 (Token-2022 stores extension data
 // past byte 165, but the leading account state has the same layout).
 const (
-	tokenAccountSize       = 165
-	tokenAccountMintOffset = 0
-	tokenAccountOwnerOffset = 32
+	tokenAccountSize         = 165
+	tokenAccountMintOffset   = 0
+	tokenAccountOwnerOffset  = 32
 	tokenAccountAmountOffset = 64
+	tokenAccountStateOffset  = 108
 	// Mint account layout: 82 bytes for legacy SPL Token. decimals lives at
 	// offset 44 (mintAuthorityOption 4 + mintAuthority 32 + supply 8 = 44).
-	mintAccountSize     = 82
-	mintDecimalsOffset  = 44
+	mintAccountSize       = 82
+	mintDecimalsOffset    = 44
+	mintInitializedOffset = 45
+	tokenMultisigSize     = 355
+	token2022TypeOffset   = 165
+	token2022MintType     = 1
+	token2022AccountType  = 2
 )
+
+type strictTokenAccount struct {
+	mint      solana.PublicKey
+	owner     solana.PublicKey
+	programID solana.PublicKey
+	amount    uint64
+}
+
+type strictTokenMint struct {
+	programID solana.PublicKey
+	decimals  uint8
+}
 
 // isTokenProgramOwner reports whether an account is owned by either the
 // legacy SPL Token program or Token-2022. Both programs use the same
@@ -37,85 +54,168 @@ func isTokenProgramOwner(owner [32]byte) bool {
 	return owner == [32]byte(splTokenProgramID) || owner == [32]byte(splToken2022ProgramID)
 }
 
-// extractTokenBalances walks the supplied transaction accounts and emits
-// a TokenBalancePayload for each one that is recognized as an SPL Token
-// account. mintDecimals is consulted for the per-mint decimal count;
-// callers populate it from accountsdb. Missing decimals fall back to 0
-// rather than skipping the account so pre/post arrays stay aligned with
-// the transaction's account index.
-func extractTokenBalances(
+func validCOption(data []byte, offset int) bool {
+	if offset < 0 || offset+4 > len(data) {
+		return false
+	}
+	tag := binary.LittleEndian.Uint32(data[offset : offset+4])
+	return tag == 0 || tag == 1
+}
+
+// validToken2022Envelope checks the base/type boundary while leaving TLV
+// extension contents to the Token-2022 program.
+func validToken2022Envelope(data []byte, baseSize int, accountType byte) bool {
+	if len(data) == baseSize {
+		return true
+	}
+	if len(data) == tokenMultisigSize || len(data) <= token2022TypeOffset {
+		return false
+	}
+	for _, b := range data[baseSize:token2022TypeOffset] {
+		if b != 0 {
+			return false
+		}
+	}
+	return data[token2022TypeOffset] == accountType
+}
+
+func parseStrictTokenAccount(acct *accounts.Account) (strictTokenAccount, bool) {
+	if acct == nil || !isTokenProgramOwner(acct.Owner) || len(acct.Data) < tokenAccountSize {
+		return strictTokenAccount{}, false
+	}
+	is2022 := acct.Owner == [32]byte(splToken2022ProgramID)
+	if (!is2022 && len(acct.Data) != tokenAccountSize) ||
+		(is2022 && !validToken2022Envelope(acct.Data, tokenAccountSize, token2022AccountType)) {
+		return strictTokenAccount{}, false
+	}
+	if !validCOption(acct.Data, 72) || !validCOption(acct.Data, 109) || !validCOption(acct.Data, 129) {
+		return strictTokenAccount{}, false
+	}
+	state := acct.Data[tokenAccountStateOffset]
+	if state != 1 && state != 2 {
+		return strictTokenAccount{}, false
+	}
+	programID := splTokenProgramID
+	if is2022 {
+		programID = splToken2022ProgramID
+	}
+	return strictTokenAccount{
+		mint:      publicKeyFromOffset(acct.Data, tokenAccountMintOffset),
+		owner:     publicKeyFromOffset(acct.Data, tokenAccountOwnerOffset),
+		programID: programID,
+		amount:    binary.LittleEndian.Uint64(acct.Data[tokenAccountAmountOffset : tokenAccountAmountOffset+8]),
+	}, true
+}
+
+func parseStrictTokenMint(acct *accounts.Account, programID solana.PublicKey) (uint8, bool) {
+	if acct == nil || acct.Owner != [32]byte(programID) || len(acct.Data) < mintAccountSize {
+		return 0, false
+	}
+	is2022 := programID == splToken2022ProgramID
+	if (!is2022 && len(acct.Data) != mintAccountSize) ||
+		(is2022 && !validToken2022Envelope(acct.Data, mintAccountSize, token2022MintType)) {
+		return 0, false
+	}
+	if !validCOption(acct.Data, 0) || !validCOption(acct.Data, 46) || acct.Data[mintInitializedOffset] != 1 {
+		return 0, false
+	}
+	return acct.Data[mintDecimalsOffset], true
+}
+
+func transactionTokenMetadata(tx *solana.Transaction) (bool, map[int]struct{}) {
+	if tx == nil {
+		return false, nil
+	}
+	hasTokenProgram := false
+	for _, key := range tx.Message.AccountKeys {
+		if key == splTokenProgramID || key == splToken2022ProgramID {
+			hasTokenProgram = true
+			break
+		}
+	}
+	invoked := make(map[int]struct{}, len(tx.Message.Instructions))
+	for _, instruction := range tx.Message.Instructions {
+		invoked[int(instruction.ProgramIDIndex)] = struct{}{}
+	}
+	return hasTokenProgram, invoked
+}
+
+func tokenBalancesForTransaction(
+	tx *solana.Transaction,
 	txAccts []*accounts.Account,
-	mintDecimals map[solana.PublicKey]uint8,
+	read func(solana.PublicKey) (*accounts.Account, error),
 ) []TokenBalancePayload {
+	if txAccts == nil {
+		return nil
+	}
 	if len(txAccts) == 0 {
 		return []TokenBalancePayload{}
 	}
+	hasTokenProgram, invoked := transactionTokenMetadata(tx)
+	if !hasTokenProgram {
+		return []TokenBalancePayload{}
+	}
+
+	mints := make(map[solana.PublicKey]strictTokenMint)
+	snapshot := make(map[solana.PublicKey]*accounts.Account, len(txAccts))
+	for idx, acct := range txAccts {
+		if idx < len(tx.Message.AccountKeys) {
+			snapshot[tx.Message.AccountKeys[idx]] = acct
+		}
+	}
+	for _, acct := range txAccts {
+		parsed, ok := parseStrictTokenAccount(acct)
+		if !ok {
+			continue
+		}
+		if prior, ok := mints[parsed.mint]; ok && prior.programID == parsed.programID {
+			continue
+		}
+		mintAcct, exists := snapshot[parsed.mint]
+		if !exists {
+			if read == nil {
+				continue
+			}
+			var err error
+			mintAcct, err = read(parsed.mint)
+			if err != nil {
+				continue
+			}
+		}
+		decimals, ok := parseStrictTokenMint(mintAcct, parsed.programID)
+		if ok {
+			mints[parsed.mint] = strictTokenMint{programID: parsed.programID, decimals: decimals}
+		}
+	}
+
 	out := make([]TokenBalancePayload, 0)
 	for idx, acct := range txAccts {
-		if acct == nil || !isTokenProgramOwner(acct.Owner) {
+		if idx >= len(tx.Message.AccountKeys) {
+			break
+		}
+		if _, ok := invoked[idx]; ok || tx.Message.AccountKeys[idx] == splTokenProgramID || tx.Message.AccountKeys[idx] == splToken2022ProgramID {
 			continue
 		}
-		if len(acct.Data) < tokenAccountSize {
+		parsed, ok := parseStrictTokenAccount(acct)
+		if !ok {
 			continue
 		}
-		mint := publicKeyFromOffset(acct.Data, tokenAccountMintOffset)
-		owner := publicKeyFromOffset(acct.Data, tokenAccountOwnerOffset)
-		amount := binary.LittleEndian.Uint64(acct.Data[tokenAccountAmountOffset : tokenAccountAmountOffset+8])
-
-		decimals := mintDecimals[mint]
-		programID := splTokenProgramID
-		if acct.Owner == [32]byte(splToken2022ProgramID) {
-			programID = splToken2022ProgramID
+		mint, ok := mints[parsed.mint]
+		if !ok || mint.programID != parsed.programID {
+			continue
 		}
-
 		out = append(out, TokenBalancePayload{
 			AccountIndex: uint8(idx),
-			Mint:         mint.String(),
-			Owner:        owner.String(),
-			ProgramId:    programID.String(),
+			Mint:         parsed.mint.String(),
+			Owner:        parsed.owner.String(),
+			ProgramId:    parsed.programID.String(),
 			UiTokenAmount: UiTokenAmountPayload{
-				Amount:         strconv.FormatUint(amount, 10),
-				Decimals:       decimals,
-				UiAmount:       uiAmountForRaw(amount, decimals),
-				UiAmountString: uiAmountStringForRaw(amount, decimals),
+				Amount:         strconv.FormatUint(parsed.amount, 10),
+				Decimals:       mint.decimals,
+				UiAmount:       uiAmountForRaw(parsed.amount, mint.decimals),
+				UiAmountString: uiAmountStringForRaw(parsed.amount, mint.decimals),
 			},
 		})
-	}
-	return out
-}
-
-// fetchMintDecimals collects the unique mints referenced by token
-// accounts in txAccts and looks each one up in accountsdb to extract its
-// decimals byte. Mints that fail the size check or aren't found are
-// omitted; callers default missing entries to 0.
-func fetchMintDecimals(
-	txAccts []*accounts.Account,
-	db *accountsdb.AccountsDb,
-	slot uint64,
-) map[solana.PublicKey]uint8 {
-	out := make(map[solana.PublicKey]uint8)
-	if db == nil {
-		return out
-	}
-	seen := make(map[solana.PublicKey]struct{})
-	for _, acct := range txAccts {
-		if acct == nil || !isTokenProgramOwner(acct.Owner) {
-			continue
-		}
-		if len(acct.Data) < tokenAccountSize {
-			continue
-		}
-		mint := publicKeyFromOffset(acct.Data, tokenAccountMintOffset)
-		if _, ok := seen[mint]; ok {
-			continue
-		}
-		seen[mint] = struct{}{}
-
-		mintAcct, err := db.GetAccount(slot, mint)
-		if err != nil || mintAcct == nil || len(mintAcct.Data) < mintAccountSize {
-			continue
-		}
-		out[mint] = mintAcct.Data[mintDecimalsOffset]
 	}
 	return out
 }
@@ -178,21 +278,3 @@ func pow10Float(n uint8) float64 {
 	}
 	return out
 }
-
-// tokenBalancesFromAccounts wraps mint-decimal lookup + decoding so the
-// simulate handler can build pre/post arrays from a slice of accounts.
-// Returns nil when txAccts is nil (no accounts ever loaded — e.g. sanitize
-// failure path) so the response emits JSON null, matching Agave's
-// behavior on early-fail paths. Returns an empty slice for explicitly
-// empty input or non-token transactions.
-func tokenBalancesFromAccounts(txAccts []*accounts.Account, db *accountsdb.AccountsDb, slot uint64) []TokenBalancePayload {
-	if txAccts == nil {
-		return nil
-	}
-	if len(txAccts) == 0 {
-		return []TokenBalancePayload{}
-	}
-	mintDecimals := fetchMintDecimals(txAccts, db, slot)
-	return extractTokenBalances(txAccts, mintDecimals)
-}
-

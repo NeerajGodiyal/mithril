@@ -14,16 +14,15 @@ func (rpcServer *RpcServer) GetBankHash(ctx context.Context, p jsonrpc.RawParams
 		return "", fmt.Errorf("decoding params: %w", err)
 	}
 
-	if len(params) < 1 {
-		return "", fmt.Errorf("getBankHash requires a slot number as first parameter")
+	if len(params) != 1 {
+		return "", invalidRPCOption("getBankHash", "parameters", "expected exactly one slot")
 	}
 
-	slotFloat, ok := params[0].(float64)
-	if !ok {
-		return "", fmt.Errorf("getBankHash requires a slot number as first parameter")
+	slot, err := parseExactJSONUint(params[0], "getBankHash", "slot")
+	if err != nil {
+		return "", err
 	}
 
-	slot := uint64(slotFloat)
 	bankHash, err := rpcServer.acctsDb.GetBankHashForSlot(slot)
 	if err != nil {
 		return "", fmt.Errorf("unable to retrieve bankhash for slot %d", slot)

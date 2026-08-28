@@ -19,12 +19,16 @@ func (rpcServer *RpcServer) GetBlockHeight(ctx context.Context, p jsonrpc.RawPar
 	if err != nil {
 		return 0, err
 	}
-	slotCtx := rpcServer.getSlotCtx()
+	slotCtx, lifecycle := rpcServer.getSlotCtxWithLifecycle()
 	if slotCtx == nil {
 		return 0, fmt.Errorf("node is not ready to provide block height")
 	}
 	if conf.minContextSlot != nil && slotCtx.Slot < *conf.minContextSlot {
 		return 0, &MinContextSlotNotReachedError{ContextSlot: *conf.minContextSlot}
 	}
-	return slotCtx.BlockHeight, nil
+	blockHeight := slotCtx.BlockHeight
+	if err := rpcServer.validateProcessedBankPublication(slotCtx, lifecycle, "getBlockHeight"); err != nil {
+		return 0, err
+	}
+	return blockHeight, nil
 }

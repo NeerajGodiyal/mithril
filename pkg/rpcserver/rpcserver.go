@@ -55,6 +55,7 @@ type RpcServer struct {
 	genesisHash          string
 	slotCtx              *sealevel.SlotCtx
 	slotCtxMu            sync.RWMutex
+	slotCtxLifecycle     uint64
 
 	leaderTPUCacheMu           sync.RWMutex
 	leaderTPUByIdentity        map[solana.PublicKey]tpuEndpoint
@@ -330,14 +331,35 @@ func fetchAndUnmarshalEpochScheduleSysvarE(acctsDb *accountsdb.AccountsDb) (*sea
 
 func (rpcServer *RpcServer) SetSlotCtx(slotCtx *sealevel.SlotCtx) {
 	rpcServer.slotCtxMu.Lock()
+	if slotCtx == nil {
+		rpcServer.slotCtxLifecycle++
+	}
 	rpcServer.slotCtx = slotCtx
 	rpcServer.slotCtxMu.Unlock()
 }
 
-func (rpcServer *RpcServer) getSlotCtx() *sealevel.SlotCtx {
+func (rpcServer *RpcServer) getSlotCtxWithLifecycle() (*sealevel.SlotCtx, uint64) {
 	rpcServer.slotCtxMu.RLock()
 	defer rpcServer.slotCtxMu.RUnlock()
-	return rpcServer.slotCtx
+	return rpcServer.slotCtx, rpcServer.slotCtxLifecycle
+}
+
+func (rpcServer *RpcServer) validateSlotCtxLifecycle(generation uint64, method string) error {
+	rpcServer.slotCtxMu.RLock()
+	defer rpcServer.slotCtxMu.RUnlock()
+	if rpcServer.slotCtxLifecycle != generation {
+		return fmt.Errorf("processed bank was invalidated during %s", method)
+	}
+	return nil
+}
+
+func (rpcServer *RpcServer) validateProcessedBankPublication(slotCtx *sealevel.SlotCtx, lifecycle uint64, method string) error {
+	if slotCtx != nil {
+		if err := slotCtx.ValidateAccountRead(); err != nil {
+			return fmt.Errorf("processed account bank changed during %s: %w", method, err)
+		}
+	}
+	return rpcServer.validateSlotCtxLifecycle(lifecycle, method)
 }
 
 func (rpcServer *RpcServer) Start() {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/gagliardetto/solana-go"
@@ -22,7 +23,7 @@ func (rpcServer *RpcServer) SetTransactionReceipts(store txstatus.Store) {
 // recordSubmissionAttempt notes a transaction immediately before forwarding.
 // Submission fails closed when the receipt store is unavailable or full:
 // sending while discarding ambiguous outcomes is unsafe for automated callers.
-func (rpcServer *RpcServer) recordSubmissionAttempt(tx *solana.Transaction, signature solana.Signature) error {
+func (rpcServer *RpcServer) recordSubmissionAttempt(tx *solana.Transaction, signature solana.Signature, slotCtx *sealevel.SlotCtx) error {
 	if rpcServer.txReceipts == nil {
 		return fmt.Errorf("transaction receipt tracking is unavailable")
 	}
@@ -30,7 +31,6 @@ func (rpcServer *RpcServer) recordSubmissionAttempt(tx *solana.Transaction, sign
 		return fmt.Errorf("transaction is unavailable for receipt tracking")
 	}
 	var lastValidBlockHeight *uint64
-	slotCtx := rpcServer.getSlotCtx()
 	if slotCtx != nil && solana.Hash(slotCtx.Blockhash) == tx.Message.RecentBlockhash {
 		if value, ok := recentBlockhashLastValidHeight(slotCtx.BlockHeight); ok {
 			lastValidBlockHeight = &value
@@ -111,8 +111,9 @@ func (rpcServer *RpcServer) GetSubmittedTransactionStatus(ctx context.Context, p
 		signatures = append(signatures, parsed)
 	}
 
+	slotCtx, lifecycle := rpcServer.getSlotCtxWithLifecycle()
 	contextSlot := uint64(0)
-	if slotCtx := rpcServer.getSlotCtx(); slotCtx != nil {
+	if slotCtx != nil {
 		contextSlot = slotCtx.Slot
 	}
 	resp := GetSubmittedTransactionStatusResp{
@@ -136,6 +137,9 @@ func (rpcServer *RpcServer) GetSubmittedTransactionStatus(ctx context.Context, p
 			LastValidBlockHeight: receipt.LastValidBlockHeight,
 			SubmittedAtRFC:       receipt.SubmittedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		}
+	}
+	if err := rpcServer.validateProcessedBankPublication(slotCtx, lifecycle, "getSubmittedTransactionStatus"); err != nil {
+		return GetSubmittedTransactionStatusResp{}, err
 	}
 	return resp, nil
 }

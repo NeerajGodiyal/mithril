@@ -37,7 +37,7 @@ func (rpcServer *RpcServer) GetLatestBlockhash(ctx context.Context, p jsonrpc.Ra
 	if err != nil {
 		return GetLatestBlockhashResp{}, err
 	}
-	slotCtx := rpcServer.getSlotCtx()
+	slotCtx, lifecycle := rpcServer.getSlotCtxWithLifecycle()
 	if slotCtx == nil || slotCtx.Blockhash == [32]byte{} {
 		return GetLatestBlockhashResp{}, fmt.Errorf("node is not ready to provide a recent blockhash")
 	}
@@ -53,10 +53,14 @@ func (rpcServer *RpcServer) GetLatestBlockhash(ctx context.Context, p jsonrpc.Ra
 		Blockhash:            base58.Encode(slotCtx.Blockhash[:]),
 		LastValidBlockHeight: lastValidBlockHeight,
 	}
-	return GetLatestBlockhashResp{
+	resp := GetLatestBlockhashResp{
 		Context: GetLatestBlockhashRespContext{Slot: slotCtx.Slot},
 		Value:   val,
-	}, nil
+	}
+	if err := rpcServer.validateProcessedBankPublication(slotCtx, lifecycle, "getLatestBlockhash"); err != nil {
+		return GetLatestBlockhashResp{}, err
+	}
+	return resp, nil
 }
 
 func recentBlockhashLastValidHeight(blockHeight uint64) (uint64, bool) {

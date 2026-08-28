@@ -18,6 +18,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/txverify"
 	"github.com/filecoin-project/go-jsonrpc"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
@@ -94,16 +95,27 @@ func (rpcServer *RpcServer) SendTransaction(ctx context.Context, p jsonrpc.RawPa
 	if err != nil {
 		return "", err
 	}
-
-	slotCtx := rpcServer.getSlotCtx()
-	// skipPreflight still performs bank-independent structural sanitization.
-	// Feature-gated execution remains the bank's job, matching Agave's RPC.
-	if err := validateSendTransactionSanitize(tx, featuresForSendValidation(slotCtx)); err != nil {
+	if err := validateSendTransactionSanitize(tx, nil); err != nil {
 		return "", err
 	}
 
+	slotCtx, slotCtxLifecycle := rpcServer.getSlotCtxWithLifecycle()
+	if slotCtx == nil {
+		return "", fmt.Errorf("node is not ready to validate transactions")
+	}
+	if err := slotCtx.ValidateAccountRead(); err != nil {
+		return "", fmt.Errorf("processed account bank is unavailable: %w", err)
+	}
+	// skipPreflight still applies active bank limits. Feature-gated execution
+	// remains the bank's job, matching Agave's RPC.
+	if feats := featuresForSendValidation(slotCtx); feats != nil &&
+		feats.IsActive(features.StaticInstructionLimit) &&
+		len(tx.Message.Instructions) > maxSanitizedInstructionCount {
+		return "", errInvalidSanitizedTransaction
+	}
+
 	if conf.minContextSlot != nil {
-		if slotCtx == nil || slotCtx.Slot < *conf.minContextSlot {
+		if slotCtx.Slot < *conf.minContextSlot {
 			return "", &MinContextSlotNotReachedError{ContextSlot: *conf.minContextSlot}
 		}
 	}
@@ -111,9 +123,6 @@ func (rpcServer *RpcServer) SendTransaction(ctx context.Context, p jsonrpc.RawPa
 	if !conf.skipPreflight {
 		if err := ctx.Err(); err != nil {
 			return "", err
-		}
-		if slotCtx == nil {
-			return "", fmt.Errorf("node is not ready for transaction preflight")
 		}
 		if err := rpcServer.preflightSendTransaction(ctx, tx, slotCtx); err != nil {
 			return "", err
@@ -128,18 +137,28 @@ func (rpcServer *RpcServer) SendTransaction(ctx context.Context, p jsonrpc.RawPa
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	if err := rpcServer.validateSendTransactionPublication(slotCtx, slotCtxLifecycle); err != nil {
+		return "", err
+	}
 	// Record the attempt immediately before forwarding. If forwarding fails
 	// partway the transaction may still have reached a leader, so that outcome
 	// remains explicitly ambiguous until replay supplies evidence.
-	if err := rpcServer.recordSubmissionAttempt(tx, signature); err != nil {
+	if err := rpcServer.recordSubmissionAttempt(tx, signature, slotCtx); err != nil {
 		return "", err
 	}
 	if err := rpcServer.forwardTransactionToUpcomingLeaders(ctx, wire, tx.Message.GetVersion() == solana.MessageVersionV1); err != nil {
 		return "", err
 	}
+	if err := rpcServer.validateSendTransactionPublication(slotCtx, slotCtxLifecycle); err != nil {
+		return "", err
+	}
 	rpcServer.recordSubmissionForwarded(signature)
 
 	return signature.String(), nil
+}
+
+func (rpcServer *RpcServer) validateSendTransactionPublication(slotCtx *sealevel.SlotCtx, lifecycle uint64) error {
+	return rpcServer.validateProcessedBankPublication(slotCtx, lifecycle, "transaction validation")
 }
 
 func parseSendTransactionConfig(params []interface{}) (sendTransactionConfig, error) {
@@ -315,7 +334,7 @@ func (rpcServer *RpcServer) preflightSendTransaction(ctx context.Context, tx *so
 		return err
 	}
 
-	if err := tx.VerifySignatures(); err != nil {
+	if err := txverify.VerifyTransaction(tx); err != nil {
 		return signaturePreflightFailure()
 	}
 
@@ -351,10 +370,7 @@ func (rpcServer *RpcServer) resolveAddressTablesForPreflight(ctx context.Context
 	if !tx.Message.IsVersioned() || tx.Message.AddressTableLookups.NumLookups() == 0 {
 		return nil
 	}
-	if rpcServer.acctsDb == nil {
-		return &InvalidParamsError{Message: "invalid transaction: address lookup table resolution unavailable"}
-	}
-	if err := replay.ResolveAddrTableLookupsForTx(ctx, rpcServer.acctsDb, slotCtx.Slot, tx); err != nil {
+	if err := replay.ResolveAddrTableLookupsForTxInBank(ctx, tx, slotCtx); err != nil {
 		return &InvalidParamsError{Message: fmt.Sprintf("invalid transaction: %s", err.Error())}
 	}
 	return nil

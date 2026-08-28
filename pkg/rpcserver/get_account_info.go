@@ -54,7 +54,12 @@ const (
 	GetAccountEncodingJson
 )
 
-func (rpcServer *RpcServer) GetAccountInfo(ctx context.Context, p jsonrpc.RawParams) (GetAccountInfoResp, error) {
+const (
+	maxBase58AccountDataSize = 128
+	base58DataTooLarge       = "error: data too large for bs58 encoding"
+)
+
+func (rpcServer *RpcServer) GetAccountInfo(ctx context.Context, p jsonrpc.RawParams) (resp GetAccountInfoResp, retErr error) {
 	params, err := jsonrpc.DecodeParams[[]interface{}](p)
 	if err != nil {
 		return GetAccountInfoResp{}, fmt.Errorf("decoding params: %w", err)
@@ -84,10 +89,27 @@ func (rpcServer *RpcServer) GetAccountInfo(ctx context.Context, p jsonrpc.RawPar
 
 	// One published bank describes the whole answer. Using a separate global
 	// slot could label account bytes with a different point in replay.
-	slotCtx := rpcServer.getSlotCtx()
+	slotCtx, lifecycle := rpcServer.getSlotCtxWithLifecycle()
 	if slotCtx == nil {
 		return GetAccountInfoResp{}, fmt.Errorf("node is not ready to provide account information")
 	}
+	if err := slotCtx.ValidateAccountRead(); err != nil {
+		return GetAccountInfoResp{}, err
+	}
+	defer func() {
+		if retErr != nil {
+			return
+		}
+		if err := slotCtx.ValidateAccountRead(); err != nil {
+			resp = GetAccountInfoResp{}
+			retErr = err
+			return
+		}
+		if err := rpcServer.validateSlotCtxLifecycle(lifecycle, "getAccountInfo"); err != nil {
+			resp = GetAccountInfoResp{}
+			retErr = err
+		}
+	}()
 	contextSlot := slotCtx.Slot
 	if conf.MinContextSlot > contextSlot {
 		// The typed error, not fmt.Errorf: this carries Agave's reserved -32016
@@ -306,7 +328,9 @@ func encodeAcctDataWithConfig(data []byte, config *GetAccountInfoConfig) (interf
 			{
 				encodingTypeStr = "base58"
 				acctData := extractRequestedAcctData(data, length, offset)
-				if len(acctData) != 0 {
+				if len(acctData) > maxBase58AccountDataSize {
+					dataStr = base58DataTooLarge
+				} else if len(acctData) != 0 {
 					dataStr = base58.Encode(acctData)
 				}
 			}
@@ -340,7 +364,9 @@ func encodeAcctDataWithConfig(data []byte, config *GetAccountInfoConfig) (interf
 		dataObj = []string{dataStr, encodingTypeStr}
 	} else {
 		acctData := extractRequestedAcctData(data, length, offset)
-		if len(acctData) != 0 {
+		if len(acctData) > maxBase58AccountDataSize {
+			dataObj = base58DataTooLarge
+		} else if len(acctData) != 0 {
 			dataObj = base58.Encode(acctData)
 		}
 	}

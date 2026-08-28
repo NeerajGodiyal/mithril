@@ -3,6 +3,7 @@ package rpcserver
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/txverify"
 	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/gagliardetto/solana-go"
 	"github.com/mr-tron/base58"
@@ -123,7 +125,20 @@ type simulateAccountsConfig struct {
 	encoding  string
 }
 
-func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.RawParams) (SimulateTransactionResp, error) {
+type simulationAccountReader struct {
+	read func(solana.PublicKey) (*accounts.Account, error)
+	err  error
+}
+
+func (r *simulationAccountReader) Read(key solana.PublicKey) (*accounts.Account, error) {
+	acct, err := r.read(key)
+	if err != nil && !errors.Is(err, accountsdb.ErrNoAccount) && r.err == nil {
+		r.err = fmt.Errorf("reading supplemental simulation account: %w", err)
+	}
+	return acct, err
+}
+
+func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.RawParams) (resp SimulateTransactionResp, retErr error) {
 	metrics.GlobalSimulate.TotalCalls.Inc()
 	defer metrics.GlobalSimulate.HandlerLatency.AddTimingSince(time.Now())
 	if err := ctx.Err(); err != nil {
@@ -200,10 +215,33 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 		}
 	}
 
-	slotCtx := rpcServer.getSlotCtx()
+	slotCtx, slotCtxLifecycle := rpcServer.getSlotCtxWithLifecycle()
 	if slotCtx == nil {
 		return SimulateTransactionResp{}, fmt.Errorf("node is not ready for simulation")
 	}
+	if err := slotCtx.ValidateAccountRead(); err != nil {
+		return SimulateTransactionResp{}, err
+	}
+	supplementalReader := simulationAccountReader{read: slotCtx.GetAccountFromAccountsDb}
+	defer func() {
+		if retErr != nil {
+			return
+		}
+		if supplementalReader.err != nil {
+			resp = SimulateTransactionResp{}
+			retErr = supplementalReader.err
+			return
+		}
+		if err := slotCtx.ValidateAccountRead(); err != nil {
+			resp = SimulateTransactionResp{}
+			retErr = fmt.Errorf("processed account bank changed during simulation: %w", err)
+			return
+		}
+		if err := rpcServer.validateSlotCtxLifecycle(slotCtxLifecycle, "simulation"); err != nil {
+			resp = SimulateTransactionResp{}
+			retErr = err
+		}
+	}()
 	if conf.minContextSlot != nil && slotCtx.Slot < *conf.minContextSlot {
 		return SimulateTransactionResp{}, &MinContextSlotNotReachedError{
 			ContextSlot: *conf.minContextSlot,
@@ -225,7 +263,7 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 
 	// ALT resolve runs before sigVerify so the failure response carries the
 	// resolved loadedAddresses, not empty arrays.
-	if err := replay.ResolveAddrTableLookupsForTx(ctx, rpcServer.acctsDb, slotCtx.Slot, tx); err != nil {
+	if err := replay.ResolveAddrTableLookupsForTxInBank(ctx, tx, slotCtx); err != nil {
 		metrics.GlobalSimulate.AddressLookupFails.Inc()
 		return earlyFailResponse("AddressLookupTableNotFound", replacementBlockhash, conf, tx, slotCtx.Slot), nil
 	}
@@ -242,7 +280,7 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 	// Agave's order: sanitize → verify) so the failure response reports
 	// the fully-resolved loadedAddresses, not empty arrays.
 	if conf.sigVerify {
-		err = tx.VerifySignatures()
+		err = txverify.VerifyTransaction(tx)
 		if err != nil {
 			return earlyFailResponse("SignatureFailure", replacementBlockhash, conf, tx, slotCtx.Slot), nil
 		}
@@ -272,7 +310,7 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 	}
 	logs = clampLogs(logs)
 
-	resp := SimulateTransactionResp{
+	resp = SimulateTransactionResp{
 		Context: SimulateTransactionRespContext{
 			ApiVersion: "mithril 0.1",
 			Slot:       slotCtx.Slot,
@@ -283,8 +321,8 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 			InnerInstructions:    nil,
 			PreBalances:          ptrSlice(output.PreBalances),
 			PostBalances:         ptrSlice(postBalancesFromExecCtx(output.ExecCtx)),
-			PreTokenBalances:     ptrSliceTokenBalance(tokenBalancesFromAccounts(output.PreAccountSnapshots, rpcServer.acctsDb, slotCtx.Slot)),
-			PostTokenBalances:    ptrSliceTokenBalance(tokenBalancesFromAccounts(postExecAccounts(output.ExecCtx), rpcServer.acctsDb, slotCtx.Slot)),
+			PreTokenBalances:     ptrSliceTokenBalance(tokenBalancesForTransaction(tx, output.PreAccountSnapshots, supplementalReader.Read)),
+			PostTokenBalances:    ptrSliceTokenBalance(tokenBalancesForTransaction(tx, postExecAccounts(output.ExecCtx), supplementalReader.Read)),
 			LoadedAddresses:      loadedAddressesFromTx(tx),
 		},
 	}
@@ -399,7 +437,7 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 			nullAccounts := make([]*AccountInfoPayload, len(conf.accounts.addresses))
 			resp.Value.Accounts = &nullAccounts
 		} else {
-			resp.Value.Accounts = renderRequestedAccounts(conf, output.ExecCtx, rpcServer.acctsDb, slotCtx.Slot)
+			resp.Value.Accounts = renderRequestedAccounts(conf, output.ExecCtx, supplementalReader.Read)
 		}
 	}
 
@@ -703,7 +741,7 @@ func ptrSliceTokenBalance(s []TokenBalancePayload) *[]TokenBalancePayload {
 // Each entry is nil (JSON null) when the address can't be resolved.
 // Always returns a slice of length len(conf.accounts.addresses), matching
 // Agave so clients can index by request order.
-func renderRequestedAccounts(conf simulateTransactionConfig, execCtx *sealevel.ExecutionCtx, db *accountsdb.AccountsDb, slot uint64) *[]*AccountInfoPayload {
+func renderRequestedAccounts(conf simulateTransactionConfig, execCtx *sealevel.ExecutionCtx, read func(solana.PublicKey) (*accounts.Account, error)) *[]*AccountInfoPayload {
 	accts := make([]*AccountInfoPayload, len(conf.accounts.addresses))
 	encodingType := GetAccountEncodingBase64
 	if conf.accounts.encoding != "" {
@@ -726,9 +764,9 @@ func renderRequestedAccounts(conf simulateTransactionConfig, execCtx *sealevel.E
 				}
 			}
 		}
-		if resolved == nil && db != nil {
-			if dbAcct, dbErr := db.GetAccount(slot, pk); dbErr == nil {
-				resolved = dbAcct
+		if resolved == nil && read != nil {
+			if bankAcct, readErr := read(pk); readErr == nil {
+				resolved = bankAcct
 			}
 		}
 		if resolved == nil {
