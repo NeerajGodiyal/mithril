@@ -24,7 +24,7 @@ var publicTokenFieldNames = []string{
 // guarding against widening this to anything containing "key".
 var credentialNames = []string{
 	"authorization", "api_key", "apiKey", "secret", "password",
-	"access_token", "refresh_token", "bearer_token",
+	"access_token", "refresh_token", "bearer_token", "jwt", "JWT",
 }
 
 // assignmentForms renders one key/value pair in the shapes credentials actually

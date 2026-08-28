@@ -230,6 +230,9 @@ func SensitiveName(name string) bool {
 	}
 	name = escapedNameSeparators.Replace(name)
 	normalized := normalizedName(name)
+	if normalized == "jwt" {
+		return true
+	}
 	if normalizedTokenDataName(normalized) || signingMaterialFieldName(normalized) {
 		return true
 	}
@@ -245,7 +248,7 @@ func SensitiveName(name string) bool {
 func PlainSensitiveName(name string) bool {
 	switch normalizedName(name) {
 	case "authorization", "credential", "password", "secret", "apikey",
-		"accesstoken", "refreshtoken", "bearertoken", "token":
+		"accesstoken", "refreshtoken", "bearertoken", "token", "jwt":
 		return true
 	// Keep bare signing terms readable in prose while redacting assigned values.
 	case "privatekey", "privkey", "keypair", "signingkey", "signerkey",
