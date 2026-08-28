@@ -251,8 +251,8 @@ func TestValidateAgainstBankhashDB_RootedMode(t *testing.T) {
 	})
 }
 
-// Legacy mode (LastRootedSlot==0) must behave exactly as before: assert against
-// LastSlot.
+// Legacy mode (RootedDurable=false) must behave exactly as before: assert
+// against LastSlot.
 func TestValidateAgainstBankhashDB_LegacyUnchanged(t *testing.T) {
 	t.Run("clean legacy", func(t *testing.T) {
 		s := &MithrilState{LastSlot: 110, LastBankhash: base58.Encode(bh(0xCC))}

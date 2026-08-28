@@ -56,18 +56,18 @@ func NewWorkingSet() *WorkingSet {
 }
 
 // Add appends slot's account writes at the tip, capturing one undo record per
-// first-written key. Slots must arrive in ascending order (one confirmed
-// chain), so an added slot is always >= every held slot.
+// first-written key. Slots must arrive in strictly ascending order (one
+// confirmed chain). A fork replacement must evict the old suffix first.
 func (w *WorkingSet) Add(slot uint64, delta []*Account) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	layer, ok := w.bySlot[slot]
-	if !ok {
-		layer = &slotLayer{slot: slot, writes: make(map[[32]byte]*Account, len(delta))}
-		w.bySlot[slot] = layer
-		w.order = append(w.order, slot)
+	if len(w.order) != 0 && slot <= w.order[len(w.order)-1] {
+		panic("working set slots must be added in strictly ascending order")
 	}
+	layer := &slotLayer{slot: slot, writes: make(map[[32]byte]*Account, len(delta))}
+	w.bySlot[slot] = layer
+	w.order = append(w.order, slot)
 	for _, a := range delta {
 		if a == nil {
 			continue
@@ -75,18 +75,14 @@ func (w *WorkingSet) Add(slot uint64, delta []*Account) {
 		key := [32]byte(a.Key)
 		if _, again := layer.writes[key]; !again {
 			// First write of this key in this slot: journal what flat held.
-			if e, exists := w.flat[key]; exists && e.slot != slot {
+			if e, exists := w.flat[key]; exists {
 				layer.undo = append(layer.undo, undoPtr{key: key, prevSlot: e.slot, existed: true})
-			} else if !exists {
+			} else {
 				layer.undo = append(layer.undo, undoPtr{key: key})
 			}
 		}
 		layer.writes[key] = a
-		// Newest wins. Guard on owner slot so an out-of-order add can never
-		// install an older value over a newer one.
-		if e, exists := w.flat[key]; !exists || slot >= e.slot {
-			w.flat[key] = flatEntry{slot: slot, acct: a}
-		}
+		w.flat[key] = flatEntry{slot: slot, acct: a}
 	}
 }
 

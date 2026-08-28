@@ -64,6 +64,19 @@ func TestWorkingSetViewSurvivesFutureAddAndUnwind(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestWorkingSetRejectsMutationOfPublishedSlot(t *testing.T) {
+	w := NewWorkingSet()
+	w.Add(5, []*Account{wsAcct(1, 500)})
+	view := w.ViewAt(5)
+
+	require.Panics(t, func() { w.Add(5, []*Account{wsAcct(1, 999)}) })
+	require.Panics(t, func() { w.Add(4, []*Account{wsAcct(1, 400)}) })
+
+	acct, ok := view.Lookup(wsKey(1))
+	require.True(t, ok)
+	assert.Equal(t, uint64(500), acct.Lamports)
+}
+
 func BenchmarkWorkingSetLookupBlock(b *testing.B) {
 	const keyCount = 30_000
 	w := NewWorkingSet()
