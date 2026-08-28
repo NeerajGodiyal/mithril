@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -76,6 +77,26 @@ func TestGetSlotInfoSemanticLabels(t *testing.T) {
 	}
 	if info.Consistency != "node_reported_non_atomic" || info.Finality != "local_unfinalized" {
 		t.Fatalf("slot info semantic labels missing: %+v", info)
+	}
+}
+
+func TestGetGenesisHash(t *testing.T) {
+	client := newRPCClientWithResponse(t, `{"jsonrpc":"2.0","id":1,"result":"`+testHash+`"}`)
+	hash, err := client.getGenesisHash(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hash != testHash {
+		t.Fatalf("getGenesisHash = %q, want %q", hash, testHash)
+	}
+}
+
+func TestGetGenesisHashRejectsMalformedResult(t *testing.T) {
+	for _, result := range []string{`123`, `"11111111111111111111111111111111"`, `"not-base58"`} {
+		client := newRPCClientWithResponse(t, `{"jsonrpc":"2.0","id":1,"result":`+result+`}`)
+		if _, err := client.getGenesisHash(context.Background()); err == nil {
+			t.Fatalf("getGenesisHash accepted %s", result)
+		}
 	}
 }
 
@@ -224,6 +245,37 @@ func TestRPCCallValidatesResponseEnvelope(t *testing.T) {
 				t.Fatalf("error = %v, want substring %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestNodeHealthRefusalIsTypedAndAllowlisted(t *testing.T) {
+	for _, reason := range []string{"incomplete", "diverged", "stalled", "unavailable", "unknown_verification_state"} {
+		t.Run(reason, func(t *testing.T) {
+			client := newRPCClientWithResponse(t, `{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"ignored","data":{"reason":"`+reason+`","verifiedSlot":7,"eligibleSlot":9,"operatorNote":"ignored"}}}`)
+			_, err := client.call(context.Background(), "getBlockHeight", []any{})
+			var refusal *NodeHealthRefusalError
+			if !errors.As(err, &refusal) || refusal.Code != rpcCodeNodeUnhealthy || refusal.Reason != reason || refusal.VerifiedSlot != 7 || refusal.EligibleSlot != 9 {
+				t.Fatalf("refusal = %#v, error = %v", refusal, err)
+			}
+		})
+	}
+}
+
+func TestNodeHealthRefusalDropsUntrustedServerData(t *testing.T) {
+	const secret = "NODE_HEALTH_SECRET"
+	for _, data := range []string{
+		`{"reason":"` + secret + `","operatorNote":"` + secret + `"}`,
+		`"` + secret + `"`,
+	} {
+		client := newRPCClientWithResponse(t, `{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"`+secret+`","data":`+data+`}}`)
+		_, err := client.call(context.Background(), "getBlockHeight", []any{})
+		var refusal *NodeHealthRefusalError
+		if !errors.As(err, &refusal) || refusal.Reason != "" || refusal.VerifiedSlot != 0 || refusal.EligibleSlot != 0 {
+			t.Fatalf("untrusted data produced refusal %#v, error %v", refusal, err)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("refusal leaked server data: %v", err)
+		}
 	}
 }
 

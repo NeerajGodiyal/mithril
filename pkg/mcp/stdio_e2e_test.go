@@ -165,6 +165,8 @@ custom_metric{source="https://metrics.invalid/%s?api-key=label-value"} 1
 				t.Errorf("getBankHash params = %s", request.Params)
 			}
 			result = testHash
+		case "getGenesisHash":
+			result = testHash
 		case "getLatestBlockhash":
 			result = map[string]any{
 				"context": map[string]any{"slot": stdioE2ESlot},
@@ -389,6 +391,7 @@ func stdioE2EToolCases() map[string]stdioE2EToolCase {
 		"mithril_metric":               {arguments: map[string]any{"metric": "slot"}, expectedText: []string{`"metric":"slot"`, `"value":500`}},
 		"mithril_get_slot_info":        {arguments: map[string]any{}, expectedText: []string{`"absolute_slot":500`, `"block_height":800`, `"epoch":7`}},
 		"mithril_get_bank_hash":        {arguments: map[string]any{"slot": stdioE2ESlot}, expectedText: []string{`"slot":500`, `"bank_hash":"` + testHash + `"`}},
+		"mithril_get_genesis_hash":     {arguments: map[string]any{}, expectedText: []string{`"genesis_hash":"` + testHash + `"`}},
 		"mithril_get_latest_blockhash": {arguments: map[string]any{}, expectedText: []string{`"slot":500`, `"last_valid_block_height":900`, `"status":"ready"`, `"consistency":"node_reported_non_atomic"`, `"finality":"local_unfinalized"`}},
 		"mithril_get_block_height":     {arguments: map[string]any{}, expectedText: []string{`"block_height":800`, `"finality":"local_unfinalized"`}},
 		"mithril_get_account_info":     {arguments: map[string]any{"pubkey": "11111111111111111111111111111111", "data_length": uint64(3)}, expectedText: []string{`"found":true`, `"lamports":"9007199254740993"`, `"rent_epoch":"18446744073709551615"`, `"data_length":3`}},

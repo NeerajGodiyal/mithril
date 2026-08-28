@@ -194,6 +194,28 @@ enabled = true
 	}
 }
 
+func TestResolvedConfigUsesConfiguredRPCBind(t *testing.T) {
+	for _, test := range []struct {
+		name, bind, want string
+	}{
+		{"IPv6 companion", "2001:db8::10", "http://[::1]:7788"},
+		{"empty uses node default", "", "http://127.0.0.1:7788"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clearMCPNodeSettingEnv(t)
+			setConfigFileForTest(t, writeConfigFile(t, "[rpc]\nbind_address = '"+test.bind+"'\nport = 7788\n"))
+
+			cfg, err := resolvedConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.RPCURL != test.want {
+				t.Fatalf("local RPC URL = %q, want %q", cfg.RPCURL, test.want)
+			}
+		})
+	}
+}
+
 func TestResolvedConfigMatchesNodeBlockSourceRules(t *testing.T) {
 	tests := []struct {
 		name string
@@ -452,6 +474,10 @@ func TestResolvedConfigRejectsExplicitMissingOrInvalidConfig(t *testing.T) {
 	config.ConfigFile = writeConfigFile(t, "[rpc]\nport = 70000\n")
 	if _, err := resolvedConfig(); err == nil || !strings.Contains(err.Error(), "rpc.port") {
 		t.Fatalf("invalid RPC port error = %v", err)
+	}
+	config.ConfigFile = writeConfigFile(t, "[rpc]\nbind_address = 'node.example'\nport = 8899\n")
+	if _, err := resolvedConfig(); err == nil || !strings.Contains(err.Error(), "rpc.bind_address") {
+		t.Fatalf("invalid RPC bind address error = %v", err)
 	}
 	config.ConfigFile = writeConfigFile(t, "[rpc]\nport = 'not-a-number'\n[tuning.pprof]\nport = 'also-not-a-number'\n")
 	if _, err := resolvedConfig(); err == nil || !strings.Contains(err.Error(), "rpc.port must be an integer") {

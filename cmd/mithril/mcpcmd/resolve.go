@@ -4,12 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 
 	"github.com/Overclock-Validator/mithril/pkg/config"
 	"github.com/Overclock-Validator/mithril/pkg/mcp"
+	"github.com/Overclock-Validator/mithril/pkg/rpcserver"
 	"github.com/spf13/viper"
 )
 
@@ -94,7 +97,7 @@ func resolvedConfigWithOverrides(overrides resolvedConfigOverrides) (mcp.Config,
 			logsExplicitlyDisabled = configured.Logs == ""
 		}
 		if !rpcEnvSet {
-			cfg.RPCURL = loopbackHTTPURL(configured.RPCPort)
+			cfg.RPCURL = rpcserver.LocalRPCURL(configured.RPCBindAddress, configured.RPCPort)
 		}
 		if !pprofEnvSet {
 			cfg.PprofURL = loopbackHTTPURL(int(configured.PprofPort))
@@ -155,13 +158,14 @@ func resolvedConfigWithOverrides(overrides resolvedConfigOverrides) (mcp.Config,
 // configuredNodeSettings contains node settings that affect MCP's local
 // observation targets.
 type configuredNodeSettings struct {
-	Accounts    string
-	Snapshots   string
-	Shredstore  string
-	Logs        string
-	BlockSource string
-	RPCPort     int
-	PprofPort   int64
+	Accounts       string
+	Snapshots      string
+	Shredstore     string
+	Logs           string
+	BlockSource    string
+	RPCBindAddress string
+	RPCPort        int
+	PprofPort      int64
 }
 
 func configuredNodeBlockSource(v *viper.Viper) (string, error) {
@@ -229,13 +233,14 @@ func nodeSettingsFromConfig(path string) (configuredNodeSettings, error) {
 	rpcPort := 0
 	pprofPort := int64(-1)
 	settings := configuredNodeSettings{
-		Accounts:    accounts,
-		Snapshots:   snapshots,
-		Shredstore:  shredstore,
-		Logs:        "/mnt/mithril-logs",
-		BlockSource: blockSource,
-		RPCPort:     rpcPort,
-		PprofPort:   pprofPort,
+		Accounts:       accounts,
+		Snapshots:      snapshots,
+		Shredstore:     shredstore,
+		Logs:           "/mnt/mithril-logs",
+		BlockSource:    blockSource,
+		RPCBindAddress: rpcserver.DefaultRPCBindAddress,
+		RPCPort:        rpcPort,
+		PprofPort:      pprofPort,
 	}
 	if v.InConfig("storage.logs") {
 		settings.Logs = v.GetString("storage.logs")
@@ -250,6 +255,15 @@ func nodeSettingsFromConfig(path string) (configuredNodeSettings, error) {
 		}
 		value := int(parsed)
 		settings.RPCPort = value
+	}
+	if v.InConfig("rpc.bind_address") {
+		bindAddress := strings.TrimSpace(v.GetString("rpc.bind_address"))
+		if bindAddress == "" {
+			bindAddress = rpcserver.DefaultRPCBindAddress
+		} else if net.ParseIP(bindAddress) == nil {
+			return configuredNodeSettings{}, errors.New("rpc.bind_address must be an IP address")
+		}
+		settings.RPCBindAddress = bindAddress
 	}
 	// Match node.go exactly: the legacy key is consulted only when the tuning
 	// value is explicitly zero. A missing tuning key resolves to the -1 flag

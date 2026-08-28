@@ -280,6 +280,7 @@ func TestProfileToolCatalogsAndMetadata(t *testing.T) {
 		"mithril_diagnose",
 		"mithril_get_bank_hash",
 		"mithril_get_block_height",
+		"mithril_get_genesis_hash",
 		"mithril_get_latest_blockhash",
 		"mithril_get_slot_info",
 		"mithril_grep_log",

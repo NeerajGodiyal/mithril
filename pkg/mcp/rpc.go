@@ -45,8 +45,44 @@ func newMithrilRPCClient(endpoint string) (*mithrilRPCClient, error) {
 }
 
 type jsonRPCError struct {
-	Code    *int    `json:"code"`
-	Message *string `json:"message"`
+	Code    *int            `json:"code"`
+	Message *string         `json:"message"`
+	Data    json.RawMessage `json:"data"`
+}
+
+const rpcCodeNodeUnhealthy = -32005
+
+// NodeHealthRefusalError is the bounded evidence retained from a node's
+// -32005 response. Arbitrary message and data fields are intentionally omitted.
+type NodeHealthRefusalError struct {
+	Code         int
+	Reason       string
+	VerifiedSlot uint64
+	EligibleSlot uint64
+}
+
+func (e *NodeHealthRefusalError) Error() string {
+	if e.Reason == "" {
+		return fmt.Sprintf("node refused: unhealthy (code %d)", e.Code)
+	}
+	return fmt.Sprintf("node refused: %s (code %d)", e.Reason, e.Code)
+}
+
+func nodeHealthRefusalEvidence(raw json.RawMessage) (string, uint64, uint64) {
+	var data struct {
+		Reason       string `json:"reason"`
+		VerifiedSlot uint64 `json:"verifiedSlot"`
+		EligibleSlot uint64 `json:"eligibleSlot"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &data) != nil {
+		return "", 0, 0
+	}
+	switch data.Reason {
+	case "incomplete", "diverged", "stalled", "unavailable", "unknown_verification_state":
+		return data.Reason, data.VerifiedSlot, data.EligibleSlot
+	default:
+		return "", data.VerifiedSlot, data.EligibleSlot
+	}
 }
 
 type rpcHTTPStatusError struct {
@@ -118,6 +154,15 @@ func (c *mithrilRPCClient) call(ctx context.Context, method string, params any) 
 		if bytes.Equal(bytes.TrimSpace(r.Error), []byte("null")) || json.Unmarshal(r.Error, &rpcErr) != nil || rpcErr.Code == nil || rpcErr.Message == nil {
 			return nil, errors.New("RPC response contains an invalid error object")
 		}
+		if *rpcErr.Code == rpcCodeNodeUnhealthy {
+			reason, verified, eligible := nodeHealthRefusalEvidence(rpcErr.Data)
+			return nil, &NodeHealthRefusalError{
+				Code:         *rpcErr.Code,
+				Reason:       reason,
+				VerifiedSlot: verified,
+				EligibleSlot: eligible,
+			}
+		}
 		// Bound strings returned by a compromised or faulty node.
 		msg := redactUntrustedText(*rpcErr.Message)
 		if rs := []rune(msg); len(rs) > 256 {
@@ -175,6 +220,25 @@ func (c *mithrilRPCClient) getSlotInfo(ctx context.Context) (SlotInfo, error) {
 		Consistency:      "node_reported_non_atomic",
 		Finality:         "local_unfinalized",
 	}, nil
+}
+
+func (c *mithrilRPCClient) getGenesisHash(ctx context.Context) (string, error) {
+	raw, err := c.call(ctx, "getGenesisHash", []any{})
+	if err != nil {
+		return "", err
+	}
+	var hash string
+	if err := json.Unmarshal(raw, &hash); err != nil {
+		return "", errors.New("getGenesisHash did not return a string")
+	}
+	if err := validateHash(hash); err != nil {
+		return "", fmt.Errorf("getGenesisHash returned invalid genesis hash: %w", err)
+	}
+	return hash, nil
+}
+
+type genesisHashOutput struct {
+	GenesisHash string `json:"genesis_hash"`
 }
 
 // getBankHash fetches the bank hash for a slot. Mithril's getBankHash REQUIRES a
@@ -565,6 +629,21 @@ func registerRPCTools(server *mcpsdk.Server, cfg Config) {
 			return nil, bankHashOutput{}, fmt.Errorf("RPC getBankHash via %s failed: %w", safeRPCURL, err)
 		}
 		return nil, bankHashOutput{Slot: in.Slot, BankHash: hash}, nil
+	})
+
+	addTool(server, cfg, &mcpsdk.Tool{
+		Name:        "mithril_get_genesis_hash",
+		Annotations: annReadOnlyNetwork,
+		Description: "Read Mithril's configured genesis hash. Use it to bind node evidence to the expected cluster; it remains available when health-gated RPC methods refuse.",
+	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, _ rpcEmptyInput) (*mcpsdk.CallToolResult, genesisHashOutput, error) {
+		if clientErr != nil {
+			return nil, genesisHashOutput{}, fmt.Errorf("RPC client init for %s failed: %w", safeRPCURL, clientErr)
+		}
+		hash, err := client.getGenesisHash(ctx)
+		if err != nil {
+			return nil, genesisHashOutput{}, fmt.Errorf("RPC getGenesisHash via %s failed: %w", safeRPCURL, err)
+		}
+		return nil, genesisHashOutput{GenesisHash: hash}, nil
 	})
 
 	addTool(server, cfg, &mcpsdk.Tool{
