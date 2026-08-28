@@ -514,14 +514,41 @@ groups:
           histogram_quantile(
             0.99,
             sum by(deployment_id, le) (rate(mithril_replay_slot_duration_seconds_bucket[10m]))
-          ) > 0.4
+          )
+            > on(deployment_id)
+              mithril_effective_slot_duration_seconds
           and on(deployment_id)
           sum by(deployment_id) (increase(mithril_replay_slot_duration_seconds_count[10m])) >= 20
+          and on(deployment_id)
+          changes(mithril_effective_slot_duration_seconds[10m]) == 0
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Replay p99 exceeds 400 milliseconds"
+          summary: "Replay p99 exceeds the effective slot duration"
+
+      - alert: MithrilEffectiveSlotDurationInvalid
+        expr: >-
+          (
+            (count by(deployment_id) (mithril_effective_slot_duration_seconds) != 1)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+          or (
+            count by(deployment_id) (
+              (mithril_effective_slot_duration_seconds != mithril_effective_slot_duration_seconds)
+              or (mithril_effective_slot_duration_seconds <= 0)
+              or (mithril_effective_slot_duration_seconds > 0.4)
+            ) > 0
+          )
+          or (
+            (max by(deployment_id) (up{job="mithril-node"} == 1) unless on(deployment_id) mithril_effective_slot_duration_seconds)
+            and on(deployment_id) (mithril_monitoring_schema_ready == 1)
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The effective slot-duration metric is missing or invalid"
 
       - alert: MithrilNodeRestartLoop
         expr: changes(process_start_time_seconds{job="mithril-node"}[15m]) > 2
