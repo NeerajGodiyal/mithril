@@ -842,22 +842,22 @@ groups:
       - alert: MithrilFinalityMetricsInvalid
         expr: >-
           (
-            (count by(deployment_id) (mithril_finality_slot) != 4)
+            (count by(deployment_id) (mithril_finality_source_slot) != 4)
             and on(deployment_id) (mithril_monitoring_schema_ready == 1)
           )
-          or (count by(deployment_id, source) (mithril_finality_slot) != 1)
-          or (count by(deployment_id) (mithril_finality_slot{source!~"certificate|delegated|mixed|classic"}) > 0)
+          or (count by(deployment_id, source) (mithril_finality_source_slot) != 1)
+          or (count by(deployment_id) (mithril_finality_source_slot{source!~"certificate|delegated|mixed|classic"}) > 0)
           or (
             count by(deployment_id) (
-              (mithril_finality_slot != mithril_finality_slot)
-              or (mithril_finality_slot < 0)
-              or (mithril_finality_slot > 9007199254740991)
-              or (mithril_finality_slot != floor(mithril_finality_slot))
+              (mithril_finality_source_slot != mithril_finality_source_slot)
+              or (mithril_finality_source_slot < 0)
+              or (mithril_finality_source_slot > 9007199254740991)
+              or (mithril_finality_source_slot != floor(mithril_finality_source_slot))
             ) > 0
           )
-          or (count by(deployment_id) (mithril_finality_slot > 0) > 1)
+          or (count by(deployment_id) (mithril_finality_source_slot > 0) > 1)
           or (
-            (max by(deployment_id) (up{job="mithril-node"} == 1) unless on(deployment_id) mithril_finality_slot)
+            (max by(deployment_id) (up{job="mithril-node"} == 1) unless on(deployment_id) mithril_finality_source_slot)
             and on(deployment_id) (mithril_monitoring_schema_ready == 1)
           )
         for: 1m
@@ -872,7 +872,7 @@ groups:
           or
           (
             delta(
-              (max by(deployment_id) (mithril_finality_slot))[1m:15s]
+              (max by(deployment_id) (mithril_finality_source_slot))[1m:15s]
             ) < 0
           )
         labels:

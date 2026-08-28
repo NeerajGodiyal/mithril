@@ -9,7 +9,7 @@ is unsafe, and Alertmanager keeps the alert record while delivery is retried.
 | File | Purpose |
 |---|---|
 | `prometheus.yml` | Scrape discovery, rule loading, and Alertmanager discovery |
-| `rules/mithril.yml` | 51 alert rules across node, monitor, host, and delivery signals |
+| `rules/mithril.yml` | Alert rules across node, monitor, host, and delivery signals |
 | `tests/mithril_alerts_test.yml` | A direct firing test for every alert, plus critical recovery cases |
 | `inventory.example.json` | Credential-free deployment inventory to copy before signing |
 | `blackbox.yml` | Bounded Mithril JSON-RPC and TCP probes |
@@ -89,6 +89,10 @@ alerts are held while this value is `0`; malformed values and divergence remain
 alertable. A missing, duplicate, non-boolean, or six-hour-old zero readiness
 value is itself a critical alert. This metric describes schema initialization,
 not node health.
+
+The node keeps `mithril_finality_slot` as one unlabeled scalar for existing
+queries. Source-aware rules use `mithril_finality_source_slot{source=...}` for
+the fixed `certificate`, `delegated`, `mixed`, and `classic` breakdown.
 
 Run node_exporter with:
 

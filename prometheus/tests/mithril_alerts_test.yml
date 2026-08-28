@@ -1249,7 +1249,7 @@ tests:
         values: '2+0x12'
       - series: 'mithril_verification_state{state="diverged",deployment_id="d1"}'
         values: '1+0x12'
-      - series: 'mithril_finality_slot{source="certificate",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="certificate",deployment_id="d1"}'
         values: '-1+0x12'
     alert_rule_test:
       - eval_time: 2m
@@ -1595,13 +1595,13 @@ tests:
         values: '0+0x12'
       - series: 'mithril_verification_state{state="unavailable",deployment_id="d1"}'
         values: '0+0x12'
-      - series: 'mithril_finality_slot{source="certificate",replica="a",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="certificate",replica="a",deployment_id="d1"}'
         values: '100+0x12'
-      - series: 'mithril_finality_slot{source="certificate",replica="b",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="certificate",replica="b",deployment_id="d1"}'
         values: '0+0x12'
-      - series: 'mithril_finality_slot{source="delegated",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="delegated",deployment_id="d1"}'
         values: '0+0x12'
-      - series: 'mithril_finality_slot{source="mixed",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="mixed",deployment_id="d1"}'
         values: '0+0x12'
       - series: 'mithril_notifier_last_attempt_timestamp_seconds{channel="telegram",replica="a",deployment_id="d1"}'
         values: '0+0x12'
@@ -1787,11 +1787,11 @@ tests:
         values: '100+0x44 90+0x16'
       - series: 'mithril_replay_slot{deployment_id="d1"}'
         values: '100+1x60'
-      - series: 'mithril_finality_slot{source="certificate",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="certificate",deployment_id="d1"}'
         values: '100+0x60'
-      - series: 'mithril_finality_slot{source="delegated",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="delegated",deployment_id="d1"}'
         values: '0+0x60'
-      - series: 'mithril_finality_slot{source="mixed",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="mixed",deployment_id="d1"}'
         values: '0+0x60'
       - series: 'mithril_monitoring_schema_ready{deployment_id="d1"}'
         values: '1+0x60'
@@ -1824,13 +1824,13 @@ tests:
   - name: finality slots reject non-finite fractional negative and oversized values
     interval: 15s
     input_series:
-      - series: 'mithril_finality_slot{source="certificate",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="certificate",deployment_id="d1"}'
         values: 'NaN+0x12'
-      - series: 'mithril_finality_slot{source="delegated",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="delegated",deployment_id="d1"}'
         values: '+Inf+0x12'
-      - series: 'mithril_finality_slot{source="mixed",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="mixed",deployment_id="d1"}'
         values: '1.5+0x12'
-      - series: 'mithril_finality_slot{source="classic",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="classic",deployment_id="d1"}'
         values: '9007199254740992+0x12'
     alert_rule_test:
       - eval_time: 2m
@@ -1845,13 +1845,13 @@ tests:
   - name: finality source transition clears safely and aggregate regression fires
     interval: 15s
     input_series:
-      - series: 'mithril_finality_slot{source="certificate",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="certificate",deployment_id="d1"}'
         values: '100+0x6 0+0x10'
-      - series: 'mithril_finality_slot{source="delegated",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="delegated",deployment_id="d1"}'
         values: '0+0x6 110+0x10'
-      - series: 'mithril_finality_slot{source="mixed",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="mixed",deployment_id="d1"}'
         values: '0+0x16'
-      - series: 'mithril_finality_slot{source="classic",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="classic",deployment_id="d1"}'
         values: '0+0x16'
     alert_rule_test:
       - eval_time: 2m
@@ -1861,13 +1861,13 @@ tests:
   - name: aggregate finality watermark regression fires
     interval: 15s
     input_series:
-      - series: 'mithril_finality_slot{source="certificate",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="certificate",deployment_id="d1"}'
         values: '0+0x16'
-      - series: 'mithril_finality_slot{source="delegated",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="delegated",deployment_id="d1"}'
         values: '110+0x6 90+0x10'
-      - series: 'mithril_finality_slot{source="mixed",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="mixed",deployment_id="d1"}'
         values: '0+0x16'
-      - series: 'mithril_finality_slot{source="classic",deployment_id="d1"}'
+      - series: 'mithril_finality_source_slot{source="classic",deployment_id="d1"}'
         values: '0+0x16'
     alert_rule_test:
       - eval_time: 2m
