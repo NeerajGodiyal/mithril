@@ -1082,7 +1082,7 @@ groups:
         annotations:
           summary: "A recent notification attempt has no recent success"
 
-      - alert: MithrilNotificationFallbackNotConfigured
+      - alert: MithrilNotificationFallbackCanaryNotConfigured
         expr: >-
           (
             label_replace(
@@ -1109,7 +1109,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "The required SES fallback is not configured or its policy is invalid"
+          summary: "The required independent SES fallback canary is not configured or its policy is invalid"
 
       - alert: MithrilNotificationProbeUnhealthy
         expr: >-
@@ -1117,6 +1117,10 @@ groups:
           or (count by(deployment_id, route) (mithril_notification_route_configured) != 1)
           or (count by(deployment_id) (mithril_notification_route_configured{route!~"primary_telegram|secondary_ses"}) > 0)
           or (count by(deployment_id) ((mithril_notification_route_configured != 0) and (mithril_notification_route_configured != 1)) > 0)
+          or (count by(deployment_id) (mithril_notification_probe_enabled) != 2)
+          or (count by(deployment_id, route) (mithril_notification_probe_enabled) != 1)
+          or (count by(deployment_id) (mithril_notification_probe_enabled{route!~"primary_telegram|secondary_ses"}) > 0)
+          or (count by(deployment_id) ((mithril_notification_probe_enabled != 0) and (mithril_notification_probe_enabled != 1)) > 0)
           or (count by(deployment_id) (mithril_notification_probe_attempts_total) != 2)
           or (count by(deployment_id, route) (mithril_notification_probe_attempts_total) != 1)
           or (count by(deployment_id) (mithril_notification_probe_attempts_total{route!~"primary_telegram|secondary_ses"}) > 0)
@@ -1132,6 +1136,8 @@ groups:
             increase(mithril_notification_probe_failures_total[10m]) > 0
             and on(deployment_id, route)
             (mithril_notification_route_configured == 1)
+            and on(deployment_id, route)
+            (mithril_notification_probe_enabled == 1)
           )
           or (count by(deployment_id) (mithril_notification_probe_success) != 2)
           or (count by(deployment_id, route) (mithril_notification_probe_success) != 1)
@@ -1148,8 +1154,12 @@ groups:
             (mithril_notification_probe_success != 1)
             and on(deployment_id, route)
             (mithril_notification_route_configured == 1)
+            and on(deployment_id, route)
+            (mithril_notification_probe_enabled == 1)
           )
           or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_route_configured)
+          or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_probe_enabled{route="primary_telegram"})
+          or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_probe_enabled{route="secondary_ses"})
           or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_probe_attempts_total)
           or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_probe_failures_total)
           or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_probe_success{route="primary_telegram"})
@@ -1169,6 +1179,8 @@ groups:
             time() - mithril_notification_probe_last_success_timestamp_seconds > 7200
             and on(deployment_id, route)
             (mithril_notification_route_configured == 1)
+            and on(deployment_id, route)
+            (mithril_notification_probe_enabled == 1)
           )
           or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_probe_last_success_timestamp_seconds{route="primary_telegram"})
           or (max by(deployment_id) (up{job="mithril-notifier"} == 1) unless on(deployment_id) mithril_notification_probe_last_success_timestamp_seconds{route="secondary_ses"})

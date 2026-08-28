@@ -59,6 +59,7 @@ func main() {
 	registry := prometheus.NewRegistry()
 	metrics := notifier.NewMetrics(registry)
 	metrics.SetSESConfigured(cfg.SESConfigured())
+	metrics.SetProbesEnabled(!cfg.ProbeDisabled(), cfg.SESConfigured())
 	handler := notifier.New(cfg, metrics)
 
 	var sesProbe *notifier.SESProbe

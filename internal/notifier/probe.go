@@ -84,8 +84,7 @@ func (p *SESProbe) Run(ctx context.Context) {
 	// time.NewTicker panics on a non-positive interval, and this runs in a
 	// goroutine where a panic is unrecoverable and takes the whole notifier
 	// with it — turning "probing is off" into "no alert is ever delivered".
-	// The caller is fixed too; this is here because no probe interval is worth
-	// the alert path.
+	// Guard here too because probes can be run outside the command startup path.
 	if p.Interval <= 0 {
 		return
 	}
@@ -169,11 +168,8 @@ func (p *TelegramProbe) checkRoutes(ctx context.Context) error {
 // Run probes until ctx is cancelled. Each canary carries a distinct
 // fingerprint so it never collides with a real alert's dedup entry.
 func (p *TelegramProbe) Run(ctx context.Context) {
-	// Same guard as SESProbe.Run, for the same reason: NewTicker panics on a
-	// non-positive interval, in a goroutine, unrecovered — and the disabled
-	// interval is zero. Its caller checks ProbeDisabled today, so this is not
-	// currently reachable; it is here because the SES one was not reachable
-	// either until a second caller forgot.
+	// Same guard as SESProbe.Run: the disabled interval is zero and NewTicker
+	// panics on a non-positive interval.
 	if p.Interval <= 0 {
 		return
 	}

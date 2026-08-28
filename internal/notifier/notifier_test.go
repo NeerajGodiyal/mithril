@@ -312,6 +312,54 @@ func TestDeliverSuppressesResolvedEvents(t *testing.T) {
 	}
 }
 
+func TestDeliverGroupDeduplicatesIdenticalKeysBeforeReserve(t *testing.T) {
+	srv, fake := newFakeTelegram(t)
+	reg := prometheus.NewRegistry()
+	tg := NewTelegram(testConfig(srv.URL, 111), NewMetrics(reg))
+	alert := firingAlert("duplicate-in-group")
+
+	if err := tg.DeliverGroup(t.Context(), []Alert{alert, alert}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(fake.sentTo()); got != 1 {
+		t.Fatalf("identical group keys produced %d sends, want 1", got)
+	}
+	if got := counterValue(t, reg, "mithril_notifier_delivered_total", "channel", ChannelTelegram); got != 1 {
+		t.Fatalf("identical group keys counted %v deliveries, want 1", got)
+	}
+}
+
+func TestReserveFailureCountsOnlyAffectedKeys(t *testing.T) {
+	srv, fake := newFakeTelegram(t)
+	reg := prometheus.NewRegistry()
+	tg := NewTelegram(testConfig(srv.URL, 111), NewMetrics(reg))
+	tg.maxDedupEntries = 1
+	busy := firingAlert("busy")
+	tg.deliveries[deliveryKey{
+		fingerprint: busy.Fingerprint,
+		startsAt:    busy.StartsAt,
+		status:      busy.Status,
+		chatID:      111,
+	}] = &deliveryEntry{inFlight: make(chan struct{})}
+	alert := firingAlert("overloaded")
+
+	if err := tg.DeliverGroup(t.Context(), []Alert{alert, alert}); err == nil {
+		t.Fatal("deduplication capacity failure reported success")
+	}
+	if got := len(fake.sentTo()); got != 0 {
+		t.Fatalf("capacity failure produced %d sends", got)
+	}
+	if got := counterValue(t, reg, "mithril_notifier_failed_total", "channel", ChannelTelegram); got != 1 {
+		t.Fatalf("failed reservations = %v, want 1", got)
+	}
+	if got := counterValueWithLabels(t, reg, "mithril_notifier_delivery_failures_total", map[string]string{
+		"channel": ChannelTelegram,
+		"reason":  FailureOverloaded,
+	}); got != 1 {
+		t.Fatalf("overloaded reservations = %v, want 1", got)
+	}
+}
+
 func TestPartialFailureRetriesOnlyFailedChats(t *testing.T) {
 	srv, fake := newFakeTelegram(t)
 	fake.failFor[222] = true
@@ -339,6 +387,54 @@ func TestPartialFailureRetriesOnlyFailedChats(t *testing.T) {
 	retried := fake.sentTo()
 	if len(retried) != 1 || retried[0] != 222 {
 		t.Fatalf("retry contacted %v, want only the failed chat 222", retried)
+	}
+}
+
+func TestSlowChatDoesNotStarveLaterAllowlistedChats(t *testing.T) {
+	firstEntered := make(chan struct{})
+	laterEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ChatID int64 `json:"chat_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch body.ChatID {
+		case 111:
+			close(firstEntered)
+			select {
+			case <-releaseFirst:
+			case <-r.Context().Done():
+				return
+			}
+		case 222:
+			close(laterEntered)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	t.Cleanup(srv.Close)
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(releaseFirst) }) })
+
+	tg := NewTelegram(testConfig(srv.URL, 111, 222), NewMetrics(prometheus.NewRegistry()))
+	done := make(chan error, 1)
+	go func() { done <- tg.Deliver(t.Context(), firingAlert("parallel-chats")) }()
+	select {
+	case <-firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first chat was not attempted")
+	}
+	select {
+	case <-laterEntered:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("later chat was starved by the slow first chat")
+	}
+	release.Do(func() { close(releaseFirst) })
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1905,6 +2001,39 @@ func TestRouteConfiguredMetricIsBounded(t *testing.T) {
 	); got != 0 {
 		t.Fatalf("cleared SES configured = %v, want 0", got)
 	}
+	for _, route := range allRoutes {
+		if got := gaugeValue(t, reg, "mithril_notification_probe_enabled", "route", route); got != 0 {
+			t.Fatalf("initial %s probe enabled = %v, want 0", route, got)
+		}
+	}
+	metrics.SetProbesEnabled(true, false)
+	if got := gaugeValue(
+		t, reg, "mithril_notification_probe_enabled", "route", RouteTelegram,
+	); got != 1 {
+		t.Fatalf("Telegram probe enabled = %v, want 1", got)
+	}
+	if got := gaugeValue(
+		t, reg, "mithril_notification_probe_enabled", "route", RouteSES,
+	); got != 0 {
+		t.Fatalf("SES probe enabled without configuration = %v, want 0", got)
+	}
+	metrics.SetProbesEnabled(true, true)
+	if got := gaugeValue(
+		t, reg, "mithril_notification_probe_enabled", "route", RouteTelegram,
+	); got != 1 {
+		t.Fatalf("enabled Telegram probe = %v, want 1", got)
+	}
+	if got := gaugeValue(
+		t, reg, "mithril_notification_probe_enabled", "route", RouteSES,
+	); got != 1 {
+		t.Fatalf("enabled SES probe = %v, want 1", got)
+	}
+	metrics.SetProbesEnabled(false, true)
+	for _, route := range allRoutes {
+		if got := gaugeValue(t, reg, "mithril_notification_probe_enabled", "route", route); got != 0 {
+			t.Fatalf("disabled %s probe = %v, want 0", route, got)
+		}
+	}
 }
 
 func TestRouteProbeMetricsRecordSuccessAndFailure(t *testing.T) {
@@ -2408,17 +2537,8 @@ func TestProbeIntervalValidationBounds(t *testing.T) {
 	}
 }
 
-// probe_interval_seconds = -1 is an accepted value meaning "off", and it makes
-// ProbeInterval() zero. time.NewTicker(0) panics, in a goroutine, unrecovered —
-// so disabling a liveness probe took down the entire notifier and with it every
-// alert.
-//
-// The panic is RECOVERED here rather than left to abort the process. An earlier
-// version of this test relied on the crash to fail it, and passed under the
-// mutation that removes the guard: `defer close(done)` runs while the panic is
-// still unwinding, so the test completed and the binary could exit before the
-// panic killed it. A test whose failure depends on losing that race is not a
-// test.
+// A disabled interval is zero, so each Run method must return before calling
+// time.NewTicker. Recover the panic here so the test observes it deterministically.
 func TestProbesSurviveTheDisabledInterval(t *testing.T) {
 	for name, run := range map[string]func(context.Context){
 		"ses":      (&SESProbe{Interval: 0}).Run,

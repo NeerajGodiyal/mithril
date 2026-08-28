@@ -76,8 +76,8 @@ func (c Config) SendTimeout() time.Duration {
 }
 
 // ProbeInterval returns the interval between delivery-route checks. A negative
-// value disables route probing entirely; probe health then stops being
-// observable, so it is opt-in rather than the default.
+// value disables route probing entirely; the probe-enabled metric distinguishes
+// that policy from an unhealthy probe.
 func (c Config) ProbeInterval() time.Duration {
 	if c.ProbeIntervalSec < 0 {
 		return 0

@@ -132,7 +132,7 @@ func telegramAlerts(alerts []Alert) []Alert {
 // lifecycle-event alert (restarted, action completed, action submitted, price
 // target reached) is already informational, so this one rule covers them: they
 // confirm something the operator deliberately did and are retrievable on
-// demand instead. They remain visible in Alertmanager and in the metrics.
+// demand instead. They remain visible in Alertmanager.
 //
 // A resolved lifecycle event is dropped separately, because the firing message
 // already told the operator what happened.
@@ -162,89 +162,113 @@ func (t *Telegram) deliver(
 	recordAlertMetrics bool,
 	silent bool,
 ) error {
-	var failed []int64
-	var lastErr error
-
+	// Config validation caps this list at maxAllowedChatIDs, so one goroutine
+	// per destination is bounded while preventing a slow chat from consuming
+	// the webhook deadline before later chats are attempted.
+	results := make(chan error, len(t.cfg.AllowedChatIDs))
 	for _, chatID := range t.cfg.AllowedChatIDs {
-		type reservation struct {
-			key   deliveryKey
-			entry *deliveryEntry
-			alert Alert
-		}
-		reservations := make([]reservation, 0, len(alerts))
-		var reserveErr error
-		for _, alert := range alerts {
-			key := deliveryKey{
-				fingerprint: alert.Fingerprint,
-				startsAt:    alert.StartsAt,
-				status:      alert.Status,
-				chatID:      chatID,
-			}
-			entry, reserved, err := t.reserve(ctx, key)
-			if err != nil {
-				reserveErr = err
-				break
-			}
-			if reserved {
-				reservations = append(reservations, reservation{key: key, entry: entry, alert: alert})
-			}
-		}
-		if reserveErr != nil {
-			for _, reserved := range reservations {
-				t.finish(reserved.key, reserved.entry, false)
-			}
-			if recordAlertMetrics {
-				t.metrics.Failed.WithLabelValues(ChannelTelegram).Add(float64(len(alerts)))
-				t.metrics.DeliveryFailures.WithLabelValues(
-					ChannelTelegram,
-					telegramFailureReason(reserveErr),
-				).Add(float64(len(alerts)))
-			}
-			failed = append(failed, chatID)
-			lastErr = reserveErr
-			continue
-		}
-		if len(reservations) == 0 {
-			continue
-		}
-
-		if recordAlertMetrics {
-			t.metrics.LastAttemptAt.WithLabelValues(ChannelTelegram).Set(float64(t.now().Unix()))
-		}
-		pending := make([]Alert, len(reservations))
-		for i := range reservations {
-			pending[i] = reservations[i].alert
-		}
-		if err := t.send(ctx, chatID, groupedMessage(pending), silent); err != nil {
-			for _, reserved := range reservations {
-				t.finish(reserved.key, reserved.entry, false)
-			}
-			if recordAlertMetrics {
-				t.metrics.Failed.WithLabelValues(ChannelTelegram).Add(float64(len(reservations)))
-				t.metrics.DeliveryFailures.WithLabelValues(
-					ChannelTelegram,
-					telegramFailureReason(err),
-				).Add(float64(len(reservations)))
-			}
-			failed = append(failed, chatID)
-			lastErr = err
-			continue
-		}
-
-		for _, reserved := range reservations {
-			t.finish(reserved.key, reserved.entry, true)
-		}
-		if recordAlertMetrics {
-			t.metrics.Delivered.WithLabelValues(ChannelTelegram).Add(float64(len(reservations)))
-			t.metrics.LastSuccessAt.WithLabelValues(ChannelTelegram).Set(float64(t.now().Unix()))
-		}
+		go func() {
+			results <- t.deliverToChat(ctx, chatID, alerts, recordAlertMetrics, silent)
+		}()
 	}
 
-	if len(failed) > 0 {
+	failed := 0
+	var lastErr error
+	for range t.cfg.AllowedChatIDs {
+		if err := <-results; err != nil {
+			failed++
+			lastErr = err
+		}
+	}
+	if failed > 0 {
 		// The count is reported, never the chat IDs: those are private
 		// destinations and this error may be logged.
 		return fmt.Errorf("telegram delivery failed for %d of %d chats: %w",
-			len(failed), len(t.cfg.AllowedChatIDs), lastErr)
+			failed, len(t.cfg.AllowedChatIDs), lastErr)
+	}
+	return nil
+}
+
+func (t *Telegram) deliverToChat(
+	ctx context.Context,
+	chatID int64,
+	alerts []Alert,
+	recordAlertMetrics bool,
+	silent bool,
+) error {
+	type reservation struct {
+		key   deliveryKey
+		entry *deliveryEntry
+		alert Alert
+	}
+	reservations := make([]reservation, 0, len(alerts))
+	seen := make(map[deliveryKey]struct{}, len(alerts))
+	var reserveErr error
+	for _, alert := range alerts {
+		key := deliveryKey{
+			fingerprint: alert.Fingerprint,
+			startsAt:    alert.StartsAt,
+			status:      alert.Status,
+			chatID:      chatID,
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		entry, reserved, err := t.reserve(ctx, key)
+		if err != nil {
+			reserveErr = err
+			break
+		}
+		if reserved {
+			reservations = append(reservations, reservation{key: key, entry: entry, alert: alert})
+		}
+	}
+	if reserveErr != nil {
+		for _, reserved := range reservations {
+			t.finish(reserved.key, reserved.entry, false)
+		}
+		if recordAlertMetrics {
+			failedReservations := float64(len(reservations) + 1)
+			t.metrics.Failed.WithLabelValues(ChannelTelegram).Add(failedReservations)
+			t.metrics.DeliveryFailures.WithLabelValues(
+				ChannelTelegram,
+				telegramFailureReason(reserveErr),
+			).Add(failedReservations)
+		}
+		return reserveErr
+	}
+	if len(reservations) == 0 {
+		return nil
+	}
+
+	if recordAlertMetrics {
+		t.metrics.LastAttemptAt.WithLabelValues(ChannelTelegram).Set(float64(t.now().Unix()))
+	}
+	pending := make([]Alert, len(reservations))
+	for i := range reservations {
+		pending[i] = reservations[i].alert
+	}
+	if err := t.send(ctx, chatID, groupedMessage(pending), silent); err != nil {
+		for _, reserved := range reservations {
+			t.finish(reserved.key, reserved.entry, false)
+		}
+		if recordAlertMetrics {
+			t.metrics.Failed.WithLabelValues(ChannelTelegram).Add(float64(len(reservations)))
+			t.metrics.DeliveryFailures.WithLabelValues(
+				ChannelTelegram,
+				telegramFailureReason(err),
+			).Add(float64(len(reservations)))
+		}
+		return err
+	}
+
+	for _, reserved := range reservations {
+		t.finish(reserved.key, reserved.entry, true)
+	}
+	if recordAlertMetrics {
+		t.metrics.Delivered.WithLabelValues(ChannelTelegram).Add(float64(len(reservations)))
+		t.metrics.LastSuccessAt.WithLabelValues(ChannelTelegram).Set(float64(t.now().Unix()))
 	}
 	return nil
 }

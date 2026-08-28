@@ -18,7 +18,7 @@ route:
       continue: false
 
     - matchers: [severity="info"]
-      receiver: telegram-info
+      receiver: informational-discard
       continue: false
 
     - matchers: [severity="critical"]
@@ -42,19 +42,8 @@ receivers:
             server_name: mithril-notifier
             min_version: TLS12
 
-  - name: telegram-info
-    webhook_configs:
-      - url: https://localhost:9094/notify
-        send_resolved: false
-        timeout: 35s
-        http_config:
-          follow_redirects: false
-          tls_config:
-            ca_file: /etc/alertmanager/tls/notifier-server-ca.pem
-            cert_file: /etc/alertmanager/tls/alertmanager-client.pem
-            key_file: /etc/alertmanager/tls/alertmanager-client-key.pem
-            server_name: mithril-notifier
-            min_version: TLS12
+  # Informational state remains in Alertmanager without paging a chat or email.
+  - name: informational-discard
 
   - name: email-fallback
     email_configs:

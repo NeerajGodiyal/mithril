@@ -43,6 +43,7 @@ type Metrics struct {
 	Rejected           *prometheus.CounterVec
 	DedupEvictions     prometheus.Counter
 	RouteConfigured    *prometheus.GaugeVec
+	ProbeEnabled       *prometheus.GaugeVec
 	ProbeAttempts      *prometheus.CounterVec
 	ProbeFailures      *prometheus.CounterVec
 	ProbeSuccess       *prometheus.GaugeVec
@@ -85,7 +86,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		}),
 		RouteConfigured: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "mithril_notification_route_configured",
-			Help: "1 when this bounded notification route is configured, 0 otherwise.",
+			Help: "1 when the notifier has complete configuration for this bounded canary route, 0 otherwise.",
+		}, []string{"route"}),
+		ProbeEnabled: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "mithril_notification_probe_enabled",
+			Help: "1 when synthetic checks are enabled for this bounded canary route, 0 otherwise.",
 		}, []string{"route"}),
 		ProbeAttempts: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mithril_notification_probe_attempts_total",
@@ -107,7 +112,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	}
 	for _, c := range []prometheus.Collector{
 		m.LastAttemptAt, m.LastSuccessAt, m.Delivered, m.Failed, m.DeliveryFailures, m.Rejected,
-		m.DedupEvictions, m.RouteConfigured, m.ProbeAttempts, m.ProbeFailures,
+		m.DedupEvictions, m.RouteConfigured, m.ProbeEnabled, m.ProbeAttempts, m.ProbeFailures,
 		m.ProbeSuccess, m.ProbeLastSuccessAt,
 	} {
 		reg.MustRegister(c)
@@ -126,6 +131,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	}
 	for _, route := range allRoutes {
 		m.RouteConfigured.WithLabelValues(route).Set(0)
+		m.ProbeEnabled.WithLabelValues(route).Set(0)
 		m.ProbeAttempts.WithLabelValues(route).Add(0)
 		m.ProbeFailures.WithLabelValues(route).Add(0)
 		m.ProbeSuccess.WithLabelValues(route).Set(0)
@@ -133,6 +139,22 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	}
 	m.RouteConfigured.WithLabelValues(RouteTelegram).Set(1)
 	return m
+}
+
+// SetProbesEnabled records the complete bounded probe policy without accepting
+// a caller-controlled route label. SES is enabled only when its canary is
+// configured and probing is enabled globally.
+func (m *Metrics) SetProbesEnabled(enabled, sesConfigured bool) {
+	telegramValue := 0.0
+	if enabled {
+		telegramValue = 1
+	}
+	sesValue := 0.0
+	if enabled && sesConfigured {
+		sesValue = 1
+	}
+	m.ProbeEnabled.WithLabelValues(RouteTelegram).Set(telegramValue)
+	m.ProbeEnabled.WithLabelValues(RouteSES).Set(sesValue)
 }
 
 // SetSESConfigured records whether the complete optional SES canary route is

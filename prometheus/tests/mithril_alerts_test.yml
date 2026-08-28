@@ -2078,6 +2078,10 @@ tests:
         values: '1+0x600'
       - series: 'mithril_notification_route_configured{route="secondary_ses",deployment_id="d1"}'
         values: '1+0x600'
+      - series: 'mithril_notification_probe_enabled{route="primary_telegram",deployment_id="d1"}'
+        values: '1+0x600'
+      - series: 'mithril_notification_probe_enabled{route="secondary_ses",deployment_id="d1"}'
+        values: '1+0x600'
       - series: 'mithril_notification_probe_attempts_total{route="primary_telegram",deployment_id="d1"}'
         values: '1+0x60'
       - series: 'mithril_notification_probe_attempts_total{route="secondary_ses",deployment_id="d1"}'
@@ -2132,6 +2136,10 @@ tests:
         values: '1+0x24'
       - series: 'mithril_notification_route_configured{route="secondary_ses",deployment_id="future"}'
         values: '1+0x24'
+      - series: 'mithril_notification_probe_enabled{route="primary_telegram",deployment_id="future"}'
+        values: '1+0x24'
+      - series: 'mithril_notification_probe_enabled{route="secondary_ses",deployment_id="future"}'
+        values: '1+0x24'
       - series: 'mithril_notification_probe_attempts_total{route="primary_telegram",deployment_id="future"}'
         values: '1+0x24'
       - series: 'mithril_notification_probe_attempts_total{route="secondary_ses",deployment_id="future"}'
@@ -2175,20 +2183,20 @@ tests:
         values: '1+0x12'
     alert_rule_test:
       - eval_time: 2m
-        alertname: MithrilNotificationFallbackNotConfigured
+        alertname: MithrilNotificationFallbackCanaryNotConfigured
         exp_alerts:
           - exp_labels:
               deployment_id: required
               route: secondary_ses
               severity: critical
             exp_annotations:
-              summary: "The required SES fallback is not configured or its policy is invalid"
+              summary: "The required independent SES fallback canary is not configured or its policy is invalid"
           - exp_labels:
               deployment_id: invalid
               route: secondary_ses
               severity: critical
             exp_annotations:
-              summary: "The required SES fallback is not configured or its policy is invalid"
+              summary: "The required independent SES fallback canary is not configured or its policy is invalid"
 
   - name: unconfigured optional SES does not create probe alarms
     interval: 15s
@@ -2196,6 +2204,10 @@ tests:
       - series: 'mithril_notification_route_configured{route="primary_telegram",deployment_id="d1"}'
         values: '1+0x600'
       - series: 'mithril_notification_route_configured{route="secondary_ses",deployment_id="d1"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_enabled{route="primary_telegram",deployment_id="d1"}'
+        values: '1+0x600'
+      - series: 'mithril_notification_probe_enabled{route="secondary_ses",deployment_id="d1"}'
         values: '0+0x600'
       - series: 'mithril_notification_probe_attempts_total{route="primary_telegram",deployment_id="d1"}'
         values: '1+0x600'
@@ -2212,6 +2224,43 @@ tests:
       - series: 'mithril_notification_probe_last_success_timestamp_seconds{route="primary_telegram",deployment_id="d1"}'
         values: '0+15x600'
       - series: 'mithril_notification_probe_last_success_timestamp_seconds{route="secondary_ses",deployment_id="d1"}'
+        values: '0+0x600'
+    alert_rule_test:
+      - eval_time: 2h10m
+        alertname: MithrilNotificationProbeUnhealthy
+        exp_alerts: []
+      - eval_time: 2h10m
+        alertname: MithrilNotificationProbeStale
+        exp_alerts: []
+
+  - name: explicitly disabled probes do not create probe alarms
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-notifier",deployment_id="disabled"}'
+        values: '1+0x600'
+      - series: 'mithril_notification_route_configured{route="primary_telegram",deployment_id="disabled"}'
+        values: '1+0x600'
+      - series: 'mithril_notification_route_configured{route="secondary_ses",deployment_id="disabled"}'
+        values: '1+0x600'
+      - series: 'mithril_notification_probe_enabled{route="primary_telegram",deployment_id="disabled"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_enabled{route="secondary_ses",deployment_id="disabled"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_attempts_total{route="primary_telegram",deployment_id="disabled"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_attempts_total{route="secondary_ses",deployment_id="disabled"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_failures_total{route="primary_telegram",deployment_id="disabled"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_failures_total{route="secondary_ses",deployment_id="disabled"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_success{route="primary_telegram",deployment_id="disabled"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_success{route="secondary_ses",deployment_id="disabled"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_last_success_timestamp_seconds{route="primary_telegram",deployment_id="disabled"}'
+        values: '0+0x600'
+      - series: 'mithril_notification_probe_last_success_timestamp_seconds{route="secondary_ses",deployment_id="disabled"}'
         values: '0+0x600'
     alert_rule_test:
       - eval_time: 2h10m
