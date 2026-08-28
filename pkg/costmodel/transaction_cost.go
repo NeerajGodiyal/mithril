@@ -39,17 +39,22 @@ func EstimateTransactionCost(tx *solana.Transaction, feats *features.Features) (
 	if err != nil {
 		return TransactionCost{}, err
 	}
-	writable, err := writableAccounts(tx, feats)
+	metas, err := tx.AccountMetaList()
 	if err != nil {
 		return TransactionCost{}, err
 	}
+	writable, err := writableAccounts(tx, metas, feats)
+	if err != nil {
+		return TransactionCost{}, err
+	}
+	writeLocks := countWriteLocks(metas)
 
 	limits, err := sealevel.ComputeBudgetForTransaction(tx, instrs, feats)
 	if err != nil {
 		// A compute-budget parse failure yields zero execution cost; the transaction will not execute.
 		return TransactionCost{
 			SignatureCost:    signatureCost(tx, feats),
-			WriteLockCost:    writeLockCost(countWriteLocks(tx)),
+			WriteLockCost:    writeLockCost(writeLocks),
 			DataBytesCost:    instructionDataCost(tx),
 			WritableAccounts: writable,
 		}, nil
@@ -61,7 +66,7 @@ func EstimateTransactionCost(tx *solana.Transaction, feats *features.Features) (
 	}
 	return TransactionCost{
 		SignatureCost:              signatureCost(tx, feats),
-		WriteLockCost:              writeLockCost(countWriteLocks(tx)),
+		WriteLockCost:              writeLockCost(writeLocks),
 		DataBytesCost:              instructionDataCost(tx),
 		ProgramsExecutionCost:      uint64(limits.ComputeUnitLimit),
 		LoadedAccountsDataSizeCost: loadedDataCost,
@@ -124,29 +129,19 @@ func LoadedAccountsDataSizeCost(bytes uint32) uint64 {
 	return loadedAccountsDataSizeCost(bytes)
 }
 
-func countWriteLocks(tx *solana.Transaction) uint64 {
-	if tx == nil {
-		return 0
+func countWriteLocks(metas []*solana.AccountMeta) uint64 {
+	var count uint64
+	for _, meta := range metas {
+		if meta.IsWritable {
+			count++
+		}
 	}
-	h := tx.Message.Header
-	signed := int(h.NumRequiredSignatures) - int(h.NumReadonlySignedAccounts)
-	unsigned := len(tx.Message.AccountKeys) - int(h.NumRequiredSignatures) - int(h.NumReadonlyUnsignedAccounts)
-	if signed < 0 {
-		signed = 0
-	}
-	if unsigned < 0 {
-		unsigned = 0
-	}
-	return uint64(signed + unsigned)
+	return count
 }
 
-func writableAccounts(tx *solana.Transaction, feats *features.Features) ([]solana.PublicKey, error) {
+func writableAccounts(tx *solana.Transaction, metas []*solana.AccountMeta, feats *features.Features) ([]solana.PublicKey, error) {
 	if tx == nil {
 		return nil, nil
-	}
-	metas, err := tx.AccountMetaList()
-	if err != nil {
-		return nil, err
 	}
 	programIDs, err := tx.GetProgramIDs()
 	if err != nil {

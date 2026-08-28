@@ -409,24 +409,16 @@ func LoadAndExecuteTransaction(input LoadAndExecuteTransactionInput) LoadAndExec
 	start = time.Now()
 	rentSysvar, err := sealevel.ReadRentSysvar(execCtx)
 	if err != nil {
-		// Rent sysvar unreadable; return cleanly so the RPC worker
-		// doesn't crash on local-state corruption.
-		return LoadAndExecuteTransactionOutput{
-			ProcessingResult: TransactionProcessingResult{
-				TransactionError: &TransactionError{
-					ErrorType:        TransactionErrorAccountNotFound,
-					InstructionError: err,
-				},
-			},
-			Instrs:                 instrs,
-			ComputeBudgetLimits:    computeBudgetLimits,
-			LoadedAccountsDataSize: transactionAccts.LoadedAccountsDataSize,
-			ExecCtx:                execCtx,
-			PreBalances:            preBalances,
-			PreAccountSnapshots:    preAccountSnapshots,
-			PostAccountSnapshots:   postFeeAccountSnapshots,
-			FeeInfo:                txFeeInfo,
+		out := LoadAndExecuteTransactionOutput{
+			LoadError:            newAccountSourceError("read rent sysvar", err),
+			ExecCtx:              execCtx,
+			PreBalances:          preBalances,
+			PreAccountSnapshots:  preAccountSnapshots,
+			PostAccountSnapshots: postFeeAccountSnapshots,
+			FeeInfo:              txFeeInfo,
 		}
+		baseFields(&out)
+		return out
 	}
 	metrics.GlobalBlockReplay.ReadRentSysvar.AddTimingSince(start)
 

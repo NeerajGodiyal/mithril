@@ -47,6 +47,43 @@ func TestEstimateTransactionCostV1ReservesOneLoadedDataPage(t *testing.T) {
 	require.Equal(t, uint64(HeapCost), cost.LoadedAccountsDataSizeCost)
 }
 
+func TestEstimateTransactionCostV0CountsResolvedWritableLookups(t *testing.T) {
+	payer := solana.PublicKey{1}
+	program := solana.PublicKey(addresses.SystemProgramAddr)
+	table := solana.PublicKey{2}
+	loadedWritable := solana.PublicKey{3}
+	loadedReadonly := solana.PublicKey{4}
+	tx := &solana.Transaction{
+		Signatures: []solana.Signature{{}},
+		Message: solana.Message{
+			Header: solana.MessageHeader{
+				NumRequiredSignatures:       1,
+				NumReadonlyUnsignedAccounts: 1,
+			},
+			AccountKeys: []solana.PublicKey{payer, program},
+			Instructions: []solana.CompiledInstruction{{
+				ProgramIDIndex: 1,
+				Accounts:       []uint16{0, 2, 3},
+			}},
+		},
+	}
+	tx.Message.SetAddressTableLookups([]solana.MessageAddressTableLookup{{
+		AccountKey:      table,
+		WritableIndexes: []uint8{0},
+		ReadonlyIndexes: []uint8{1},
+	}})
+	require.NoError(t, tx.Message.SetAddressTables(map[solana.PublicKey]solana.PublicKeySlice{
+		table: {loadedWritable, loadedReadonly},
+	}))
+	require.NoError(t, tx.Message.ResolveLookups())
+
+	cost, err := EstimateTransactionCost(tx, features.NewFeaturesDefault())
+	require.NoError(t, err)
+	require.Equal(t, uint64(2*WriteLockUnits), cost.WriteLockCost)
+	require.Contains(t, cost.WritableAccounts, loadedWritable)
+	require.NotContains(t, cost.WritableAccounts, loadedReadonly)
+}
+
 func TestSignatureCostIncludesPrecompiles(t *testing.T) {
 	tx := &solana.Transaction{
 		Signatures: []solana.Signature{{}},

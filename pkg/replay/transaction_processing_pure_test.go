@@ -9,10 +9,27 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLoadAndExecuteTransactionClassifiesUnreadableRentAsLoadError(t *testing.T) {
+	slotCtx, cleanup := newCommitTestSlotCtx()
+	defer cleanup()
+	sealevel.SysvarCache.Rent.Sysvar = nil
+
+	tx, err := solana.TransactionFromBytes(txfixture.MustSignedTransferWire(0))
+	require.NoError(t, err)
+	out := LoadAndExecuteTransaction(LoadAndExecuteTransactionInput{SlotCtx: slotCtx, Transaction: tx})
+
+	require.Error(t, out.LoadError)
+	require.ErrorIs(t, out.LoadError, sealevel.InstrErrUnsupportedSysvar)
+	var sourceErr *accountSourceError
+	require.ErrorAs(t, out.LoadError, &sourceErr)
+	require.Nil(t, out.ProcessingResult.TransactionError)
+}
 
 func computeBudgetFailureTx(instructions ...[]byte) *solana.Transaction {
 	payer := testPubkey(1)
