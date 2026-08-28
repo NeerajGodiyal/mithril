@@ -59,6 +59,7 @@ in {
         src = self;
         subPackages = [
           "cmd/mithril"
+          "cmd/mithril-monitor"
         ];
         vendorHash = "sha256-HPlXrXi+EDAag2L9YrcEi52NNallhY4II8PxfsUgfng=";
         nativeBuildInputs = [pkgs.pkg-config];
