@@ -797,7 +797,7 @@ func (r *UDPReceiver) processPacket(ctx context.Context, conn *net.UDPConn, pack
 		if errors.Is(err, ErrDuplicateShred) {
 			return true
 		}
-		if errors.Is(err, ErrConflictingShred) && r.repairClient != nil {
+		if (errors.Is(err, ErrConflictingShred) || errors.Is(err, ErrConflictingShredMetadata)) && r.repairClient != nil {
 			r.repairClient.cancelSlotRequests(shred.Slot)
 		}
 		r.assemblyErrors.Add(1)

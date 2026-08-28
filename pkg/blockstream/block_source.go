@@ -3679,8 +3679,10 @@ func (bs *BlockSource) fetchAndParseBlockSequential(slot uint64) (*b.Block, erro
 	var blk *b.Block
 
 	if bs.sourceType == BlockSourceFile {
-		blk, err = bs.tryGetBlockFromFile(slot)
-		if err != nil {
+		if !bs.finalizedOnly {
+			blk, err = bs.tryGetBlockFromFile(slot)
+		}
+		if bs.finalizedOnly || err != nil {
 			rpc := bs.getActiveRpc()
 			for {
 				// Use single-attempt fetch to avoid inner retry loop bypassing rate limits

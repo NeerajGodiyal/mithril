@@ -136,3 +136,58 @@ func TestFileBlockRejectsMismatchedTransactionVersionsWithoutDeletingInput(t *te
 		t.Fatalf("invalid input was removed: %v", err)
 	}
 }
+
+func TestSequentialFileSourceFinalizedOnlyBypassesFile(t *testing.T) {
+	type request struct {
+		Params []json.RawMessage `json:"params"`
+		ID     json.RawMessage   `json:"id"`
+	}
+	commitment := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var call request
+		if err := json.NewDecoder(r.Body).Decode(&call); err != nil {
+			t.Errorf("decode RPC request: %v", err)
+			return
+		}
+		for _, param := range call.Params {
+			var opts struct {
+				Commitment string `json:"commitment"`
+			}
+			if json.Unmarshal(param, &opts) == nil && opts.Commitment != "" {
+				commitment = opts.Commitment
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0", "id": json.RawMessage(call.ID), "result": map[string]any{
+				"blockhash":         "11111111111111111111111111111111",
+				"previousBlockhash": "11111111111111111111111111111111",
+				"parentSlot":        uint64(41),
+				"transactions":      []any{},
+				"rewards":           []any{},
+			},
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "42.json")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bs := NewBlockSource(&BlockSourceOpts{
+		RpcClient:     rpcclient.NewRpcClient(server.URL),
+		SourceType:    BlockSourceFile,
+		FinalizedOnly: true,
+		BlockDir:      dir,
+	})
+	if _, err := bs.fetchAndParseBlockSequential(42); err != nil {
+		t.Fatalf("fetch sequential block: %v", err)
+	}
+	if commitment != "finalized" {
+		t.Fatalf("getBlock commitment = %q, want finalized", commitment)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("finalized-only replay consumed unproved block file: %v", err)
+	}
+}
