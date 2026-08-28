@@ -285,6 +285,7 @@ func TestSendTransaction_SkipPreflight_FansOutToUpcomingLeaders(t *testing.T) {
 	tx, wire := testLegacyTransaction(t)
 	fetchCount := 0
 	rpcServer := &RpcServer{
+		slotCtx:                           &sealevel.SlotCtx{Features: features.NewFeaturesDefault()},
 		transactionSender:                 defaultTransactionSender,
 		clusterNodesRefreshEvery:          sendTransactionClusterNodesRefreshEvery,
 		sendTransactionLeaderForwardCount: sendTransactionLeaderForwardCount,
@@ -340,6 +341,7 @@ func TestSendTransaction_PreservesAmbiguityWhenForwardingFails(t *testing.T) {
 	receipts, err := txstatus.NewIndex(txstatus.Config{MaxReceipts: 8, Retention: time.Hour})
 	require.NoError(t, err)
 	rpcServer := &RpcServer{
+		slotCtx:                           &sealevel.SlotCtx{Features: features.NewFeaturesDefault()},
 		clusterNodesRefreshEvery:          sendTransactionClusterNodesRefreshEvery,
 		sendTransactionLeaderForwardCount: 0,
 		clusterNodesFetcher: func(context.Context) ([]*solanarpc.GetClusterNodesResult, error) {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
@@ -21,13 +20,12 @@ func TestProcessedCommitmentMethodsUseOnePublishedBank(t *testing.T) {
 	server := &RpcServer{epochSchedule: schedule}
 	blockhash := solana.Hash{9}
 	server.SetSlotCtx(&sealevel.SlotCtx{
-		Slot:        250,
-		BlockHeight: 200,
-		Epoch:       2,
-		Blockhash:   blockhash,
+		Slot:             250,
+		BlockHeight:      200,
+		Epoch:            2,
+		Blockhash:        blockhash,
+		TransactionCount: 321,
 	})
-	global.SetTransactionCount(321)
-	defer global.SetTransactionCount(0)
 
 	config := map[string]interface{}{
 		"commitment":     "processed",

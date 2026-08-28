@@ -17,74 +17,108 @@ func makeTokenAccount(t *testing.T, mint, owner solana.PublicKey, amount uint64)
 	copy(data[tokenAccountMintOffset:], mint[:])
 	copy(data[tokenAccountOwnerOffset:], owner[:])
 	binary.LittleEndian.PutUint64(data[tokenAccountAmountOffset:], amount)
+	data[tokenAccountStateOffset] = 1
 	var ownerArr [32]byte
 	copy(ownerArr[:], splTokenProgramID[:])
 	return &accounts.Account{Owner: ownerArr, Data: data}
 }
 
-func TestExtractTokenBalances_DecodesMintOwnerAmount(t *testing.T) {
-	mint := solana.MustPublicKeyFromBase58("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
-	owner := solana.MustPublicKeyFromBase58("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB")
-	tokenAcct := makeTokenAccount(t, mint, owner, 1234567)
+func makeTokenMint(programID solana.PublicKey, decimals uint8) *accounts.Account {
+	data := make([]byte, mintAccountSize)
+	data[mintDecimalsOffset] = decimals
+	data[mintInitializedOffset] = 1
+	return &accounts.Account{Owner: [32]byte(programID), Data: data}
+}
 
-	got := extractTokenBalances(
-		[]*accounts.Account{tokenAcct},
-		map[solana.PublicKey]uint8{mint: 6},
-	)
+func tokenBalanceTestTx(accountKey, programID solana.PublicKey) *solana.Transaction {
+	return &solana.Transaction{Message: solana.Message{AccountKeys: []solana.PublicKey{accountKey, programID}}}
+}
+
+func TestTokenBalancesUseCapturedBankMint(t *testing.T) {
+	mint := solana.PublicKey{7}
+	accountKey := solana.PublicKey{9}
+	tokenAcct := makeTokenAccount(t, mint, solana.PublicKey{8}, 1234567)
+	tx := tokenBalanceTestTx(accountKey, splTokenProgramID)
+	reads := 0
+
+	got := tokenBalancesForTransaction(tx, []*accounts.Account{tokenAcct, nil}, func(key solana.PublicKey) (*accounts.Account, error) {
+		reads++
+		require.Equal(t, mint, key)
+		return makeTokenMint(splTokenProgramID, 6), nil
+	})
 	require.Len(t, got, 1)
-	assert.Equal(t, mint.String(), got[0].Mint)
-	assert.Equal(t, owner.String(), got[0].Owner)
-	assert.Equal(t, splTokenProgramID.String(), got[0].ProgramId)
 	assert.Equal(t, "1234567", got[0].UiTokenAmount.Amount)
 	assert.Equal(t, uint8(6), got[0].UiTokenAmount.Decimals)
-	require.NotNil(t, got[0].UiTokenAmount.UiAmount)
-	assert.InDelta(t, 1.234567, *got[0].UiTokenAmount.UiAmount, 1e-9)
 	assert.Equal(t, "1.234567", got[0].UiTokenAmount.UiAmountString)
+	assert.Equal(t, 1, reads)
 }
 
-func TestExtractTokenBalances_SkipsNonTokenAccounts(t *testing.T) {
-	wallet := &accounts.Account{Owner: [32]byte{1, 2, 3}, Data: make([]byte, 165)}
-	got := extractTokenBalances([]*accounts.Account{wallet}, map[solana.PublicKey]uint8{})
-	assert.Empty(t, got)
+func TestTokenBalancesRequireValidInitializedMintAndAccount(t *testing.T) {
+	mint := solana.PublicKey{7}
+	accountKey := solana.PublicKey{9}
+	tokenAcct := makeTokenAccount(t, mint, solana.PublicKey{8}, 123)
+	tx := tokenBalanceTestTx(accountKey, splTokenProgramID)
+
+	assert.Empty(t, tokenBalancesForTransaction(tx, []*accounts.Account{tokenAcct, nil}, func(solana.PublicKey) (*accounts.Account, error) {
+		return nil, nil
+	}))
+	wrongOwner := makeTokenMint(splToken2022ProgramID, 6)
+	assert.Empty(t, tokenBalancesForTransaction(tx, []*accounts.Account{tokenAcct, nil}, func(solana.PublicKey) (*accounts.Account, error) {
+		return wrongOwner, nil
+	}))
+	uninitializedMint := makeTokenMint(splTokenProgramID, 6)
+	uninitializedMint.Data[mintInitializedOffset] = 0
+	assert.Empty(t, tokenBalancesForTransaction(tx, []*accounts.Account{tokenAcct, nil}, func(solana.PublicKey) (*accounts.Account, error) {
+		return uninitializedMint, nil
+	}))
+
+	badState := *tokenAcct
+	badState.Data = append([]byte(nil), tokenAcct.Data...)
+	badState.Data[tokenAccountStateOffset] = 0
+	assert.Empty(t, tokenBalancesForTransaction(tx, []*accounts.Account{&badState, nil}, func(solana.PublicKey) (*accounts.Account, error) {
+		return makeTokenMint(splTokenProgramID, 6), nil
+	}))
 }
 
-func TestExtractTokenBalances_EmptyInputReturnsEmpty(t *testing.T) {
-	got := extractTokenBalances(nil, nil)
-	assert.NotNil(t, got)
-	assert.Empty(t, got)
-}
+func TestTokenBalancesValidateToken2022Envelope(t *testing.T) {
+	mint := solana.PublicKey{7}
+	accountKey := solana.PublicKey{9}
+	tokenAcct := makeTokenAccount(t, mint, solana.PublicKey{8}, 123)
+	tokenAcct.Owner = [32]byte(splToken2022ProgramID)
+	tokenAcct.Data = append(tokenAcct.Data, token2022AccountType)
+	mintAcct := makeTokenMint(splToken2022ProgramID, 9)
+	mintAcct.Data = append(mintAcct.Data, make([]byte, token2022TypeOffset-mintAccountSize)...)
+	mintAcct.Data = append(mintAcct.Data, token2022MintType)
+	tx := tokenBalanceTestTx(accountKey, splToken2022ProgramID)
+	readMint := func(solana.PublicKey) (*accounts.Account, error) { return mintAcct, nil }
 
-func TestExtractTokenBalances_TruncatedDataIsSkipped(t *testing.T) {
-	var ownerArr [32]byte
-	copy(ownerArr[:], splTokenProgramID[:])
-	short := &accounts.Account{Owner: ownerArr, Data: make([]byte, 100)}
-	got := extractTokenBalances([]*accounts.Account{short}, nil)
-	assert.Empty(t, got)
-}
-
-func TestExtractTokenBalances_MissingDecimalsDefaultsToZero(t *testing.T) {
-	mint := solana.MustPublicKeyFromBase58("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
-	owner := solana.MustPublicKeyFromBase58("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB")
-	tokenAcct := makeTokenAccount(t, mint, owner, 42)
-
-	got := extractTokenBalances([]*accounts.Account{tokenAcct}, nil)
-	require.Len(t, got, 1)
-	assert.Equal(t, "42", got[0].UiTokenAmount.Amount)
-	assert.Equal(t, uint8(0), got[0].UiTokenAmount.Decimals)
-	assert.Equal(t, "42", got[0].UiTokenAmount.UiAmountString)
-}
-
-func TestExtractTokenBalances_Token2022ProgramIdDistinguished(t *testing.T) {
-	mint := solana.MustPublicKeyFromBase58("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
-	owner := solana.MustPublicKeyFromBase58("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB")
-	tokenAcct := makeTokenAccount(t, mint, owner, 1)
-	var ownerArr [32]byte
-	copy(ownerArr[:], splToken2022ProgramID[:])
-	tokenAcct.Owner = ownerArr
-
-	got := extractTokenBalances([]*accounts.Account{tokenAcct}, map[solana.PublicKey]uint8{mint: 9})
+	got := tokenBalancesForTransaction(tx, []*accounts.Account{tokenAcct, nil}, readMint)
 	require.Len(t, got, 1)
 	assert.Equal(t, splToken2022ProgramID.String(), got[0].ProgramId)
+
+	wrongType := *tokenAcct
+	wrongType.Data = append([]byte(nil), tokenAcct.Data...)
+	wrongType.Data[token2022TypeOffset] = token2022MintType
+	assert.Empty(t, tokenBalancesForTransaction(tx, []*accounts.Account{&wrongType, nil}, readMint))
+
+	multisigSized := *tokenAcct
+	multisigSized.Data = append(append([]byte(nil), tokenAcct.Data[:tokenAccountSize]...), make([]byte, tokenMultisigSize-tokenAccountSize)...)
+	assert.Empty(t, tokenBalancesForTransaction(tx, []*accounts.Account{&multisigSized, nil}, readMint))
+}
+
+func TestTokenBalancesPreferMintFromSameBankSnapshot(t *testing.T) {
+	mint := solana.PublicKey{7}
+	accountKey := solana.PublicKey{9}
+	tokenAcct := makeTokenAccount(t, mint, solana.PublicKey{8}, 123)
+	mintAcct := makeTokenMint(splTokenProgramID, 6)
+	tx := &solana.Transaction{Message: solana.Message{AccountKeys: []solana.PublicKey{accountKey, mint, splTokenProgramID}}}
+
+	got := tokenBalancesForTransaction(tx, []*accounts.Account{tokenAcct, mintAcct, nil}, func(solana.PublicKey) (*accounts.Account, error) {
+		t.Fatal("captured-bank fallback must not override the transaction snapshot mint")
+		return nil, nil
+	})
+	require.Len(t, got, 1)
+	assert.Equal(t, uint8(6), got[0].UiTokenAmount.Decimals)
 }
 
 func TestUiAmountStringForRaw_TrimsTrailingZeros(t *testing.T) {

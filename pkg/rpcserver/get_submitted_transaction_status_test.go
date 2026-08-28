@@ -52,7 +52,8 @@ func newStatusServer(t *testing.T) (*RpcServer, *txstatus.Index) {
 func TestRecordSubmissionOnlyInfersFreshBlockhashDeadline(t *testing.T) {
 	server, index := newStatusServer(t)
 	freshHash := solana.Hash{8}
-	server.SetSlotCtx(&sealevel.SlotCtx{Blockhash: freshHash, BlockHeight: 1_000})
+	validatedBank := &sealevel.SlotCtx{Blockhash: freshHash, BlockHeight: 1_000}
+	server.SetSlotCtx(validatedBank)
 
 	freshSignature := statusSig(20)
 	server.recordSubmissionAttempt(
@@ -61,6 +62,7 @@ func TestRecordSubmissionOnlyInfersFreshBlockhashDeadline(t *testing.T) {
 			Message:    solana.Message{RecentBlockhash: freshHash},
 		},
 		freshSignature,
+		validatedBank,
 	)
 	fresh, known := index.Lookup(freshSignature)
 	if !known || fresh.LastValidBlockHeight == nil || *fresh.LastValidBlockHeight != 1_150 {
@@ -74,10 +76,38 @@ func TestRecordSubmissionOnlyInfersFreshBlockhashDeadline(t *testing.T) {
 			Message:    solana.Message{RecentBlockhash: solana.Hash{7}},
 		},
 		olderSignature,
+		validatedBank,
 	)
 	older, known := index.Lookup(olderSignature)
 	if !known || older.LastValidBlockHeight != nil {
 		t.Fatalf("older blockhash deadline = %v known=%v", older.LastValidBlockHeight, known)
+	}
+}
+
+func TestRecordSubmissionUsesValidatedBankDeadline(t *testing.T) {
+	server, index := newStatusServer(t)
+	validatedHash := solana.Hash{8}
+	validatedBank := &sealevel.SlotCtx{Blockhash: validatedHash, BlockHeight: 1_000}
+	server.SetSlotCtx(validatedBank)
+
+	// Normal tip publication does not invalidate the immutable bank already
+	// validated by sendTransaction. Receipt metadata must remain from that bank.
+	server.SetSlotCtx(&sealevel.SlotCtx{Blockhash: solana.Hash{9}, BlockHeight: 2_000})
+	signature := statusSig(22)
+	err := server.recordSubmissionAttempt(
+		&solana.Transaction{
+			Signatures: []solana.Signature{signature},
+			Message:    solana.Message{RecentBlockhash: validatedHash},
+		},
+		signature,
+		validatedBank,
+	)
+	if err != nil {
+		t.Fatalf("record submission: %v", err)
+	}
+	receipt, known := index.Lookup(signature)
+	if !known || receipt.LastValidBlockHeight == nil || *receipt.LastValidBlockHeight != 1_150 {
+		t.Fatalf("validated-bank deadline = %v known=%v", receipt.LastValidBlockHeight, known)
 	}
 }
 
