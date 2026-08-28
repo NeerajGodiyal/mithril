@@ -1371,6 +1371,10 @@ func runLive(c *cobra.Command, args []string) {
 		klog.Fatalf("FATAL: %v. Re-run with --bootstrap new-snapshot to replace the unreadable state and AccountsDB.", err)
 	}
 	hasValidState := mithrilState != nil
+	classicReplayInterrupted, err := classicReplayWasInterrupted(accountsPath)
+	if err != nil {
+		klog.Fatalf("FATAL: %v", err)
+	}
 
 	// Read both bindings before mutating either location. The ledger marker
 	// survives AccountsDB cleanup and therefore remains authoritative for the
@@ -1765,6 +1769,9 @@ func runLive(c *cobra.Command, args []string) {
 	switch bootstrapMode {
 	case "accountsdb":
 		// Mode: Require existing AccountsDB, never download
+		if classicReplayInterrupted {
+			klog.Fatalf("an earlier Classic replay did not shut down cleanly; re-bootstrap from a snapshot")
+		}
 		if !hasValidState && !hasAccountsDB {
 			klog.Fatalf("mode=accountsdb requires existing AccountsDB at %s", accountsPath)
 		}
@@ -1935,7 +1942,7 @@ func runLive(c *cobra.Command, args []string) {
 			fullThreshold = 100000 // default
 		}
 
-		if hasValidState {
+		if hasValidState && !classicReplayInterrupted {
 			// Check if AccountsDB is behind chain tip. Use queryCurrentSlot
 			// instead of queryLatestSnapshotSlot to avoid expensive node
 			// discovery. The default prompts early: a fresh incremental is a
@@ -2080,7 +2087,9 @@ func runLive(c *cobra.Command, args []string) {
 				klog.Fatalf("mode=auto requires a snapshot directory to rebuild (set storage.snapshots or snapshot.download_path in config)")
 			}
 			snapshotBuildStartedAt = time.Now().UTC()
-			if hasAccountsDB {
+			if classicReplayInterrupted {
+				mlog.Log.Infof("mode=auto: interrupted Classic replay detected, rebuilding AccountsDB from snapshot")
+			} else if hasAccountsDB {
 				mlog.Log.Infof("mode=auto: AccountsDB exists but state invalid, rebuilding from snapshot")
 			} else {
 				mlog.Log.Infof("mode=auto: No existing AccountsDB, will download snapshot")
@@ -2089,7 +2098,9 @@ func runLive(c *cobra.Command, args []string) {
 				// Record rebuild in history before cleanup (history file is preserved)
 				// Try to load any existing state (even invalid) to capture slot info
 				var reason string
-				if hasAccountsDB {
+				if classicReplayInterrupted {
+					reason = "auto mode (interrupted Classic replay)"
+				} else if hasAccountsDB {
 					reason = "auto mode (AccountsDB exists but state invalid)"
 				} else {
 					reason = "auto mode (no existing AccountsDB)"
@@ -2871,8 +2882,11 @@ postBootstrap:
 	// out-of-horizon segments and bootstrap appendvecs. Each cycle is bounded
 	// (move + scan budgets) and serialized against folds via the store's
 	// internal lock; the rewind horizon pins are what it must never touch.
+	var compactorWG sync.WaitGroup
 	if compactEnabled {
+		compactorWG.Add(1)
 		go func() {
+			defer compactorWG.Done()
 			ticker := time.NewTicker(10 * time.Minute)
 			defer ticker.Stop()
 			for {
@@ -2894,7 +2908,34 @@ postBootstrap:
 	if alpenglowMode {
 		turbineAlpenglowAddr = alpenglowAddrForGossip(alpenglowObserverBindAddr)
 	}
+	var classicGuard *classicReplayGuard
+	if !alpenglowMode {
+		classicGuard, err = beginClassicReplay(accountsPath, replay.CurrentRunID, uint64(startSlot))
+		if err != nil {
+			klog.Fatalf("start Classic replay: %v", err)
+		}
+	}
 	result := runReplayWithRecovery(ctx, accountsDb, accountsPath, manifest, resumeState, uint64(startSlot), liveEndSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, uint16(turbineShredVersion), turbineAlpenglowAddr, validatorIdentity, blockstorePath, int(txParallelism), true, useLightbringer, useTurbine, dbgOpts, metricsWriter, slotCtxSetter, mithrilState, blockFetchOpts, consensusOpts, compactCfg.RewindHorizonBatches, replayStartTime)
+	cancelRun()
+	compactorWG.Wait()
+
+	cleanClassicShutdown := classicGuard != nil && result.Error == nil
+	if rpcServer != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownErr := rpcServer.Shutdown(shutdownCtx)
+		cancel()
+		if shutdownErr != nil {
+			mlog.Log.Errorf("RPC shutdown failed: %v", shutdownErr)
+			mlog.Log.Errorf("leaving AccountsDB open until process exit because an RPC handler may still be using it")
+			return
+		}
+	}
+	if cleanClassicShutdown {
+		if err := accountsDb.SyncDurableStorage(); err != nil {
+			mlog.Log.Errorf("Classic AccountsDB sync failed: %v", err)
+			cleanClassicShutdown = false
+		}
+	}
 
 	if result.Error != nil {
 		if result.LastPersistedSlot == 0 {
@@ -2906,7 +2947,7 @@ postBootstrap:
 
 	// Update state file with last persisted slot and shutdown context
 	// Skip if already written during cancellation (eliminates timing window)
-	if result.LastPersistedSlot > 0 && mithrilState != nil && !result.StateWrittenOnCancel {
+	if result.LastPersistedSlot > 0 && mithrilState != nil && !result.StateWrittenOnCancel && (classicGuard == nil || cleanClassicShutdown) {
 		var shutdownCtx *state.ShutdownContext
 		if result.LastAcctsLtHash != nil {
 			// Calculate epoch for the last persisted slot
@@ -2964,12 +3005,17 @@ postBootstrap:
 			// Record shutdown in history (must be inside this block where shutdownReason is defined)
 			if err := mithrilState.UpdateOnShutdown(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, shutdownCtx); err != nil {
 				mlog.Log.Errorf("failed to update state file: %v", err)
+				cleanClassicShutdown = false
 			}
-			state.RecordShutdown(accountsPath, result.LastPersistedSlot, base58.Encode(result.LastPersistedBankhash), replay.CurrentRunID, getVersion(), getCommit(), getBranch(), shutdownReason)
+			if err := state.RecordShutdown(accountsPath, result.LastPersistedSlot, base58.Encode(result.LastPersistedBankhash), replay.CurrentRunID, getVersion(), getCommit(), getBranch(), shutdownReason); err != nil {
+				mlog.Log.Errorf("failed to record shutdown history: %v", err)
+				cleanClassicShutdown = false
+			}
 		} else {
 			// No shutdown context - just update slot
 			if err := mithrilState.UpdateOnShutdown(accountsPath, result.LastPersistedSlot, result.LastPersistedBankhash, shutdownCtx); err != nil {
 				mlog.Log.Errorf("failed to update state file: %v", err)
+				cleanClassicShutdown = false
 			}
 		}
 	}
@@ -2993,6 +3039,22 @@ postBootstrap:
 	}
 
 	mlog.Log.Infof("Done replaying, closing DB")
+	if classicGuard != nil {
+		if err := accountsDb.CloseDbWithError(); err != nil {
+			mlog.Log.Errorf("Classic AccountsDB close failed: %v", err)
+			cleanClassicShutdown = false
+		}
+		if cleanClassicShutdown {
+			if err := classicGuard.Complete(); err != nil {
+				mlog.Log.Errorf("complete Classic replay marker: %v", err)
+				cleanClassicShutdown = false
+			}
+		}
+		if !cleanClassicShutdown {
+			mlog.Log.Errorf("Classic replay did not complete a clean durable shutdown; the next start must rebuild from a snapshot")
+		}
+		return
+	}
 	accountsDb.CloseDb()
 }
 
@@ -4552,6 +4614,9 @@ func runReplayWithForkRecovery(
 
 		mlog.Log.Infof("State saved to %s/mithril_state.json at slot %d", accountsDbPath, r.LastPersistedSlot)
 		return nil
+	}
+	if consensusOpts == nil || !consensusOpts.Alpenglow {
+		onCancelWriteState = nil
 	}
 
 	result = replay.ReplayBlocks(ctx, accountsDb, accountsDbPath, mithrilState, resumeState, startSlot, endSlot, rpcEndpoints, lightbringerEndpoint, turbineBindAddr, turbineGossipEntrypoint, turbineGossipBindAddr, turbineAdvertisedIP, turbineShredVersion, turbineAlpenglowAddr, turbineIdentity, blockDir, txParallelism, isLive, useLightbringer, useTurbine, dbgOpts, metricsWriter, rpcServer, blockFetchOpts, consensusOpts, onCancelWriteState)

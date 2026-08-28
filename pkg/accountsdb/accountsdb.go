@@ -79,6 +79,9 @@ type AccountsDb struct {
 	inProgressStoreRequests   *list.List
 	storeRequestChan          chan *list.Element
 	storeWorkerDone           chan struct{}
+	storeErrMu                sync.Mutex
+	storeErr                  error
+	storeBeforePersist        func(uint64) // test-only ordering hook
 }
 
 type storeRequest struct {
@@ -86,7 +89,11 @@ type storeRequest struct {
 	slot  uint64
 	m     map[solana.PublicKey]*accounts.Account
 	cb    func()
+	done  chan error
 }
+
+// ClassicReplayMarkerName identifies an AccountsDB being mutated by Classic replay.
+const ClassicReplayMarkerName = "classic-replay.in-progress"
 
 func (accountsDb *AccountsDb) StoreQueueLen() int {
 	if accountsDb.inProgressStoreRequests == nil {
@@ -95,6 +102,24 @@ func (accountsDb *AccountsDb) StoreQueueLen() int {
 	accountsDb.inProgressStoreRequestsMu.Lock()
 	defer accountsDb.inProgressStoreRequestsMu.Unlock()
 	return accountsDb.inProgressStoreRequests.Len()
+}
+
+// StoreWorkerError reports the first asynchronous store failure.
+func (accountsDb *AccountsDb) StoreWorkerError() error {
+	accountsDb.storeErrMu.Lock()
+	defer accountsDb.storeErrMu.Unlock()
+	return accountsDb.storeErr
+}
+
+func (accountsDb *AccountsDb) recordStoreWorkerError(err error) {
+	if err == nil {
+		return
+	}
+	accountsDb.storeErrMu.Lock()
+	if accountsDb.storeErr == nil {
+		accountsDb.storeErr = err
+	}
+	accountsDb.storeErrMu.Unlock()
 }
 
 // silentLogger implements pebble.Logger but discards all messages.
@@ -188,27 +213,57 @@ func OpenDb(accountsDbDir string) (*AccountsDb, error) {
 // Turns down the store worker. AccountsDb cannot accept writes after this.
 // Should not be called concurrently.
 func (accountsDb *AccountsDb) WaitForStoreWorker() {
+	if err := accountsDb.WaitForStoreWorkerWithError(); err != nil {
+		mlog.Log.Errorf("AccountsDb: async store worker failed: %v", err)
+	}
+}
+
+// WaitForStoreWorkerWithError stops the worker and returns its first failure.
+func (accountsDb *AccountsDb) WaitForStoreWorkerWithError() error {
 	if accountsDb.storeWorkerDone == nil {
 		mlog.Log.Infof("AccountsDb: async store worker already done.")
-		return
+		return accountsDb.StoreWorkerError()
 	}
 	mlog.Log.Infof("AccountsDb: waiting for async store worker...")
 	close(accountsDb.storeRequestChan)
 	<-accountsDb.storeWorkerDone
 	accountsDb.storeWorkerDone = nil
+	return accountsDb.StoreWorkerError()
 }
 
 func (accountsDb *AccountsDb) CloseDb() {
-	accountsDb.WaitForStoreWorker()
+	if err := accountsDb.CloseDbWithError(); err != nil {
+		mlog.Log.Errorf("CloseDb: %v", err)
+	}
+}
+
+// CloseDbWithError stops pending stores and reports every close failure.
+func (accountsDb *AccountsDb) CloseDbWithError() error {
+	workerErr := accountsDb.WaitForStoreWorkerWithError()
 	mlog.Log.Infof("CloseDb: syncing and closing Index...")
-	if err := accountsDb.Index.Close(); err != nil {
-		mlog.Log.Errorf("CloseDb: Index.Close() error: %v", err)
-	}
+	indexErr := accountsDb.Index.Close()
 	mlog.Log.Infof("CloseDb: syncing and closing BankHashStore...")
-	if err := accountsDb.BankHashStore.Close(); err != nil {
-		mlog.Log.Errorf("CloseDb: BankHashStore.Close() error: %v", err)
-	}
+	bankhashErr := accountsDb.BankHashStore.Close()
 	mlog.Log.Infof("CloseDb: done\n") // extra newline for spacing after close
+	return errors.Join(workerErr, indexErr, bankhashErr)
+}
+
+// SyncDurableStorage makes completed Classic writes stable before shutdown is
+// recorded as clean.
+func (accountsDb *AccountsDb) SyncDurableStorage() error {
+	if err := accountsDb.WaitForStoreWorkerWithError(); err != nil {
+		return err
+	}
+	if err := accountsDb.Index.Flush(); err != nil {
+		return fmt.Errorf("sync account index: %w", err)
+	}
+	if err := accountsDb.BankHashStore.Flush(); err != nil {
+		return fmt.Errorf("sync bankhash store: %w", err)
+	}
+	if err := syncAccountsFilesystem(accountsDb.AcctsDir); err != nil {
+		return fmt.Errorf("sync account files: %w", err)
+	}
+	return nil
 }
 
 func (accountsDb *AccountsDb) InitCaches() {
@@ -678,6 +733,18 @@ func (accountsDb *AccountsDb) StoreAccounts(
 		}
 		return nil
 	}
+	return accountsDb.enqueueStoreRequest(accts, slot, cb, nil)
+}
+
+func (accountsDb *AccountsDb) enqueueStoreRequest(
+	accts []*accounts.Account,
+	slot uint64,
+	cb func(),
+	done chan error,
+) error {
+	if err := accountsDb.StoreWorkerError(); err != nil {
+		return err
+	}
 	for _, acct := range accts {
 		if acct == nil {
 			continue
@@ -695,26 +762,43 @@ func (accountsDb *AccountsDb) StoreAccounts(
 	// Must not hold lock during channel send to avoid deadlock with storeWorker.
 	accountsDb.appendVecReadMu.Lock()
 	accountsDb.inProgressStoreRequestsMu.Lock()
-	element := accountsDb.inProgressStoreRequests.PushBack(storeRequest{accts: accts, slot: slot, m: m, cb: cb})
+	element := accountsDb.inProgressStoreRequests.PushBack(storeRequest{accts: accts, slot: slot, m: m, cb: cb, done: done})
 	accountsDb.inProgressStoreRequestsMu.Unlock()
 	accountsDb.appendVecReadMu.Unlock()
 	accountsDb.storeRequestChan <- element
 	return nil
 }
 
-func (accountsDb *AccountsDb) storeAccountsSync(accts []*accounts.Account, slot uint64) {
+// StoreAccountsAndWait persists one Classic request before returning.
+func (accountsDb *AccountsDb) StoreAccountsAndWait(accts []*accounts.Account, slot uint64) error {
+	if accountsDb.RootedDurable {
+		return nil
+	}
+	done := make(chan error, 1)
+	if err := accountsDb.enqueueStoreRequest(accts, slot, nil, done); err != nil {
+		return err
+	}
+	if err := <-done; err != nil {
+		return err
+	}
+	return accountsDb.StoreWorkerError()
+}
+
+func (accountsDb *AccountsDb) storeAccountsSync(accts []*accounts.Account, slot uint64) error {
 	defer trace.StartRegion(context.Background(), "StoreAccounts").End()
-	// The request is still present in the in-progress overlay, so publish its
-	// cache epoch before disk I/O. New readers see the overlay; older readers
-	// cannot publish stale values after this bump.
-	accountsDb.refreshReadCaches(accts)
 	accountsDb.appendVecReadMu.Lock()
 	defer accountsDb.appendVecReadMu.Unlock()
+	var err error
 	if StoreAccountsWorkers == 1 {
-		accountsDb.storeAccountsInternal(accts, slot)
+		err = accountsDb.storeAccountsInternal(accts, slot)
 	} else {
-		accountsDb.parallelStoreAccounts(StoreAccountsWorkers, accts, slot)
+		err = accountsDb.parallelStoreAccounts(StoreAccountsWorkers, accts, slot)
 	}
+	if err != nil {
+		return err
+	}
+	accountsDb.refreshReadCaches(accts)
+	return nil
 }
 
 // refreshReadCaches keeps already-hot common entries coherent after a store,
@@ -770,26 +854,35 @@ func (accountsDb *AccountsDb) storeWorker() {
 	defer close(accountsDb.storeWorkerDone)
 	for elt := range accountsDb.storeRequestChan {
 		sr := elt.Value.(storeRequest)
-		accountsDb.storeAccountsSync(sr.accts, sr.slot)
-		if sr.cb != nil {
+		if accountsDb.storeBeforePersist != nil {
+			accountsDb.storeBeforePersist(sr.slot)
+		}
+		err := accountsDb.storeAccountsSync(sr.accts, sr.slot)
+		accountsDb.recordStoreWorkerError(err)
+		if err == nil && sr.cb != nil {
 			sr.cb()
 		}
 		// Remove after callback so DrainStoreQueue waits for callbacks (e.g. index flush) to complete
 		accountsDb.inProgressStoreRequestsMu.Lock()
 		accountsDb.inProgressStoreRequests.Remove(elt)
 		accountsDb.inProgressStoreRequestsMu.Unlock()
+		if sr.done != nil {
+			sr.done <- err
+			close(sr.done)
+		}
 	}
 }
 
-func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, slot uint64) {
+func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, slot uint64) (returnErr error) {
 	fileId := accountsDb.LargestFileId.Add(1)
 	appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, slot, fileId)
 	appendVecFile, err := os.OpenFile(appendVecFileName, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
-		//mlog.Log.Debugf("unable to open appendvec file %s for writing to accountsdb", appendVecFileName)
-		panic(err)
+		return fmt.Errorf("open appendvec %s: %w", appendVecFileName, err)
 	}
-	defer appendVecFile.Close()
+	defer func() {
+		returnErr = errors.Join(returnErr, appendVecFile.Close())
+	}()
 
 	appendVecAcctsBuf := new(bytes.Buffer)
 	writer := new(bytes.Buffer)
@@ -815,25 +908,27 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 		existingacctIdxEntryBuf, c, err := accountsDb.Index.Get(acct.Key[:])
 		if err == nil {
 			acctIdxEntry, err := UnmarshalAcctIdxEntry(existingacctIdxEntryBuf)
-			if err != nil {
-				panic("failed to unmarshal AccountIndexEntry from index kv database")
-			}
 			c.Close()
+			if err != nil {
+				return fmt.Errorf("unmarshal account index entry for %s: %w", acct.Key, err)
+			}
 
 			existingAppendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, acctIdxEntry.Slot, acctIdxEntry.FileId)
 			existingAppendVecFile, err := os.OpenFile(existingAppendVecFileName, os.O_RDWR, 0666)
 			if err != nil {
-				panic(err)
+				return fmt.Errorf("open existing appendvec %s: %w", existingAppendVecFileName, err)
 			}
 
 			_, err = existingAppendVecFile.Seek(int64(acctIdxEntry.Offset), 0)
 			if err != nil {
-				panic(err)
+				existingAppendVecFile.Close()
+				return fmt.Errorf("seek existing appendvec %s: %w", existingAppendVecFileName, err)
 			}
 
 			existingAcct, err := unmarshalAcctFromAppendVecAcctHeader(existingAppendVecFile)
 			if err != nil {
-				panic(fmt.Sprintf("failed to unmarshal account from appendvec file %s: %s", existingAppendVecFileName, err))
+				existingAppendVecFile.Close()
+				return fmt.Errorf("unmarshal account from appendvec %s: %w", existingAppendVecFileName, err)
 			}
 
 			if len(acct.Data) == len(existingAcct.Data) {
@@ -842,22 +937,31 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 
 				_, err = existingAppendVecFile.Seek(int64(acctIdxEntry.Offset), 0)
 				if err != nil {
-					panic(err)
+					existingAppendVecFile.Close()
+					return fmt.Errorf("seek existing appendvec %s: %w", existingAppendVecFileName, err)
 				}
 
 				err = newAppendVecAcct.Marshal(existingAppendVecFile)
 				if err != nil {
-					panic(fmt.Sprintf("error marshaling appendvec for storage: %s", err))
+					existingAppendVecFile.Close()
+					return fmt.Errorf("write existing appendvec %s: %w", existingAppendVecFileName, err)
 				}
 
-				existingAppendVecFile.Close()
+				if err := existingAppendVecFile.Close(); err != nil {
+					return fmt.Errorf("close existing appendvec %s: %w", existingAppendVecFileName, err)
+				}
 				continue
 			}
+			if err := existingAppendVecFile.Close(); err != nil {
+				return fmt.Errorf("close existing appendvec %s: %w", existingAppendVecFileName, err)
+			}
+		} else if !errors.Is(err, pebble.ErrNotFound) {
+			return fmt.Errorf("read account index entry for %s: %w", acct.Key, err)
 		}
 
 		err = accountsDb.Index.Set(acct.Key[:], acctIdxEntryBuf[:], &pebble.WriteOptions{})
 		if err != nil {
-			panic(fmt.Sprintf("unable to add acct for %s to acctsdb: %v", acct.Key, err))
+			return fmt.Errorf("add account %s to index: %w", acct.Key, err)
 		}
 
 		// marshal up the account as an appendvec style account and write it to the buffer
@@ -866,15 +970,16 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 
 		err = appendVecAcct.Marshal(appendVecAcctsBuf)
 		if err != nil {
-			panic(fmt.Sprintf("unable to add acct for %s to acctsdb: %v", acct.Key, err))
+			return fmt.Errorf("encode account %s for appendvec: %w", acct.Key, err)
 		}
 	}
 
 	// write the appendvecs data into the file
 	_, err = appendVecFile.Write(appendVecAcctsBuf.Bytes())
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("write appendvec %s: %w", appendVecFileName, err)
 	}
+	return nil
 }
 
 // parallelStoreAccounts makes n workers which process a list of
@@ -884,9 +989,9 @@ func (accountsDb *AccountsDb) storeAccountsInternal(accts []*accounts.Account, s
 // 1. Check the existing accounts length
 // 2. If the length of the new account data is the same, overwrite the existing account
 // 3. Otherwise, pass it on to be added to a new appendvec.
-func (accountsDb *AccountsDb) parallelStoreAccounts(n int, accts []*accounts.Account, slot uint64) {
+func (accountsDb *AccountsDb) parallelStoreAccounts(n int, accts []*accounts.Account, slot uint64) error {
 	if n < 2 {
-		panic(fmt.Sprintf("AccountsDb.parallelStoreAccounts: n=%d must be >= 2", n))
+		return fmt.Errorf("AccountsDb.parallelStoreAccounts: n=%d must be >= 2", n)
 	}
 
 	acctsChan := make(chan *accounts.Account, len(accts))
@@ -899,7 +1004,7 @@ func (accountsDb *AccountsDb) parallelStoreAccounts(n int, accts []*accounts.Acc
 	close(acctsChan)
 
 	// Assumes that none of the accounts overlap in the same appendvec file.
-	lengthChangedAccounts := make(chan *accounts.Account)
+	lengthChangedAccounts := make(chan *accounts.Account, len(accts))
 	overwriteOrPassGroup, ctx := errgroup.WithContext(context.Background())
 	for range n - 1 {
 		overwriteOrPassGroup.Go(func() error {
@@ -966,16 +1071,17 @@ func (accountsDb *AccountsDb) parallelStoreAccounts(n int, accts []*accounts.Acc
 		})
 	}
 	newAppendVecGroup := errgroup.Group{}
-	newAppendVecGroup.Go(func() error {
+	newAppendVecGroup.Go(func() (returnErr error) {
 		fileId := accountsDb.LargestFileId.Add(1)
 		appendVecFileName := fmt.Sprintf("%s/%d.%d", accountsDb.AcctsDir, slot, fileId)
 		appendVecFile, err := os.OpenFile(appendVecFileName, os.O_RDWR|os.O_CREATE, 0666)
 		if err != nil {
-			return err
+			return fmt.Errorf("open appendvec %s: %w", appendVecFileName, err)
 		}
-		defer appendVecFile.Close()
 		appendVecWriter := bufio.NewWriter(appendVecFile)
-		defer appendVecWriter.Flush()
+		defer func() {
+			returnErr = errors.Join(returnErr, appendVecWriter.Flush(), appendVecFile.Close())
+		}()
 
 		appendVecFileOffset := uint64(0)
 		var acctIdxEntryBuf [24]byte
@@ -1011,8 +1117,9 @@ func (accountsDb *AccountsDb) parallelStoreAccounts(n int, accts []*accounts.Acc
 	close(lengthChangedAccounts)
 	e2 := newAppendVecGroup.Wait()
 	if err := errors.Join(e1, e2); err != nil {
-		panic(err)
+		return err
 	}
+	return nil
 }
 
 func (accountsDb *AccountsDb) GetBankHashForSlot(slot uint64) ([]byte, error) {

@@ -120,6 +120,7 @@ func cleanAccountsDbRoot(
 		"bankhash_db",
 		"bank_hash",
 		"bootstrap_high_file_id",
+		accountsdb.ClassicReplayMarkerName,
 		"largest_file_id",
 		"stake_pubkeys.idx",
 		"manifest",

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -26,6 +27,7 @@ type RpcServer struct {
 	rpcService    *jsonrpc.RPCServer
 	serv          *httptest.Server
 	listener      net.Listener
+	httpServer    *http.Server
 	acctsDb       *accountsdb.AccountsDb
 	epochSchedule *sealevel.SysvarEpochSchedule
 	slotCtx       *sealevel.SlotCtx
@@ -36,6 +38,9 @@ type RpcServer struct {
 	leaderTPUCacheUpdatedAt  time.Time
 	clusterNodesRefreshEvery time.Duration
 	clusterNodesRefreshOnce  sync.Once
+	refreshCancel            context.CancelFunc
+	refreshDone              <-chan struct{}
+	lifecycleMu              sync.Mutex
 
 	clusterRPCEndpoints []string
 	clusterNodesFetcher clusterNodesFetcher
@@ -76,6 +81,7 @@ func NewRpcServer(acctsDb *accountsdb.AccountsDb, port uint16, epochSchedule *se
 	)
 
 	rpcServer.rpcService.Register("MithrilRpc", rpcServer)
+	rpcServer.httpServer = &http.Server{Handler: rpcServer}
 	rpcServer.acctsDb = acctsDb
 	if epochSchedule != nil {
 		rpcServer.epochSchedule = epochSchedule
@@ -117,8 +123,42 @@ func (rpcServer *RpcServer) getSlotCtx() *sealevel.SlotCtx {
 }
 
 func (rpcServer *RpcServer) Start() {
-	rpcServer.startClusterNodesRefreshLoop()
-	go http.Serve(rpcServer.listener, rpcServer)
+	ctx, cancel := context.WithCancel(context.Background())
+	rpcServer.lifecycleMu.Lock()
+	rpcServer.refreshCancel = cancel
+	rpcServer.refreshDone = rpcServer.startClusterNodesRefreshLoop(ctx)
+	server := rpcServer.httpServer
+	listener := rpcServer.listener
+	rpcServer.lifecycleMu.Unlock()
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			mlog.Log.Errorf("RPC server stopped: %v", err)
+		}
+	}()
+}
+
+// Shutdown stops accepting requests and waits for background RPC work.
+func (rpcServer *RpcServer) Shutdown(ctx context.Context) error {
+	rpcServer.lifecycleMu.Lock()
+	cancel := rpcServer.refreshCancel
+	done := rpcServer.refreshDone
+	server := rpcServer.httpServer
+	rpcServer.lifecycleMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	var serverErr error
+	if server != nil {
+		serverErr = server.Shutdown(ctx)
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return errors.Join(serverErr, ctx.Err())
+		}
+	}
+	return serverErr
 }
 
 func (rpcServer *RpcServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -273,27 +313,36 @@ func readQuietMethodProbeBody(r *http.Request) ([]byte, bool) {
 	return body, true
 }
 
-func (rpcServer *RpcServer) startClusterNodesRefreshLoop() {
+func (rpcServer *RpcServer) startClusterNodesRefreshLoop(ctx context.Context) <-chan struct{} {
+	var done chan struct{}
 	rpcServer.clusterNodesRefreshOnce.Do(func() {
 		if rpcServer.clusterNodesFetcher == nil && len(rpcServer.clusterRPCEndpoints) == 0 {
 			return
 		}
 
+		done = make(chan struct{})
 		go func() {
-			if err := rpcServer.refreshLeaderTPUCache(context.Background()); err != nil {
+			defer close(done)
+			if err := rpcServer.refreshLeaderTPUCache(ctx); err != nil && ctx.Err() == nil {
 				mlog.Log.Warnf("sendTransaction: initial cluster node refresh failed: %v", err)
 			}
 
 			ticker := time.NewTicker(rpcServer.clusterNodesRefreshInterval())
 			defer ticker.Stop()
 
-			for range ticker.C {
-				if err := rpcServer.refreshLeaderTPUCache(context.Background()); err != nil {
-					mlog.Log.Warnf("sendTransaction: periodic cluster node refresh failed: %v", err)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := rpcServer.refreshLeaderTPUCache(ctx); err != nil && ctx.Err() == nil {
+						mlog.Log.Warnf("sendTransaction: periodic cluster node refresh failed: %v", err)
+					}
 				}
 			}
 		}()
 	})
+	return done
 }
 
 func (rpcServer *RpcServer) clusterNodesRefreshInterval() time.Duration {

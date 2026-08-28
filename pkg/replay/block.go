@@ -4263,52 +4263,34 @@ func ProcessBlock(
 	persistedSlot := slotCtx.Slot
 	persistedBankhash := append([]byte(nil), slotCtx.FinalBankhash...)
 	persistedBlockSlot := block.Slot
-	stakeIndexDir := filepath.Join(acctsDb.AcctsDir, "..")
-	afterStoreAccounts := func() {
-		if tail != nil {
-			// Rooted-durable: accounts + bankhash are buffered in the overlay and
-			// become durable only on promotion; nothing written here (rooted-only).
-		} else {
-			if berr := acctsDb.StoreBankHashForSlot(persistedSlot, persistedBankhash); berr != nil {
-				mlog.Log.Infof("unable to store bankhash for slot %d", persistedSlot)
-			}
-		}
-		if tail == nil {
-			// Legacy/verify modes (no fork ambiguity): flush per block as before.
-			// Rooted-durable replay flushes at FOLD time instead — entries stay
-			// slot-scoped in RAM so a fork unwind can drop them, and scans merge
-			// the pending set (StreamStakeAccounts) for completeness meanwhile.
-			flushed, err := global.FlushPendingStakePubkeys(stakeIndexDir)
-			if err != nil {
-				mlog.Log.Errorf("failed to flush stake pubkey index: %v", err)
-			} else if flushed > 0 {
-				mlog.Log.Debugf("flushed %d new stake pubkeys to index", flushed)
-			}
-		}
-
-		persistedHashes.Set(persistedBlockSlot, persistedBankhash)
-
-		// Exit critical commit window - AccountsDB is now consistent
-		commitInProgress.Store(false)
-		commitSlot.Store(0)
-	}
 
 	if tail != nil {
 		// Rooted-durable: buffer this slot's writes + bankhash in the RAM overlay
 		// (always, even when empty, so the bankhash is recorded); no durable write.
 		tail.Add(slotCtx.Slot, modifiedAccts, persistedBankhash)
-		afterStoreAccounts()
-	} else if len(modifiedAccts) > 0 {
-		err = acctsDb.StoreAccounts(modifiedAccts, slotCtx.Slot, afterStoreAccounts)
+	} else {
+		if len(modifiedAccts) > 0 {
+			if err := acctsDb.StoreAccountsAndWait(modifiedAccts, slotCtx.Slot); err != nil {
+				return nil, fmt.Errorf("store accounts for slot %d: %w", slotCtx.Slot, err)
+			}
+		}
+		if err := acctsDb.StoreBankHashForSlot(persistedSlot, persistedBankhash); err != nil {
+			return nil, fmt.Errorf("store bankhash for slot %d: %w", persistedSlot, err)
+		}
+		flushed, err := global.FlushPendingStakePubkeys(filepath.Join(acctsDb.AcctsDir, ".."))
+		if err != nil {
+			return nil, fmt.Errorf("flush stake pubkey index after slot %d: %w", persistedSlot, err)
+		}
+		if flushed > 0 {
+			mlog.Log.Debugf("flushed %d new stake pubkeys to index", flushed)
+		}
 	}
-	// In rooted-durable mode the callback above is synchronous, so this includes
-	// the complete critical-path overlay publication. Legacy StoreAccounts only
-	// enqueues here; its asynchronous disk work deliberately belongs to no slot's
-	// replay wall time and must never update a later slot's metrics record.
+
+	persistedHashes.Set(persistedBlockSlot, persistedBankhash)
+	commitInProgress.Store(false)
+	commitSlot.Store(0)
+
 	metrics.GlobalBlockReplay.BlockUpdateAccounts.AddTimingSince(blockUpdateStart)
-	if err != nil {
-		return slotCtx, err
-	}
 	statusCommitStart := time.Now()
 	statusErr := transactionStatuses.commitBlockWithPlan(block, executionPlan)
 	metrics.GlobalBlockReplay.TransactionStatusCommit.AddTimingSince(statusCommitStart)
