@@ -28,7 +28,7 @@ func TestNewReadyStateForBootstrapAlwaysBindsChain(t *testing.T) {
 		})
 	}
 
-	classic, err := newReadyStateForBootstrap(2233733, 41, "snapshot", "mainnet-beta", testNodeGenesisHash)
+	classic, err := newReadyStateForBootstrap(2233733, 41, "snapshot", "mainnet-beta", testNodeGenesisHash, false)
 	if err != nil {
 		t.Fatalf("new classic ready state: %v", err)
 	}
