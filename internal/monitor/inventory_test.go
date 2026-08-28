@@ -114,7 +114,7 @@ func TestLoadSignedManifest(t *testing.T) {
 	}
 	for _, target := range got.manifest.Targets {
 		if target.TargetJob == TargetAgent && target.Required {
-			t.Fatal("the pre-Stage-4 agent target was not preserved as optional")
+			t.Fatal("the agent target was not preserved as optional")
 		}
 	}
 }

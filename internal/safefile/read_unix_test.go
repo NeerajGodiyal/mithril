@@ -101,3 +101,28 @@ func TestReadTrustedRegularPolicy(t *testing.T) {
 		t.Fatalf("ancestor symlink error = %v", err)
 	}
 }
+
+func TestReadTrustedRegularRejectsWritableAncestor(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writable := filepath.Join(dir, "writable")
+	if err := os.Mkdir(writable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(writable, "trusted")
+	if err := os.WriteFile(path, []byte("value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(writable, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadTrustedRegular(path, ReadOptions{
+		MaxBytes:               5,
+		ForbiddenPerm:          0o077,
+		RejectAncestorSymlinks: true,
+	}); !errors.Is(err, ErrPermissions) {
+		t.Fatalf("writable ancestor error = %v", err)
+	}
+}

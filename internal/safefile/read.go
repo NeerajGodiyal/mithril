@@ -38,13 +38,22 @@ func OpenStableRegular(path string) (*os.File, error) {
 }
 
 // ReadTrustedRegular reads one trusted file object without following its final
-// symlink. RejectAncestorSymlinks extends that rule to every path component.
-// The opened object is checked against the path observation, owner and
-// permission policy, and the configured size bound.
+// symlink. RejectAncestorSymlinks also requires every ancestor to be a
+// non-symlink owned by root or this process and not group/world writable. The
+// opened object is checked against the path observation, owner and permission
+// policy, and the configured size bound.
 func ReadTrustedRegular(path string, options ReadOptions) ([]byte, error) {
 	if options.MaxBytes <= 0 || options.MaxBytes > maxTrustedFileBytes ||
 		(options.ForbiddenPerm != 0o022 && options.ForbiddenPerm != 0o077) {
 		return nil, ErrInvalidOptions
+	}
+	if options.RejectAncestorSymlinks {
+		if err := ValidateNoSymlinkPath(path); err != nil {
+			return nil, err
+		}
+		if err := validateTrustedAncestors(path); err != nil {
+			return nil, err
+		}
 	}
 	file, info, err := openStableRegular(path, options.RejectAncestorSymlinks)
 	if err != nil {
@@ -70,6 +79,31 @@ func ReadTrustedRegular(path string, options ReadOptions) ([]byte, error) {
 		return nil, ErrTooLarge
 	}
 	return data, nil
+}
+
+func validateTrustedAncestors(path string) error {
+	for current := filepath.Dir(path); ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err != nil {
+			return ErrUnavailable
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return ErrSymlink
+		}
+		if !info.IsDir() {
+			return ErrUnavailable
+		}
+		if !OwnerTrusted(info) {
+			return ErrUntrustedOwner
+		}
+		if info.Mode().Perm()&0o022 != 0 {
+			return ErrPermissions
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return nil
+		}
+	}
 }
 
 func openStableRegular(path string, rejectAncestorSymlinks bool) (*os.File, os.FileInfo, error) {

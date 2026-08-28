@@ -1,6 +1,6 @@
 // Package monitor implements the off-host deterministic monitor. It observes
 // node and reference-provider reachability and signed slot-position differences
-// without involving MCP, a model, or anything running on the node host.
+// without depending on anything running on the node host.
 package monitor
 
 import (

@@ -18,9 +18,8 @@ const (
 	maxExactMetricInteger = uint64(1<<53 - 1)
 )
 
-// Collector probes the node and both reference providers. It performs no MCP
-// call and consults no model: this path must keep working when MCP, the model,
-// or the entire node host is unavailable.
+// Collector probes the node and both reference providers. This path must keep
+// working when in-process diagnostics or the entire node host is unavailable.
 type Collector struct {
 	cfg     Config
 	metrics *Metrics

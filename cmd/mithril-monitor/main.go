@@ -2,7 +2,7 @@
 //
 // It belongs on the OPERATIONS host, not the node host. Its entire purpose is
 // to stay observable when the node host is down, which it cannot do if it runs
-// there. It makes no MCP call and consults no model.
+// there. It does not depend on the node's in-process diagnostics.
 package main
 
 import (
