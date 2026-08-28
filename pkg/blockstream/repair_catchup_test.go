@@ -209,6 +209,8 @@ func TestShredsOnlyRepairRearmsAcrossActiveHandoff(t *testing.T) {
 
 	// RPC fallback retains the old ownership barrier: forceRPCForCatchup is
 	// responsible for dismantling the handoff before repair may take over.
+	bs.Stop()
+	bs.liveStreamWg.Wait()
 	bs.rpcFallbackEnabled = true
 	if bs.repairCatchupEligible(true) {
 		t.Fatalf("RPC-enabled repair must still wait for an active handoff to be dismantled")

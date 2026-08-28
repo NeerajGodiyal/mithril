@@ -49,19 +49,22 @@ type BlockSourceOpts struct {
 	TurbineAlpenglowAddr    string
 	// Enables Alpenglow/Votor block-id hints for the Turbine assembler. Classic
 	// Solana clusters leave this off even when blocks are sourced from Turbine.
-	TurbineAlpenglowBlockIDHints bool
-	TurbineIdentity              ed25519.PrivateKey
-	LeaderForSlot                func(slot uint64) (solana.PublicKey, bool)
-	TurbineStakesForSlot         func(slot uint64) map[solana.PublicKey]uint64
-	TurbineEpochForSlot          func(slot uint64) uint64
-	TurbineRootSlot              func() uint64
-	TurbineUseChaCha8            bool
-	TurbineDedupAddrs            bool
-	LocalLeaderForSlot           func(slot uint64) bool
-	GossipClient                 *gossip.Client
-	AlpenglowDecisionSource      func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
-	AlpenglowCandidateBlockSink  func(alpenglow.ReplayBlockObservation)
-	AlpenglowInvalidBlockSink    func(alpenglow.BlockID, string) error
+	TurbineAlpenglowBlockIDHints      bool
+	TurbineMaxDataShredsForSlot       func(slot uint64) uint32
+	TurbineFixedFECForSlot            func(slot uint64) bool
+	TurbineDiscardDataCompleteForSlot func(slot uint64) bool
+	TurbineIdentity                   ed25519.PrivateKey
+	LeaderForSlot                     func(slot uint64) (solana.PublicKey, bool)
+	TurbineStakesForSlot              func(slot uint64) map[solana.PublicKey]uint64
+	TurbineEpochForSlot               func(slot uint64) uint64
+	TurbineRootSlot                   func() uint64
+	TurbineUseChaCha8                 bool
+	TurbineDedupAddrs                 bool
+	LocalLeaderForSlot                func(slot uint64) bool
+	GossipClient                      *gossip.Client
+	AlpenglowDecisionSource           func(anchorSlot uint64) (alpenglow.ChainDecision, bool)
+	AlpenglowCandidateBlockSink       func(alpenglow.ReplayBlockObservation)
+	AlpenglowInvalidBlockSink         func(alpenglow.BlockID, string) error
 	// AlpenglowCandidateValidator prevents objectively invalid assembled blocks
 	// from polluting the early ancestry tracker. Replay independently validates
 	// again at the consensus boundary before observing or executing the block.
@@ -98,10 +101,6 @@ type BlockSourceOpts struct {
 	// disk and hydrate in batches ahead of replay; survives restarts, so a
 	// rebooted node re-hydrates instead of re-repairing. Empty = disabled.
 	ShredSpoolDir string
-	// PrewarmBlocks: turbine blocks collected by the boot-time prewarm
-	// receiver (see TurbinePrewarm), injected into the staging buffer at
-	// construction so the catchup handoff can arm from them immediately.
-	PrewarmBlocks []*b.Block
 	// LocalBlocks carries fully frozen blocks from this node's producer. The
 	// source owns the consumer for exactly its own lifetime, avoiding stale
 	// consumers across a replay/fork-recovery restart. Replay adopts the
@@ -400,53 +399,56 @@ type BlockSource struct {
 	nearTipLookahead    uint64        // Slots ahead to schedule in near-tip
 
 	// Lightbringer live-stream handoff
-	lightbringerEndpoint         string
-	turbineBindAddr              string
-	repairMaxRequestsPerSecond   int
-	turbineGossipEntrypoint      string
-	turbineGossipBindAddr        string
-	turbineAdvertisedIP          string
-	turbineShredVersion          uint16
-	turbineAlpenglowAddr         string
-	turbineAlpenglowBlockIDHints bool
-	turbineIdentity              ed25519.PrivateKey
-	leaderForSlot                func(slot uint64) (solana.PublicKey, bool)
-	turbineStakesForSlot         func(slot uint64) map[solana.PublicKey]uint64
-	turbineEpochForSlot          func(slot uint64) uint64
-	turbineRootSlot              func() uint64
-	turbineUseChaCha8            bool
-	turbineDedupAddrs            bool
-	localLeaderForSlot           func(slot uint64) bool
-	localBlocks                  <-chan *b.Block
-	gossipClient                 *gossip.Client
-	liveStreamStarted            atomic.Bool
-	liveStreamConnected          atomic.Bool
-	liveLastStreamSlot           atomic.Uint64
-	liveLastRecvUnix             atomic.Int64
-	liveReconnectRequested       atomic.Bool
-	liveCancelMu                 sync.Mutex
-	liveCancel                   context.CancelFunc
-	liveHandoffSlot              atomic.Uint64 // First slot from the active stream connection, 0 = no active handoff
-	liveResultGeneration         atomic.Uint64 // Incremented whenever a live-stream handoff/runway is invalidated
-	liveForceRPCUntil            atomic.Uint64 // While set, ignore Lightbringer and use RPC until this slot is executed
-	liveCooldownUntil            atomic.Uint64 // After a missing-slot recovery, keep RPC active until this slot executes
-	liveNeedRPCResume            atomic.Bool   // Set when a live handoff disconnects and RPC must fill the gap again
-	liveStreamActive             atomic.Bool   // True once emitted blocks are being sourced from Lightbringer
-	lightbringerGapSlot          atomic.Uint64 // Waiting slot currently being watched for a Lightbringer gap
-	liveGapSinceUnix             atomic.Int64  // UnixNano when the current Lightbringer gap was first observed
-	liveGapLastLogUnix           atomic.Int64  // UnixNano of the last active-gap wait log
-	lightbringerGapReconnectSlot atomic.Uint64 // Waiting slot that already triggered a Lightbringer reconnect
-	liveRepairSlot               atomic.Uint64 // Missing streamed slot currently being repaired via RPC, 0 = no repair in flight
-	liveStreamWg                 sync.WaitGroup
-	liveStagingMu                sync.Mutex
-	liveStagingBuffer            map[uint64]*b.Block
-	liveStagingOrder             []uint64
-	liveDeliveryMu               sync.Mutex
-	liveDeliveryPending          map[uint64]int // assembled blocks queued between stream intake and ordered emitter
-	alpenglowMu                  sync.Mutex
-	knownAlpenglowBlockIDs       map[uint64]solana.Hash
-	knownAlpenglowBlockIDOrder   []uint64
-	activeTurbineReceiver        *turbine.UDPReceiver
+	lightbringerEndpoint              string
+	turbineBindAddr                   string
+	repairMaxRequestsPerSecond        int
+	turbineGossipEntrypoint           string
+	turbineGossipBindAddr             string
+	turbineAdvertisedIP               string
+	turbineShredVersion               uint16
+	turbineAlpenglowAddr              string
+	turbineAlpenglowBlockIDHints      bool
+	turbineMaxDataShredsForSlot       func(slot uint64) uint32
+	turbineFixedFECForSlot            func(slot uint64) bool
+	turbineDiscardDataCompleteForSlot func(slot uint64) bool
+	turbineIdentity                   ed25519.PrivateKey
+	leaderForSlot                     func(slot uint64) (solana.PublicKey, bool)
+	turbineStakesForSlot              func(slot uint64) map[solana.PublicKey]uint64
+	turbineEpochForSlot               func(slot uint64) uint64
+	turbineRootSlot                   func() uint64
+	turbineUseChaCha8                 bool
+	turbineDedupAddrs                 bool
+	localLeaderForSlot                func(slot uint64) bool
+	localBlocks                       <-chan *b.Block
+	gossipClient                      *gossip.Client
+	liveStreamStarted                 atomic.Bool
+	liveStreamConnected               atomic.Bool
+	liveLastStreamSlot                atomic.Uint64
+	liveLastRecvUnix                  atomic.Int64
+	liveReconnectRequested            atomic.Bool
+	liveCancelMu                      sync.Mutex
+	liveCancel                        context.CancelFunc
+	liveHandoffSlot                   atomic.Uint64 // First slot from the active stream connection, 0 = no active handoff
+	liveResultGeneration              atomic.Uint64 // Incremented whenever a live-stream handoff/runway is invalidated
+	liveForceRPCUntil                 atomic.Uint64 // While set, ignore Lightbringer and use RPC until this slot is executed
+	liveCooldownUntil                 atomic.Uint64 // After a missing-slot recovery, keep RPC active until this slot executes
+	liveNeedRPCResume                 atomic.Bool   // Set when a live handoff disconnects and RPC must fill the gap again
+	liveStreamActive                  atomic.Bool   // True once emitted blocks are being sourced from Lightbringer
+	lightbringerGapSlot               atomic.Uint64 // Waiting slot currently being watched for a Lightbringer gap
+	liveGapSinceUnix                  atomic.Int64  // UnixNano when the current Lightbringer gap was first observed
+	liveGapLastLogUnix                atomic.Int64  // UnixNano of the last active-gap wait log
+	lightbringerGapReconnectSlot      atomic.Uint64 // Waiting slot that already triggered a Lightbringer reconnect
+	liveRepairSlot                    atomic.Uint64 // Missing streamed slot currently being repaired via RPC, 0 = no repair in flight
+	liveStreamWg                      sync.WaitGroup
+	liveStagingMu                     sync.Mutex
+	liveStagingBuffer                 map[uint64]*b.Block
+	liveStagingOrder                  []uint64
+	liveDeliveryMu                    sync.Mutex
+	liveDeliveryPending               map[uint64]int // assembled blocks queued between stream intake and ordered emitter
+	alpenglowMu                       sync.Mutex
+	knownAlpenglowBlockIDs            map[uint64]solana.Hash
+	knownAlpenglowBlockIDOrder        []uint64
+	activeTurbineReceiver             *turbine.UDPReceiver
 	// Repair-first catchup: gap slots [repairCatchupFrom, repairCatchupUntil]
 	// fill via turbine repair; RPC never fetches at/above the gate while
 	// pending or active. The pending hold persists from construction until
@@ -724,69 +726,72 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 	}
 
 	bs := &BlockSource{
-		rpcClients:                     rpcClients,
-		streamChan:                     make(chan *b.Block, streamChanBuffer),
-		startSlot:                      opts.StartSlot,
-		endSlot:                        opts.EndSlot,
-		currentSlot:                    opts.StartSlot,
-		blockDir:                       opts.BlockDir,
-		sourceType:                     opts.SourceType,
-		finalizedOnly:                  opts.FinalizedOnly,
-		rateLimiter:                    rate.NewLimiter(rate.Limit(maxRPS), maxRPS),
-		maxInflight:                    maxInflight,
-		tipSafetyMargin:                tipSafetyMargin,
-		tipPollInterval:                time.Duration(tipPollMs) * time.Millisecond,
-		reorderBuffer:                  make(map[uint64]*b.Block),
-		skippedSlots:                   make(map[uint64]bool),
-		liveSynthesizedSkips:           make(map[uint64]bool),
-		alpenglowCertifiedSkips:        make(map[uint64]bool),
-		liveDeliveryPending:            make(map[uint64]int),
-		emittedAlpenglowBlockIDs:       make(map[uint64]solana.Hash),
-		rejectedAlpenglowBlockIDs:      make(map[uint64]map[solana.Hash]struct{}),
-		invalidAlpenglowBlockIDs:       make(map[uint64]map[solana.Hash]struct{}),
-		authoritativeAlpenglowBlockIDs: make(map[uint64]solana.Hash),
-		alpenglowParentSwitchCh:        make(chan AlpenglowParentSwitch, 1),
-		nextSlotToSend:                 opts.StartSlot,
-		maxPending:                     defaultMaxPending,
-		slotState:                      make(map[uint64]slotStatus),
-		inflightStart:                  make(map[uint64]time.Time),
-		workQueue:                      make(chan uint64, maxInflight*2),
-		resultQueue:                    make(chan fetchResult, maxInflight*2),
-		stopChan:                       make(chan struct{}),
-		stallTimeout:                   defaultStallTimeout,
-		catchupTipSafety:               tipSafetyMargin, // Store original for switching back to catchup
-		lightbringerEndpoint:           opts.LightbringerEndpoint,
-		turbineBindAddr:                opts.TurbineBindAddr,
-		repairCatchupMaxGapSlots:       opts.RepairCatchupMaxGapSlots,
-		repairMaxRequestsPerSecond:     opts.RepairMaxRequestsPerSecond,
-		shredSpoolDir:                  opts.ShredSpoolDir,
-		rpcFallbackEnabled:             !opts.DisableRPCBlockFetch,
-		turbineGossipEntrypoint:        opts.TurbineGossipEntrypoint,
-		turbineGossipBindAddr:          opts.TurbineGossipBindAddr,
-		turbineAdvertisedIP:            opts.TurbineAdvertisedIP,
-		turbineShredVersion:            opts.TurbineShredVersion,
-		turbineAlpenglowAddr:           opts.TurbineAlpenglowAddr,
-		turbineAlpenglowBlockIDHints:   opts.TurbineAlpenglowBlockIDHints,
-		turbineIdentity:                clonePrivateKey(opts.TurbineIdentity),
-		leaderForSlot:                  opts.LeaderForSlot,
-		turbineStakesForSlot:           opts.TurbineStakesForSlot,
-		turbineEpochForSlot:            opts.TurbineEpochForSlot,
-		turbineRootSlot:                opts.TurbineRootSlot,
-		turbineUseChaCha8:              opts.TurbineUseChaCha8,
-		turbineDedupAddrs:              opts.TurbineDedupAddrs,
-		localLeaderForSlot:             opts.LocalLeaderForSlot,
-		localBlocks:                    opts.LocalBlocks,
-		gossipClient:                   opts.GossipClient,
-		alpenglowDecisionSource:        opts.AlpenglowDecisionSource,
-		alpenglowCandidateBlockSink:    opts.AlpenglowCandidateBlockSink,
-		alpenglowCandidateValidator:    opts.AlpenglowCandidateValidator,
-		alpenglowInvalidBlockSink:      opts.AlpenglowInvalidBlockSink,
-		alpenglowFirstShredSink:        opts.AlpenglowFirstShredSink,
-		alpenglowFooterCertSink:        opts.AlpenglowFooterCertSink,
-		alpenglowWantedBlocksFn:        opts.AlpenglowWantedBlocks,
-		alpenglowSkipCertifiedFn:       opts.AlpenglowSkipCertified,
-		liveStagingBuffer:              make(map[uint64]*b.Block),
-		knownAlpenglowBlockIDs:         make(map[uint64]solana.Hash),
+		rpcClients:                        rpcClients,
+		streamChan:                        make(chan *b.Block, streamChanBuffer),
+		startSlot:                         opts.StartSlot,
+		endSlot:                           opts.EndSlot,
+		currentSlot:                       opts.StartSlot,
+		blockDir:                          opts.BlockDir,
+		sourceType:                        opts.SourceType,
+		finalizedOnly:                     opts.FinalizedOnly,
+		rateLimiter:                       rate.NewLimiter(rate.Limit(maxRPS), maxRPS),
+		maxInflight:                       maxInflight,
+		tipSafetyMargin:                   tipSafetyMargin,
+		tipPollInterval:                   time.Duration(tipPollMs) * time.Millisecond,
+		reorderBuffer:                     make(map[uint64]*b.Block),
+		skippedSlots:                      make(map[uint64]bool),
+		liveSynthesizedSkips:              make(map[uint64]bool),
+		alpenglowCertifiedSkips:           make(map[uint64]bool),
+		liveDeliveryPending:               make(map[uint64]int),
+		emittedAlpenglowBlockIDs:          make(map[uint64]solana.Hash),
+		rejectedAlpenglowBlockIDs:         make(map[uint64]map[solana.Hash]struct{}),
+		invalidAlpenglowBlockIDs:          make(map[uint64]map[solana.Hash]struct{}),
+		authoritativeAlpenglowBlockIDs:    make(map[uint64]solana.Hash),
+		alpenglowParentSwitchCh:           make(chan AlpenglowParentSwitch, 1),
+		nextSlotToSend:                    opts.StartSlot,
+		maxPending:                        defaultMaxPending,
+		slotState:                         make(map[uint64]slotStatus),
+		inflightStart:                     make(map[uint64]time.Time),
+		workQueue:                         make(chan uint64, maxInflight*2),
+		resultQueue:                       make(chan fetchResult, maxInflight*2),
+		stopChan:                          make(chan struct{}),
+		stallTimeout:                      defaultStallTimeout,
+		catchupTipSafety:                  tipSafetyMargin, // Store original for switching back to catchup
+		lightbringerEndpoint:              opts.LightbringerEndpoint,
+		turbineBindAddr:                   opts.TurbineBindAddr,
+		repairCatchupMaxGapSlots:          opts.RepairCatchupMaxGapSlots,
+		repairMaxRequestsPerSecond:        opts.RepairMaxRequestsPerSecond,
+		shredSpoolDir:                     opts.ShredSpoolDir,
+		rpcFallbackEnabled:                !opts.DisableRPCBlockFetch,
+		turbineGossipEntrypoint:           opts.TurbineGossipEntrypoint,
+		turbineGossipBindAddr:             opts.TurbineGossipBindAddr,
+		turbineAdvertisedIP:               opts.TurbineAdvertisedIP,
+		turbineShredVersion:               opts.TurbineShredVersion,
+		turbineAlpenglowAddr:              opts.TurbineAlpenglowAddr,
+		turbineAlpenglowBlockIDHints:      opts.TurbineAlpenglowBlockIDHints,
+		turbineMaxDataShredsForSlot:       opts.TurbineMaxDataShredsForSlot,
+		turbineFixedFECForSlot:            opts.TurbineFixedFECForSlot,
+		turbineDiscardDataCompleteForSlot: opts.TurbineDiscardDataCompleteForSlot,
+		turbineIdentity:                   clonePrivateKey(opts.TurbineIdentity),
+		leaderForSlot:                     opts.LeaderForSlot,
+		turbineStakesForSlot:              opts.TurbineStakesForSlot,
+		turbineEpochForSlot:               opts.TurbineEpochForSlot,
+		turbineRootSlot:                   opts.TurbineRootSlot,
+		turbineUseChaCha8:                 opts.TurbineUseChaCha8,
+		turbineDedupAddrs:                 opts.TurbineDedupAddrs,
+		localLeaderForSlot:                opts.LocalLeaderForSlot,
+		localBlocks:                       opts.LocalBlocks,
+		gossipClient:                      opts.GossipClient,
+		alpenglowDecisionSource:           opts.AlpenglowDecisionSource,
+		alpenglowCandidateBlockSink:       opts.AlpenglowCandidateBlockSink,
+		alpenglowCandidateValidator:       opts.AlpenglowCandidateValidator,
+		alpenglowInvalidBlockSink:         opts.AlpenglowInvalidBlockSink,
+		alpenglowFirstShredSink:           opts.AlpenglowFirstShredSink,
+		alpenglowFooterCertSink:           opts.AlpenglowFooterCertSink,
+		alpenglowWantedBlocksFn:           opts.AlpenglowWantedBlocks,
+		alpenglowSkipCertifiedFn:          opts.AlpenglowSkipCertified,
+		liveStagingBuffer:                 make(map[uint64]*b.Block),
+		knownAlpenglowBlockIDs:            make(map[uint64]solana.Hash),
 
 		// Configurable mode thresholds
 		nearTipThreshold:    uint64(nearTipThreshold),
@@ -813,19 +818,6 @@ func NewBlockSource(opts *BlockSourceOpts) *BlockSource {
 		bs.emittedAlpenglowBlockIDs[anchorSlot] = opts.InitialAlpenglowBlockID
 		bs.emittedAlpenglowBlockIDOrder = append(bs.emittedAlpenglowBlockIDOrder, anchorSlot)
 		mlog.Log.Infof("ALPENGLOW resume anchor: seeded block id %s at rooted slot %d", opts.InitialAlpenglowBlockID, anchorSlot)
-	}
-
-	// Prewarm handover: blocks the boot-time receiver collected while the
-	// AccountsDB built. Staged now so the handoff runway can arm the moment
-	// the drive starts — the pre-join repair hole these replace is the
-	// single most expensive thing repair-only catchup does.
-	if len(opts.PrewarmBlocks) > 0 {
-		for _, blk := range opts.PrewarmBlocks {
-			bs.bufferLiveStreamBlock(blk)
-		}
-		first := opts.PrewarmBlocks[0].Slot
-		last := opts.PrewarmBlocks[len(opts.PrewarmBlocks)-1].Slot
-		mlog.Log.Infof("turbine prewarm: staged %d pre-collected blocks (slots %d..%d)", len(opts.PrewarmBlocks), first, last)
 	}
 
 	// Log RPC configuration

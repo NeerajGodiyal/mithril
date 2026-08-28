@@ -4,11 +4,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"fmt"
-	"sort"
 	"sync"
 	"time"
 
-	b "github.com/Overclock-Validator/mithril/pkg/block"
 	gossipclient "github.com/Overclock-Validator/mithril/pkg/gossip"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/turbine"
@@ -22,8 +20,8 @@ import (
 // each FEC set for free. Starting collection the moment current-epoch
 // stakes are known (the incremental snapshot manifest parse, a minute
 // before the AccountsDB finishes building) turns the expensive pre-join
-// repair hole into spooled blocks handed to the BlockSource at replay
-// start.
+// repair hole into raw verified shreds that the BlockSource revalidates at
+// replay start.
 type TurbinePrewarm struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
@@ -31,11 +29,8 @@ type TurbinePrewarm struct {
 	receiver   *turbine.UDPReceiver
 
 	mu        sync.Mutex
-	spool     map[uint64]*b.Block
 	floor     uint64
 	probeNext uint64 // next frontier slot the rolling probe will pin
-	capacity  int
-	dropped   int
 	stopped   bool
 }
 
@@ -71,28 +66,24 @@ type TurbinePrewarmConfig struct {
 	UseChaCha8       bool
 	DedupAddrs       bool
 	FloorSlot        uint64 // resume frontier: spool floor and assembler retention floor
-	MaxSpoolBlocks   int
-	// ShredSpoolDir: shared on-disk shred spool. Everything the prewarm
-	// hears goes to disk too, so even blocks beyond the in-RAM spool cap
-	// hydrate later instead of re-repairing.
+	// ShredSpoolDir is required. Prewarm stores verified raw shreds only;
+	// the live receiver revalidates them under the slot policy in force at
+	// handover instead of trusting blocks assembled during bootstrap.
 	ShredSpoolDir string
 	// RepairMaxRequestsPerSecond mirrors the BlockSource's repair rate
 	// ceiling override (0 = default).
 	RepairMaxRequestsPerSecond int
 }
 
-// StartTurbinePrewarm joins gossip, starts a shred receiver with the
-// retention floor pinned at the resume frontier, and spools completed
-// blocks. Fail-open by design: any error means "no prewarm", never a
-// blocked boot.
+// StartTurbinePrewarm joins gossip and starts a shred receiver with the
+// retention floor pinned at the resume frontier. Fail-open by design: any
+// error means "no prewarm", never a blocked boot.
 func StartTurbinePrewarm(cfg TurbinePrewarmConfig) (*TurbinePrewarm, error) {
 	if cfg.BindAddr == "" || cfg.GossipEntrypoint == "" {
 		return nil, fmt.Errorf("turbine prewarm needs a bind address and gossip entrypoint")
 	}
-	if cfg.MaxSpoolBlocks <= 0 {
-		// Below the staging buffer's 256-slot cap so the handover injection
-		// never evicts.
-		cfg.MaxSpoolBlocks = 192
+	if cfg.ShredSpoolDir == "" {
+		return nil, fmt.Errorf("turbine prewarm needs a shred spool directory")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -140,16 +131,15 @@ func StartTurbinePrewarm(cfg TurbinePrewarmConfig) (*TurbinePrewarm, error) {
 	if cfg.FloorSlot > 0 {
 		receiver.SetRetentionFloor(cfg.FloorSlot)
 	}
-	if cfg.ShredSpoolDir != "" {
-		if spool, serr := turbine.OpenShredSpool(cfg.ShredSpoolDir, shredSpoolMaxBytes); serr != nil {
-			mlog.Log.FileOnlyf("prewarm shred spool disabled: %v", serr)
-		} else {
-			receiver.SetShredSpool(spool)
-			// Assemble the resume-adjacent window in RAM; spool the far
-			// edge to disk only.
-			receiver.SetHydrationWindow(cfg.FloorSlot, cfg.FloorSlot+repairCatchupLiveDeliverWindow)
-		}
+	spool, err := turbine.OpenShredSpool(cfg.ShredSpoolDir, shredSpoolMaxBytes)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("open prewarm shred spool: %w", err)
 	}
+	receiver.SetShredSpool(spool)
+	// Assemble the resume-adjacent window in RAM to drive the rolling repair
+	// probe. Only the verified raw shreds survive handover.
+	receiver.SetHydrationWindow(cfg.FloorSlot, cfg.FloorSlot+repairCatchupLiveDeliverWindow)
 
 	if cfg.FloorSlot > 0 {
 		receiver.PrioritizeRepairRange(cfg.FloorSlot, cfg.FloorSlot+prewarmProbeSlots-1)
@@ -160,10 +150,8 @@ func StartTurbinePrewarm(cfg TurbinePrewarmConfig) (*TurbinePrewarm, error) {
 		done:       make(chan struct{}),
 		gossipDone: make(chan struct{}),
 		receiver:   receiver,
-		spool:      make(map[uint64]*b.Block),
 		floor:      cfg.FloorSlot,
 		probeNext:  cfg.FloorSlot + prewarmProbeSlots,
-		capacity:   cfg.MaxSpoolBlocks,
 	}
 
 	go func() {
@@ -181,6 +169,7 @@ func StartTurbinePrewarm(cfg TurbinePrewarmConfig) (*TurbinePrewarm, error) {
 	case err := <-receiverDone:
 		cancel()
 		<-pw.gossipDone
+		spool.Close()
 		close(pw.done)
 		return nil, fmt.Errorf("prewarm receiver failed to start: %v", err)
 	case rerr := <-receiver.Ready():
@@ -188,6 +177,7 @@ func StartTurbinePrewarm(cfg TurbinePrewarmConfig) (*TurbinePrewarm, error) {
 			cancel()
 			<-receiverDone
 			<-pw.gossipDone
+			spool.Close()
 			close(pw.done)
 			return nil, fmt.Errorf("prewarm receiver not ready: %v", rerr)
 		}
@@ -195,6 +185,7 @@ func StartTurbinePrewarm(cfg TurbinePrewarmConfig) (*TurbinePrewarm, error) {
 		cancel()
 		<-receiverDone
 		<-pw.gossipDone
+		spool.Close()
 		close(pw.done)
 		return nil, fmt.Errorf("prewarm receiver not ready within 15s")
 	}
@@ -205,8 +196,9 @@ func StartTurbinePrewarm(cfg TurbinePrewarmConfig) (*TurbinePrewarm, error) {
 	return pw, nil
 }
 
-// drain spools completed blocks (lowest slots win: they are the ones repair
-// cannot fetch cheaply later) and discards receiver errors quietly.
+// drain observes completed blocks to roll the frontier probe. Raw verified
+// shreds are already persisted by the receiver and are revalidated after
+// handover; completed blocks are deliberately not retained here.
 func (pw *TurbinePrewarm) drain(receiver *turbine.UDPReceiver, metricsPublisher *turbineReceiverMetricsPublisher) {
 	defer close(pw.done)
 	defer metricsPublisher.publish(receiver, false)
@@ -220,7 +212,9 @@ func (pw *TurbinePrewarm) drain(receiver *turbine.UDPReceiver, metricsPublisher 
 			if !ok {
 				return
 			}
-			pw.add(blk)
+			if blk != nil {
+				pw.noteCompleted(blk.Slot)
+			}
 		case _, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -232,44 +226,21 @@ func (pw *TurbinePrewarm) drain(receiver *turbine.UDPReceiver, metricsPublisher 
 	}
 }
 
-func (pw *TurbinePrewarm) add(blk *b.Block) {
-	if blk == nil {
-		return
-	}
+func (pw *TurbinePrewarm) noteCompleted(slot uint64) {
 	pw.mu.Lock()
 	defer pw.mu.Unlock()
 	if pw.stopped {
 		return
 	}
-	if pw.floor > 0 && blk.Slot < pw.floor {
+	if pw.floor > 0 && slot < pw.floor {
 		return
 	}
-	if _, exists := pw.spool[blk.Slot]; exists {
-		return
-	}
-	pw.spool[blk.Slot] = blk
 	// Roll the probe frontier: a completed slot inside the probe window
 	// frees repair budget — pin the next frontier slot so a long build
 	// keeps filling forward instead of idling once the prefix completes.
-	if pw.floor > 0 && blk.Slot < pw.probeNext && pw.receiver != nil {
+	if pw.floor > 0 && slot < pw.probeNext && pw.receiver != nil {
 		pw.receiver.PrioritizeRepairSlot(pw.probeNext)
 		pw.probeNext++
-	}
-	// Over capacity: evict the HIGHEST slot. The low end borders the resume
-	// frontier and is what emission needs first — and what repair would
-	// otherwise fetch one shred at a time; the high end is re-fetchable
-	// cheaply near the tip later.
-	for len(pw.spool) > pw.capacity {
-		var victim uint64
-		first := true
-		for slot := range pw.spool {
-			if first || slot > victim {
-				victim = slot
-				first = false
-			}
-		}
-		delete(pw.spool, victim)
-		pw.dropped++
 	}
 }
 
@@ -287,11 +258,6 @@ func (pw *TurbinePrewarm) AdvanceFloor(floor uint64) {
 	}
 	pw.floor = floor
 	pw.probeNext = floor + prewarmProbeSlots
-	for slot := range pw.spool {
-		if slot < floor {
-			delete(pw.spool, slot)
-		}
-	}
 	if pw.receiver != nil {
 		pw.receiver.SetRetentionFloor(floor)
 		pw.receiver.SetHydrationWindow(floor, floor+repairCatchupLiveDeliverWindow)
@@ -299,21 +265,12 @@ func (pw *TurbinePrewarm) AdvanceFloor(floor uint64) {
 	}
 }
 
-// Handover stops collection (freeing the turbine bind port for the
-// BlockSource) and returns the spooled blocks in ascending slot order,
-// along with how many overflowed the spool.
-func (pw *TurbinePrewarm) Handover() ([]*b.Block, int) {
+// Handover stops collection, closes the spool, and frees the turbine bind
+// port. The BlockSource then opens the same spool and revalidates every raw
+// shred with its current slot policy.
+func (pw *TurbinePrewarm) Handover() {
 	pw.logProbeOutcome() // before Stop: receiver stats die with the receiver
 	pw.Stop()
-	pw.mu.Lock()
-	defer pw.mu.Unlock()
-	blocks := make([]*b.Block, 0, len(pw.spool))
-	for _, blk := range pw.spool {
-		blocks = append(blocks, blk)
-	}
-	sort.Slice(blocks, func(i, j int) bool { return blocks[i].Slot < blocks[j].Slot })
-	pw.spool = nil
-	return blocks, pw.dropped
 }
 
 // logProbeOutcome reports the boot-time frontier probe: how many of the

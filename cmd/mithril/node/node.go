@@ -81,6 +81,7 @@ var (
 	scratchDirectory                string
 	rpcEndpoints                    []string
 	cluster                         string // "alpenglow", "mainnet-beta", "testnet", or "devnet"
+	allowPrivateAddr                bool   // match Agave's network address-space policy
 	legacyGenesisHash               string // explicit lineage for pre-binding AccountsDB/ledger artifacts
 	blockSource                     string // "turbine", "rpc", or "lightbringer"
 	lightbringerEndpoint            string
@@ -538,6 +539,7 @@ func init() {
 	// [network] section flags
 	Run.Flags().StringSliceVarP(&rpcEndpoints, "rpc", "r", []string{}, "URL(s) for RPC endpoint(s) - can specify multiple")
 	Run.Flags().StringVar(&cluster, "cluster", "", "Solana cluster: 'alpenglow' (default), 'mainnet-beta', 'testnet', or 'devnet'")
+	Run.Flags().BoolVar(&allowPrivateAddr, "allow-private-addr", false, "Allow private addresses for Alpenglow Votor peers")
 	Run.Flags().StringVar(&legacyGenesisHash, "legacy-genesis-hash", "", "Genesis hash owning legacy unbound AccountsDB/ledger artifacts (one-time re-genesis safety acknowledgement)")
 
 	// [rpc] section flags (Mithril's RPC server)
@@ -822,6 +824,7 @@ func initConfigAndBindFlags(cmd *cobra.Command) error {
 		cluster = "alpenglow"
 		mlog.Log.Infof("network.cluster not set; defaulting to %q", cluster)
 	}
+	allowPrivateAddr = getBool("allow-private-addr", "network.allow_private_addr")
 	legacyGenesisHash = strings.TrimSpace(getString("legacy-genesis-hash", "network.legacy_genesis_hash"))
 	if legacyGenesisHash != "" {
 		if err := validateGenesisHashString("network.legacy_genesis_hash", legacyGenesisHash); err != nil {
@@ -2543,6 +2546,7 @@ postBootstrap:
 			AlpenglowBLSDST:           alpenglowBLSDST,
 			AlpenglowShredVersion:     uint16(turbineShredVersion),
 			AlpenglowIdentity:         validatorIdentity,
+			AlpenglowAllowPrivateAddr: allowPrivateAddr,
 		})
 		if err != nil {
 			klog.Fatalf("unable to create consensus engine: %v", err)
@@ -2599,15 +2603,10 @@ postBootstrap:
 
 	localBlocks := make(chan *block.Block, 16)
 	var sharedGossip *gossip.Client
-	var validatorPrewarmBlocks []*block.Block
 	if consensusMode == "validator" {
 		if turbinePrewarm != nil {
-			var dropped int
-			validatorPrewarmBlocks, dropped = turbinePrewarm.Handover()
+			turbinePrewarm.Handover()
 			turbinePrewarm = nil
-			if len(validatorPrewarmBlocks) > 0 || dropped > 0 {
-				mlog.Log.Infof("turbine prewarm handover for validator startup: %d blocks (%d dropped)", len(validatorPrewarmBlocks), dropped)
-			}
 		}
 
 		advertisedIP := validatorAdvertisedIP
@@ -2831,7 +2830,6 @@ postBootstrap:
 		RepairMaxRequestsPerSecond: repairMaxRequestsPerSecond,
 		DisableRPCBlockFetch:       !blockRPCFallback,
 		TurbinePrewarm:             turbinePrewarm,
-		PrewarmBlocks:              validatorPrewarmBlocks,
 		ShredSpoolDir:              catchupShredSpoolDir(),
 		GossipClient:               sharedGossip,
 		TurbineStakesForSlot:       turbineStakesForSlot,
