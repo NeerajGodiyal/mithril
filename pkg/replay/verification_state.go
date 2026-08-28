@@ -142,13 +142,18 @@ func updateVerificationProgress(state VerificationState, verified, eligible uint
 	verificationTransitionMu.Lock()
 	defer verificationTransitionMu.Unlock()
 	verificationStatus.SetWatermarks(verified, eligible)
-	verificationStatus.Set(state)
+	if !verificationStatus.Set(state) {
+		state, _, verified, eligible = verificationStatus.Snapshot()
+	}
+	publishVerificationProgress(state, verified, eligible)
 }
 
 func MarkVerificationDiverged() {
 	verificationTransitionMu.Lock()
+	defer verificationTransitionMu.Unlock()
 	verificationStatus.MarkDiverged()
-	verificationTransitionMu.Unlock()
+	_, _, verified, eligible := verificationStatus.Snapshot()
+	publishVerificationProgress(VerificationDiverged, verified, eligible)
 }
 
 // HasActivePersistedVerificationDivergence restores the fail-closed gate on a

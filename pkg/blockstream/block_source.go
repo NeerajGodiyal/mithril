@@ -3864,6 +3864,9 @@ func (bs *BlockSource) currentSourceSnapshot() (string, string, uint64) {
 		if bs.liveStreamActive.Load() {
 			return source, source + " live stream", handoffSlot
 		}
+		if bs.sourceType == BlockSourceTurbine && !bs.rpcFallbackEnabled {
+			return source, source + " shreds and repair", handoffSlot
+		}
 		if cooldownUntil != 0 {
 			if connected && lastStreamSlot != 0 {
 				return "rpc", fmt.Sprintf("rpc, stabilising after %s gap until slot %d (latest streamed slot %d)", source, cooldownUntil, lastStreamSlot), 0

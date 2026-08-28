@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Overclock-Validator/mithril/internal/mcpwire"
@@ -110,6 +111,21 @@ var (
 	TasksIndexEntryBuilderLatency               = Metric{"tasks_index_entry_builder_latency"}
 	TasksAppendVecCopyingLatency                = Metric{"tasks_append_vec_copying_latency"}
 	SlotReplayDurationMs                        = Metric{"slot_replay_duration_ms"}
+	ReplaySlotDurationSeconds                   = Metric{"mithril_replay_slot_duration_seconds"}
+	RuntimeInfo                                 = Metric{"mithril_runtime_info"}
+	BlockSourceActive                           = Metric{"mithril_block_source_active"}
+	ReplayLastSuccessTimestamp                  = Metric{"mithril_replay_last_success_timestamp_seconds"}
+	ReplayObservationStartedTimestamp           = Metric{"mithril_replay_observation_started_timestamp_seconds"}
+	EffectiveSlotDurationSeconds                = Metric{"mithril_effective_slot_duration_seconds"}
+	MonitoringSchemaReady                       = Metric{"mithril_monitoring_schema_ready"}
+	VerifiedSlot                                = Metric{"mithril_verified_slot"}
+	VerificationRequired                        = Metric{"mithril_verification_required"}
+	VerificationLagSlots                        = Metric{"mithril_verification_lag_slots"}
+	VerifierConfiguredLagSlots                  = Metric{"mithril_verifier_configured_lag_slots"}
+	FoldBatchSlotsMetric                        = Metric{"mithril_fold_batch_slots"}
+	UnrootedTailSlots                           = Metric{"mithril_unrooted_tail_slots"}
+	UnrootedTailLimitSlots                      = Metric{"mithril_unrooted_tail_limit_slots"}
+	VerificationStateMetric                     = Metric{"mithril_verification_state"}
 	TxsPerBlock                                 = Metric{"txs_per_block"}
 	SnapshotTarBytesRead                        = Metric{"snapshot_tar_bytes_read"}
 	SnapshotBootstrapActive                     = Metric{"snapshot_bootstrap_active"}
@@ -154,6 +170,7 @@ var (
 	MithrilReplaySlot             = Metric{"mithril_replay_slot"}
 	MithrilRootedSlot             = Metric{"mithril_rooted_slot"}
 	MithrilFinalitySlot           = Metric{"mithril_finality_slot"}
+	MithrilFinalitySourceSlot     = Metric{"mithril_finality_source_slot"}
 	MithrilVoterStageObservations = Metric{"mithril_voter_stage_observations"}
 	MithrilVoterStageLatencyUS    = Metric{"mithril_voter_stage_latency_us"}
 	MithrilVoterPeerConnections   = Metric{"mithril_voter_peer_connections"}
@@ -248,8 +265,9 @@ var MetricToType = map[Metric]metricType{
 	TasksIndexEntryBuilderLatency:  TimingT,
 	TasksAppendVecCopyingLatency:   TimingT,
 
-	SlotReplayDurationMs: TimingT,
-	TxsPerBlock:          TimingT,
+	SlotReplayDurationMs:      TimingT,
+	ReplaySlotDurationSeconds: TimingT,
+	TxsPerBlock:               TimingT,
 
 	SnapshotTarBytesRead:               CountT,
 	SlotReplays:                        CountT,
@@ -277,26 +295,41 @@ var MetricToType = map[Metric]metricType{
 
 	TestCount: CountT,
 
-	SnapshotWorkerPoolUtilization: GaugeT,
-	SnapshotBootstrapActive:       GaugeT,
-	SnapshotBootstrapStartedAt:    GaugeT,
-	TasksSetIfSlotHigherQueueSize: GaugeT,
-	Epoch:                         GaugeT,
-	Slot:                          GaugeT,
-	MithrilReplaySlot:             GaugeT,
-	MithrilRootedSlot:             GaugeT,
-	MithrilFinalitySlot:           GaugeT,
-	MithrilVoterStageObservations: GaugeT,
-	MithrilVoterStageLatencyUS:    GaugeT,
-	MithrilVoterPeerConnections:   GaugeT,
-	MithrilVoterPeerEvents:        GaugeT,
-	MithrilVoterPeerQueueDepth:    GaugeT,
-	TurbineReceiverActive:         GaugeT,
-	TurbineAssemblerActiveSlots:   GaugeT,
-	TurbineLastPacketTimestamp:    GaugeT,
-	TurbineLastDataSlot:           GaugeT,
-	TurbineLastBlockTimestamp:     GaugeT,
-	TurbineLastBlockSlot:          GaugeT,
+	SnapshotWorkerPoolUtilization:     GaugeT,
+	SnapshotBootstrapActive:           GaugeT,
+	SnapshotBootstrapStartedAt:        GaugeT,
+	TasksSetIfSlotHigherQueueSize:     GaugeT,
+	Epoch:                             GaugeT,
+	Slot:                              GaugeT,
+	MithrilReplaySlot:                 GaugeT,
+	MithrilRootedSlot:                 GaugeT,
+	MithrilFinalitySlot:               GaugeT,
+	MithrilFinalitySourceSlot:         GaugeT,
+	RuntimeInfo:                       GaugeT,
+	BlockSourceActive:                 GaugeT,
+	ReplayLastSuccessTimestamp:        GaugeT,
+	ReplayObservationStartedTimestamp: GaugeT,
+	EffectiveSlotDurationSeconds:      GaugeT,
+	MonitoringSchemaReady:             GaugeT,
+	VerifiedSlot:                      GaugeT,
+	VerificationRequired:              GaugeT,
+	VerificationLagSlots:              GaugeT,
+	VerifierConfiguredLagSlots:        GaugeT,
+	FoldBatchSlotsMetric:              GaugeT,
+	UnrootedTailSlots:                 GaugeT,
+	UnrootedTailLimitSlots:            GaugeT,
+	VerificationStateMetric:           GaugeT,
+	MithrilVoterStageObservations:     GaugeT,
+	MithrilVoterStageLatencyUS:        GaugeT,
+	MithrilVoterPeerConnections:       GaugeT,
+	MithrilVoterPeerEvents:            GaugeT,
+	MithrilVoterPeerQueueDepth:        GaugeT,
+	TurbineReceiverActive:             GaugeT,
+	TurbineAssemblerActiveSlots:       GaugeT,
+	TurbineLastPacketTimestamp:        GaugeT,
+	TurbineLastDataSlot:               GaugeT,
+	TurbineLastBlockTimestamp:         GaugeT,
+	TurbineLastBlockSlot:              GaugeT,
 }
 var MetricToLabels = map[Metric][]string{
 	PreprocessBlock:      {"phase"},
@@ -378,6 +411,7 @@ var MetricToLabels = map[Metric][]string{
 	TasksAppendVecCopyingLatency:   {},
 
 	SlotReplayDurationMs:               {},
+	ReplaySlotDurationSeconds:          {},
 	TxsPerBlock:                        {},
 	SnapshotTarBytesRead:               {},
 	SlotReplays:                        {},
@@ -403,26 +437,41 @@ var MetricToLabels = map[Metric][]string{
 	TurbineBlocksEmitted:                        {},
 	TurbineShredsRejected:                       {"reason"},
 
-	SnapshotWorkerPoolUtilization: {"task"},
-	SnapshotBootstrapActive:       {},
-	SnapshotBootstrapStartedAt:    {},
-	TasksSetIfSlotHigherQueueSize: {},
-	Epoch:                         {},
-	Slot:                          {},
-	MithrilReplaySlot:             {},
-	MithrilRootedSlot:             {},
-	MithrilFinalitySlot:           {},
-	MithrilVoterStageObservations: {"stage"},
-	MithrilVoterStageLatencyUS:    {"stage", "statistic"},
-	MithrilVoterPeerConnections:   {"state"},
-	MithrilVoterPeerEvents:        {"event"},
-	MithrilVoterPeerQueueDepth:    {"queue"},
-	TurbineReceiverActive:         {},
-	TurbineAssemblerActiveSlots:   {},
-	TurbineLastPacketTimestamp:    {},
-	TurbineLastDataSlot:           {},
-	TurbineLastBlockTimestamp:     {},
-	TurbineLastBlockSlot:          {},
+	SnapshotWorkerPoolUtilization:     {"task"},
+	SnapshotBootstrapActive:           {},
+	SnapshotBootstrapStartedAt:        {},
+	TasksSetIfSlotHigherQueueSize:     {},
+	Epoch:                             {},
+	Slot:                              {},
+	MithrilReplaySlot:                 {},
+	MithrilRootedSlot:                 {},
+	MithrilFinalitySlot:               {},
+	MithrilFinalitySourceSlot:         {"source"},
+	RuntimeInfo:                       {"protocol_mode", "consensus_mode", "configured_block_source"},
+	BlockSourceActive:                 {"source"},
+	ReplayLastSuccessTimestamp:        {},
+	ReplayObservationStartedTimestamp: {},
+	EffectiveSlotDurationSeconds:      {},
+	MonitoringSchemaReady:             {},
+	VerifiedSlot:                      {},
+	VerificationRequired:              {},
+	VerificationLagSlots:              {},
+	VerifierConfiguredLagSlots:        {},
+	FoldBatchSlotsMetric:              {},
+	UnrootedTailSlots:                 {},
+	UnrootedTailLimitSlots:            {},
+	VerificationStateMetric:           {"state"},
+	MithrilVoterStageObservations:     {"stage"},
+	MithrilVoterStageLatencyUS:        {"stage", "statistic"},
+	MithrilVoterPeerConnections:       {"state"},
+	MithrilVoterPeerEvents:            {"event"},
+	MithrilVoterPeerQueueDepth:        {"queue"},
+	TurbineReceiverActive:             {},
+	TurbineAssemblerActiveSlots:       {},
+	TurbineLastPacketTimestamp:        {},
+	TurbineLastDataSlot:               {},
+	TurbineLastBlockTimestamp:         {},
+	TurbineLastBlockSlot:              {},
 
 	TestCount: {"test"}, // used for testing purposes, not a real metric
 }
@@ -430,6 +479,11 @@ var MetricToLabels = map[Metric][]string{
 var blockProductionDurationBuckets = []float64{
 	0.0005, 0.001, 0.0025, 0.005, 0.010, 0.025, 0.050, 0.075,
 	0.100, 0.125, 0.150, 0.200, 0.400, 0.800, 1.600, 3.200,
+}
+
+var replaySlotDurationBuckets = []float64{
+	0.005, 0.010, 0.025, 0.050, 0.100, 0.200, 0.250, 0.300, 0.350, 0.400,
+	0.800, 1.600, 3.200, 6.400, 12.800,
 }
 
 var turbinePipelineDurationBuckets = []float64{
@@ -447,6 +501,7 @@ var MetricToBuckets = map[Metric][]float64{
 	BlockProductionStartDecisionTickDeliveryLag: blockProductionDurationBuckets,
 	BlockProductionStartDecisionTickWork:        blockProductionDurationBuckets,
 	BlockProductionStartAttempt:                 blockProductionDurationBuckets,
+	ReplaySlotDurationSeconds:                   replaySlotDurationBuckets,
 	TurbineShredCollection:                      turbinePipelineDurationBuckets,
 	TurbineBlockCompletionQueueDelay:            turbinePipelineDurationBuckets,
 	TurbineBlockDecode:                          turbinePipelineDurationBuckets,
@@ -473,9 +528,10 @@ var MetricToBuckets = map[Metric][]float64{
 }
 
 type Prometheusmetrics struct {
-	counters   map[Metric]*prometheus.CounterVec
-	gauges     map[Metric]*prometheus.GaugeVec
-	histograms map[Metric]*prometheus.HistogramVec
+	counters     map[Metric]*prometheus.CounterVec
+	gauges       map[Metric]*prometheus.GaugeVec
+	atomicGauges map[Metric]*atomicGaugeFamily
+	histograms   map[Metric]*prometheus.HistogramVec
 }
 
 var metricsCollection *Prometheusmetrics
@@ -531,9 +587,10 @@ func startMetricsServer(addr string) error {
 
 func initializeStatsdMetrics() Prometheusmetrics {
 	metricsCollection = &Prometheusmetrics{
-		counters:   make(map[Metric]*prometheus.CounterVec),
-		gauges:     make(map[Metric]*prometheus.GaugeVec),
-		histograms: make(map[Metric]*prometheus.HistogramVec),
+		counters:     make(map[Metric]*prometheus.CounterVec),
+		gauges:       make(map[Metric]*prometheus.GaugeVec),
+		atomicGauges: make(map[Metric]*atomicGaugeFamily),
+		histograms:   make(map[Metric]*prometheus.HistogramVec),
 	}
 	for m, t := range MetricToType {
 		labelNames := MetricToLabels[m]
@@ -556,6 +613,12 @@ func initializeStatsdMetrics() Prometheusmetrics {
 			}, labelNames)
 			metricsCollection.counters[m] = cv
 		case GaugeT:
+			if isAtomicGaugeMetric(m) {
+				family := newAtomicGaugeFamily(m.name, fmt.Sprintf("Gauge for %s", m.name), labelNames[0])
+				prometheus.MustRegister(family)
+				metricsCollection.atomicGauges[m] = family
+				continue
+			}
 			gv := promauto.NewGaugeVec(prometheus.GaugeOpts{
 				Name: m.name,
 				Help: fmt.Sprintf("Gauge for %s", m.name),
@@ -578,17 +641,70 @@ func Gauge(m Metric, value float64, labels []string) error {
 	if labels == nil {
 		labels = []string{}
 	}
+	if metricsCollection.atomicGauges[m] != nil {
+		return fmt.Errorf("atomic gauge %s requires ReplaceGaugeFamily", m.name)
+	}
 	metricsCollection.gauges[m].WithLabelValues(labels...).Set(value)
 	return nil
 }
 
-// BeginSnapshotBootstrap exposes the node-owned bootstrap lifetime. The
-// returned function clears only the active flag; the timestamp remains as the
-// most recent start for post-run evidence.
+func isAtomicGaugeMetric(metric Metric) bool {
+	switch metric {
+	case BlockSourceActive, MithrilFinalitySourceSlot, VerificationStateMetric:
+		return true
+	default:
+		return false
+	}
+}
+
+// InitializeHistogramSeries makes a required histogram visible before its first observation.
+func InitializeHistogramSeries(metric Metric, labels []string) error {
+	histogram := metricsCollection.histograms[metric]
+	if histogram == nil {
+		return fmt.Errorf("metric %s is not an initialized histogram", metric)
+	}
+	if labels == nil {
+		labels = []string{}
+	}
+	_, err := histogram.GetMetricWithLabelValues(labels...)
+	return err
+}
+
+// InitializeMonitoringLifecycle publishes startup-safe values before the metrics listener opens.
+func InitializeMonitoringLifecycle() {
+	_ = Gauge(MonitoringSchemaReady, 0, nil)
+	_ = Gauge(SnapshotBootstrapActive, 0, nil)
+	_ = Gauge(SnapshotBootstrapStartedAt, 0, nil)
+}
+
+var (
+	snapshotBootstrapMu    sync.Mutex
+	snapshotBootstrapDepth int
+)
+
+// BeginSnapshotBootstrap exposes the full nested bootstrap lifetime.
 func BeginSnapshotBootstrap() func() {
-	_ = Gauge(SnapshotBootstrapStartedAt, float64(time.Now().Unix()), nil)
-	_ = Gauge(SnapshotBootstrapActive, 1, nil)
-	return func() { _ = Gauge(SnapshotBootstrapActive, 0, nil) }
+	snapshotBootstrapMu.Lock()
+	if snapshotBootstrapDepth == 0 {
+		_ = Gauge(SnapshotBootstrapStartedAt, float64(time.Now().Unix()), nil)
+		_ = Gauge(SnapshotBootstrapActive, 1, nil)
+	}
+	snapshotBootstrapDepth++
+	snapshotBootstrapMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			snapshotBootstrapMu.Lock()
+			defer snapshotBootstrapMu.Unlock()
+			if snapshotBootstrapDepth > 0 {
+				snapshotBootstrapDepth--
+			}
+			if snapshotBootstrapDepth == 0 {
+				_ = Gauge(SnapshotBootstrapActive, 0, nil)
+			}
+		})
+	}
 }
 
 // TurbineReceiverSnapshot is the bounded receiver state exported to metrics.

@@ -2151,8 +2151,14 @@ func ReplayBlocks(
 
 	lastRootedWatermark := mithrilState.DurableHighWater() // highest certificate/delegated finality slot seen
 	var highestExecutedSlot uint64                         // highest slot ProcessBlock has executed; bounds the promotion-gate walk
+	monitoringFinalitySlot := lastRootedWatermark
+	monitoringFinalitySource := "classic"
+	if alpenglowMode {
+		// A restored Alpenglow watermark may combine certificate and delegated
+		// finality, so publish it as mixed until this run observes a newer source.
+		monitoringFinalitySource = "mixed"
+	}
 	statsd.Gauge(statsd.MithrilRootedSlot, float64(lastRootedWatermark), nil)
-	statsd.Gauge(statsd.MithrilFinalitySlot, float64(lastRootedWatermark), nil)
 	// While partitioned rewards distribute, promotion holds below the boundary
 	// block so a crash-resume always re-runs it (the distribution bookkeeping is
 	// RAM-only and not reconstructible mid-window). Self-clears when the window
@@ -2282,6 +2288,14 @@ func ReplayBlocks(
 		durableVerificationSlot,
 		HasActivePersistedVerificationDivergence(mithrilState, alpenglowMode),
 	)
+	initialVerificationState, _, _, _ := VerificationSnapshot()
+	publishVerificationStartupMetrics(
+		verificationRequired,
+		initialVerificationState,
+		lastRootedWatermark,
+		monitoringFinalitySource,
+	)
+	publishEffectiveSlotDuration(alpenglowMode, replayCtx.CurrentFeatures, epochSchedule, startSlot)
 	// Switch sweep: detects executed slots contradicted by later decisive
 	// certificates (wrong sibling / certified skip) under execute-on-receipt.
 	switchSweeper := newAlpenglowSwitchSweeper(consensusEngine)
@@ -2312,7 +2326,7 @@ func ReplayBlocks(
 		mithrilState.LastRootedSlot = promotedThrough
 		mithrilState.LastRootedBankhash = rootedCtx.Bankhash
 		mithrilState.LastRootedContext = rootedCtx
-		statsd.Gauge(statsd.MithrilRootedSlot, float64(promotedThrough), nil)
+		publishPromotionMetrics(promotedThrough, unrootedTailState)
 		if transactionStatuses.Root(promotedThrough) {
 			mlog.Log.Infof("transaction status cache reconstructed complete %d-root coverage through durable slot %d",
 				maxTransactionStatusRoots, promotedThrough)
@@ -2648,6 +2662,9 @@ func ReplayBlocks(
 	}
 
 	blockStream := blockstream.NewBlockSource(opts)
+	blockStream.PublishSourceMetrics()
+	_ = statsd.Gauge(statsd.ReplayObservationStartedTimestamp, float64(time.Now().Unix()), nil)
+	_ = statsd.Gauge(statsd.MonitoringSchemaReady, 1, nil)
 
 	if !isLive {
 		blockStream.DownloadInitialBlocks()
@@ -2724,6 +2741,7 @@ func ReplayBlocks(
 			mlog.Log.Warnf("%v — in-RAM unwind unavailable (%s); re-replaying from the rooted checkpoint", sw, fallbackReason)
 			return false
 		}
+		publishUnrootedTailMetrics(unrootedTailState)
 		if statusErr := transactionStatuses.Unwind(sw.Slot); statusErr != nil {
 			windowSwitchFallback++
 			switchFallbackReasons["status-root"]++
@@ -2796,6 +2814,7 @@ func ReplayBlocks(
 							return
 						case <-ticker.C:
 							secondsWaiting++
+							blockStream.PublishSourceMetrics()
 							stats := blockStream.GetFetchStats()
 							modeStr := "catchup"
 							if stats.IsNearTip {
@@ -2812,6 +2831,7 @@ func ReplayBlocks(
 
 			neededAt = time.Now()
 			block, parentSwitch = blockStream.NextBlockOrAlpenglowParentSwitch(ctx)
+			blockStream.PublishSourceMetrics()
 			if ingress, ok := block.CompleteTurbineReplayAdmission(time.Now()); ok {
 				_ = statsd.Duration(statsd.TurbineReplayAdmission, ingress.ReplayAdmission, nil)
 				ingressTimings = &ingress
@@ -2996,6 +3016,16 @@ func ReplayBlocks(
 						rooted, ok = delegatedFinalizedSlot, true
 					}
 				}
+				if ok {
+					metricSource := "delegated"
+					if finalitySource == rootedevents.FinalityAlpenglowCertificate {
+						metricSource = "certificate"
+					}
+					monitoringFinalitySlot, monitoringFinalitySource = updateFinalityMetric(
+						monitoringFinalitySlot, monitoringFinalitySource, rooted, metricSource,
+					)
+					publishFinalityMetric(monitoringFinalitySource, monitoringFinalitySlot)
+				}
 				if ok && rooted > lastRootedWatermark {
 					if err := unrootedTailState.RecordRootedEventFinality(lastRootedWatermark+1, rooted, finalitySource); err != nil {
 						result.Error = err
@@ -3003,7 +3033,6 @@ func ReplayBlocks(
 						break
 					}
 					lastRootedWatermark = rooted
-					statsd.Gauge(statsd.MithrilFinalitySlot, float64(rooted), nil)
 					// Terminal-quiet: the 100-slot summary's "consensus:
 					// finalized slot" line carries this signal; per-advance
 					// lines between slot rows are noise. Full detail in logs.
@@ -3018,7 +3047,10 @@ func ReplayBlocks(
 					break
 				}
 				lastRootedWatermark = block.Slot
-				statsd.Gauge(statsd.MithrilFinalitySlot, float64(block.Slot), nil)
+				monitoringFinalitySlot, monitoringFinalitySource = updateFinalityMetric(
+					monitoringFinalitySlot, monitoringFinalitySource, block.Slot, "classic",
+				)
+				publishFinalityMetric(monitoringFinalitySource, monitoringFinalitySlot)
 			}
 			// Fold the rooted RAM prefix onto disk (irreversible) through the
 			// shared dual-watermark + Alpenglow gate. Runs every iteration so
@@ -3064,6 +3096,8 @@ func ReplayBlocks(
 			// consensus-managed Lightbringer delivery.
 			blockStream.SetLastExecutedSlot(block.Slot)
 			global.SetReplayFrontier(block.Slot)
+			publishEffectiveSlotDuration(alpenglowMode, replayCtx.CurrentFeatures, epochSchedule, block.Slot)
+			publishReplayProgress(block.Slot, time.Now())
 			continue // Skip all execution - no state changes for skipped slots
 		}
 
@@ -3413,6 +3447,7 @@ func ReplayBlocks(
 				resumeCtx.PrevLamportsPerSig = lastSlotCtx.FeeRateGovernor.PrevLamportsPerSignature
 			}
 			unrootedTailState.SetContext(block.Slot, resumeCtx, lastSlotCtx.BankSysvars())
+			publishUnrootedTailMetrics(unrootedTailState)
 			metrics.GlobalBlockReplay.ResumeContext.AddTimingSince(resumeContextStart)
 		}
 
@@ -3555,9 +3590,11 @@ func ReplayBlocks(
 
 		statsd.Count(statsd.SlotReplays, 1, nil)
 		statsd.Timing(statsd.SlotReplayDurationMs, uint64(slotReplayDuration.Nanoseconds())/1e6, nil)
+		statsd.Duration(statsd.ReplaySlotDurationSeconds, slotReplayDuration, nil)
 		statsd.Gauge(statsd.Epoch, float64(block.Epoch), nil)
 		statsd.Gauge(statsd.Slot, float64(block.Slot), nil)
-		statsd.Gauge(statsd.MithrilReplaySlot, float64(block.Slot), nil)
+		publishEffectiveSlotDuration(alpenglowMode, replayCtx.CurrentFeatures, epochSchedule, block.Slot)
+		publishReplayProgress(block.Slot, time.Now())
 		statsd.Timing(statsd.TxsPerBlock, uint64(len(block.Transactions)), nil)
 
 		// Track last executed slot for accurate tip distance calculation and mode switching

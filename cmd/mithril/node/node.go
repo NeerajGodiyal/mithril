@@ -1441,6 +1441,8 @@ func runLive(c *cobra.Command, args []string) {
 	// Print consolidated startup info
 	printStartupInfo("run")
 
+	statsd.InitializeMonitoringLifecycle()
+
 	// Now start the metrics server (after banner so errors don't appear first)
 	if err := statsd.StartMetricsServer(); err != nil {
 		klog.Errorf("metrics server unavailable: %v", err)
@@ -2626,6 +2628,11 @@ postBootstrap:
 		}
 	}
 	initializeVerificationStatusForRPC(vcfg, mithrilState, rootedDurableMode, alpenglowMode)
+	protocolMode := "classic"
+	if alpenglowMode {
+		protocolMode = "alpenglow"
+	}
+	blockstream.InitializeProvenanceGauges(protocolMode, consensusMode, blockSource)
 
 	// Write replay timings to run-specific log directory
 	replayTimingsPath := filepath.Join(mlog.GetLogDir(), "replay_timings.jsonl")
