@@ -389,7 +389,8 @@ func CleanSnapshotDownloadDir(downloadPath string, maxSnapshots int) {
 
 	for _, entry := range entries {
 		name := entry.Name()
-		if strings.HasPrefix(name, "snapshot-") && strings.HasSuffix(name, ".tar.zst") {
+		_, compressed := trimSnapshotCompressionSuffix(name)
+		if strings.HasPrefix(name, "snapshot-") && compressed {
 			path := filepath.Join(downloadPath, name)
 			info, err := entry.Info()
 			if err != nil {
@@ -397,7 +398,7 @@ func CleanSnapshotDownloadDir(downloadPath string, maxSnapshots int) {
 			}
 			fullSnapshots = append(fullSnapshots, snapshotFile{name, path, info.ModTime()})
 		}
-		if strings.HasPrefix(name, "incremental-snapshot-") && strings.HasSuffix(name, ".tar.zst") {
+		if strings.HasPrefix(name, "incremental-snapshot-") && compressed {
 			path := filepath.Join(downloadPath, name)
 			info, err := entry.Info()
 			if err != nil {

@@ -80,3 +80,23 @@ func TestCleanAccountsDbDirStopsAfterStateSyncFailure(t *testing.T) {
 	assert.NoFileExists(t, statePath)
 	assert.DirExists(t, accountsPath)
 }
+
+func TestCleanSnapshotDownloadDirRemovesLZ4Archives(t *testing.T) {
+	dir := t.TempDir()
+	archives := []string{
+		"snapshot-41-test.tar.lz4",
+		"incremental-snapshot-41-42-test.tar.lz4",
+	}
+	for _, name := range archives {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), nil, 0o644))
+	}
+	unrelated := filepath.Join(dir, "notes.txt")
+	require.NoError(t, os.WriteFile(unrelated, nil, 0o644))
+
+	CleanSnapshotDownloadDir(dir, 0)
+
+	for _, name := range archives {
+		assert.NoFileExists(t, filepath.Join(dir, name))
+	}
+	assert.FileExists(t, unrelated)
+}

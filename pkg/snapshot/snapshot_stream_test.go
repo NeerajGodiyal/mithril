@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/pierrec/lz4/v4"
 )
 
 type snapshotRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -268,6 +269,49 @@ func TestReadTarFinishesAndAtomicallyInstallsStream(t *testing.T) {
 	}
 	if _, err := os.Stat(destination + PartialSuffix); !os.IsNotExist(err) {
 		t.Fatalf("partial remains after successful stream: %v", err)
+	}
+}
+
+func TestSnapshotReaderAcceptsLZ4(t *testing.T) {
+	filename := filepath.Join(t.TempDir(), "snapshot-41-test.tar.lz4")
+	file, err := os.Create(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lz4Writer := lz4.NewWriter(file)
+	tarWriter := tar.NewWriter(lz4Writer)
+	if err := tarWriter.WriteHeader(&tar.Header{Name: "snapshots/41/41", Mode: 0o644}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lz4Writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	slot, err := selectedFullSnapshotSlot(filename)
+	if err != nil || slot != 41 {
+		t.Fatalf("selected full snapshot slot = %d, %v; want 41, nil", slot, err)
+	}
+	reader, closer, err := newSnapshotReader(context.Background(), filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closer.Close()
+	header, err := reader.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if header.Name != "snapshots/41/41" {
+		t.Fatalf("archive entry = %q, want snapshots/41/41", header.Name)
+	}
+	base, end, err := selectedIncrementalSnapshotSlots("https://snapshot.invalid/incremental-snapshot-41-42-test.tar.lz4?download=1")
+	if err != nil || base != 41 || end != 42 {
+		t.Fatalf("selected incremental slots = %d, %d, %v; want 41, 42, nil", base, end, err)
 	}
 }
 
