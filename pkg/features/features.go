@@ -51,6 +51,14 @@ func (f *Features) IsActive(gate FeatureGate) bool {
 	}
 }
 
+func (f *Features) IsActiveAtSlot(gate FeatureGate, slot uint64) bool {
+	if f == nil {
+		return false
+	}
+	info, found := (*f)[gate]
+	return found && info.Enabled && info.ActivationSlot <= slot
+}
+
 func (f *Features) IsSbpfV3DeploymentAndExecutionActive() bool {
 	return f.IsActive(EnableSbpfV3DeploymentAndExecution)
 }

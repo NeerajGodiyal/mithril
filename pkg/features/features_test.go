@@ -19,6 +19,14 @@ func TestFflags_EnableAndDisable(t *testing.T) {
 	assert.Equal(t, f.IsActive(StopTruncatingStringsInSyscalls), true)
 }
 
+func TestFeatureActiveAtSlot(t *testing.T) {
+	f := NewFeaturesDefault()
+	f.EnableFeature(RaiseBlockLimitsTo100m, 10)
+	assert.False(t, f.IsActiveAtSlot(RaiseBlockLimitsTo100m, 9))
+	assert.True(t, f.IsActiveAtSlot(RaiseBlockLimitsTo100m, 10))
+	assert.False(t, (*Features)(nil).IsActiveAtSlot(RaiseBlockLimitsTo100m, 10))
+}
+
 // The TestFflags_ListEnabled function tests that the AllEnabled function works
 // as expected.
 func TestFflags_ListEnabled(t *testing.T) {
@@ -37,6 +45,13 @@ func TestDiscardUnexpectedDataCompleteShredsFeatureGate(t *testing.T) {
 	assert.Equal(t, "DiscardUnexpectedDataCompleteShreds", DiscardUnexpectedDataCompleteShreds.Name)
 	assert.Equal(t, base58.MustDecodeFromString("dcomRRWHXP1FVWPqi9Mm4oxJhF4ehC795SvAtUdA9os"), DiscardUnexpectedDataCompleteShreds.Address)
 	assert.Contains(t, AllFeatureGates, DiscardUnexpectedDataCompleteShreds)
+}
+
+func TestOfficialFixedFECFeatureGates(t *testing.T) {
+	assert.Equal(t, base58.MustDecodeFromString("fixfecLZYMfkGzwq6NJA11Yw6KYztzXiK9QcL3K78in"), EnforceFixedFECSet.Address)
+	assert.Equal(t, base58.MustDecodeFromString("disCA4efguFL6Wqa4pGdG7jpjC7C5uiKzKnhEBqchBe"), AgaveDiscardUnexpectedDataCompleteShreds.Address)
+	assert.Contains(t, AllFeatureGates, EnforceFixedFECSet)
+	assert.Contains(t, AllFeatureGates, AgaveDiscardUnexpectedDataCompleteShreds)
 }
 
 func TestDisableFeesSysvarFeatureGate(t *testing.T) {
@@ -69,6 +84,7 @@ func TestAlpenglowVATAndSlotTimeFeatureGates(t *testing.T) {
 		ReduceSlotTimeTo300ms,
 		ReduceSlotTimeTo250ms,
 		ReduceSlotTimeTo200ms,
+		RaiseBlockLimitsTo100m,
 	} {
 		assert.Contains(t, AllFeatureGates, gate)
 	}

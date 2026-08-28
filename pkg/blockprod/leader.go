@@ -11,6 +11,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/alpenglow"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/costmodel"
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/replay"
@@ -1225,11 +1226,12 @@ func (l *LeaderLoop) startSlotLocked(slot uint64) error {
 		startEntryHash = parentCtx.ParentBankhash
 	}
 	sink := NewShredSink(session)
+	raiseBlockLimits := slotCtx.Features != nil && slotCtx.Features.IsActive(features.RaiseBlockLimitsTo100m)
 	bank := NewWorkingBank(BankConfig{
 		SlotCtx:             slotCtx,
 		Slot:                slot,
 		Leader:              l.identity.PublicKey(),
-		Limits:              costmodel.DefaultLimits(),
+		Limits:              costmodel.LimitsForSlotNanos(uint64(l.slotDuration.Nanoseconds()), raiseBlockLimits),
 		EntryHash:           startEntryHash,
 		Sink:                sink,
 		TransactionStatuses: parentCtx.TransactionStatuses,

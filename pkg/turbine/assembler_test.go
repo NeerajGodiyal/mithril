@@ -910,9 +910,127 @@ func TestSlotAssemblerRejectsOversizedShredIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseShred returned error: %v", err)
 	}
-	shred.Index = maxDataShredsPerSlot
+	assembler := NewSlotAssembler()
+	assembler.SetMaxDataShredsForSlot(func(uint64) uint32 { return 16_384 })
+	shred.Index = 16_384
 
-	if _, err := NewSlotAssembler().AddShred(shred); !errors.Is(err, ErrSlotOverflow) {
+	if _, err := assembler.AddShred(shred); !errors.Is(err, ErrSlotOverflow) {
+		t.Fatalf("AddShred error = %v, want ErrSlotOverflow", err)
+	}
+}
+
+func TestSlotAssemblerRequiresCanonicalCodingShredCount(t *testing.T) {
+	raw := localnetMerkleShreds(t, "c")[0]
+	shred, err := ParseShred(raw)
+	if err != nil {
+		t.Fatalf("ParseShred returned error: %v", err)
+	}
+	shred.NumCodingShreds = 31
+
+	assembler := NewSlotAssembler()
+	assembler.SetFixedFECForSlot(func(uint64) bool { return true })
+	if _, err := assembler.AddShred(shred); err == nil || !strings.Contains(err.Error(), "invalid coding shred FEC layout") {
+		t.Fatalf("AddShred error = %v, want invalid coding shred FEC layout", err)
+	}
+}
+
+func TestSlotAssemblerRequiresFixedFECLayout(t *testing.T) {
+	newAssembler := func() *SlotAssembler {
+		assembler := NewSlotAssembler()
+		assembler.SetFixedFECForSlot(func(uint64) bool { return true })
+		assembler.SetDiscardUnexpectedDataCompleteForSlot(func(uint64) bool { return true })
+		return assembler
+	}
+	dataRaw := localnetMerkleShreds(t, "d")[0]
+	data, err := ParseShred(dataRaw)
+	if err != nil {
+		t.Fatalf("ParseShred(data) returned error: %v", err)
+	}
+	data.FECSetIndex++
+	if _, err := newAssembler().AddShred(data); err == nil || !strings.Contains(err.Error(), "invalid fixed FEC set index") {
+		t.Fatalf("AddShred(misaligned data) error = %v, want invalid fixed FEC set index", err)
+	}
+	data, err = ParseShred(dataRaw)
+	if err != nil {
+		t.Fatalf("ParseShred(data) returned error: %v", err)
+	}
+	data.Flags |= shredFlagDataComplete
+	if _, err := newAssembler().AddShred(data); err == nil || !strings.Contains(err.Error(), "invalid terminal data shred index") {
+		t.Fatalf("AddShred(early terminal data) error = %v, want invalid terminal data shred index", err)
+	}
+
+	codeRaw := localnetMerkleShreds(t, "c")[0]
+	code, err := ParseShred(codeRaw)
+	if err != nil {
+		t.Fatalf("ParseShred(code) returned error: %v", err)
+	}
+	code.NumDataShreds = 31
+	if _, err := newAssembler().AddShred(code); err == nil || !strings.Contains(err.Error(), "invalid coding shred FEC layout") {
+		t.Fatalf("AddShred(noncanonical code) error = %v, want invalid coding shred FEC layout", err)
+	}
+	code, err = ParseShred(codeRaw)
+	if err != nil {
+		t.Fatalf("ParseShred(code) returned error: %v", err)
+	}
+	code.Index = code.FECSetIndex + uint32(dataShredsPerFECBlock)
+	if _, err := newAssembler().AddShred(code); err == nil || !strings.Contains(err.Error(), "invalid shred index") {
+		t.Fatalf("AddShred(out-of-range code) error = %v, want invalid shred index", err)
+	}
+}
+
+func TestSlotAssemblerGatesDataCompletePlacement(t *testing.T) {
+	raw := localnetMerkleShreds(t, "d")[0]
+	parse := func() *Shred {
+		shred, err := ParseShred(raw)
+		if err != nil {
+			t.Fatalf("ParseShred returned error: %v", err)
+		}
+		return shred
+	}
+	assembler := NewSlotAssembler()
+	assembler.SetFixedFECForSlot(func(uint64) bool { return true })
+	dataComplete := parse()
+	dataComplete.Flags |= shredFlagDataComplete
+	if _, err := assembler.AddShred(dataComplete); err != nil {
+		t.Fatalf("pre-feature DATA_COMPLETE returned error: %v", err)
+	}
+
+	assembler = NewSlotAssembler()
+	assembler.SetFixedFECForSlot(func(uint64) bool { return true })
+	last := parse()
+	last.Flags |= shredFlagLastShredInSlot
+	if _, err := assembler.AddShred(last); err == nil || !strings.Contains(err.Error(), "invalid terminal data shred index") {
+		t.Fatalf("early LAST_SHRED_IN_SLOT error = %v, want invalid terminal data shred index", err)
+	}
+}
+
+func TestSlotAssemblerRejectsInvalidVariableCodingPosition(t *testing.T) {
+	raw := localnetMerkleShreds(t, "c")[0]
+	shred, err := ParseShred(raw)
+	if err != nil {
+		t.Fatalf("ParseShred returned error: %v", err)
+	}
+	shred.NumDataShreds = 1
+	shred.NumCodingShreds = 17
+	shred.Position = 17
+
+	if _, err := NewSlotAssembler().AddShred(shred); err == nil || !strings.Contains(err.Error(), "invalid coding shred position") {
+		t.Fatalf("AddShred error = %v, want invalid coding shred position", err)
+	}
+}
+
+func TestSlotAssemblerRejectsCodingShredAtSlotLimit(t *testing.T) {
+	raw := localnetMerkleShreds(t, "c")[0]
+	shred, err := ParseShred(raw)
+	if err != nil {
+		t.Fatalf("ParseShred returned error: %v", err)
+	}
+	assembler := NewSlotAssembler()
+	assembler.SetMaxDataShredsForSlot(func(uint64) uint32 { return 16_384 })
+	assembler.SetFixedFECForSlot(func(uint64) bool { return true })
+	shred.Index = 16_384
+
+	if _, err := assembler.AddShred(shred); !errors.Is(err, ErrSlotOverflow) {
 		t.Fatalf("AddShred error = %v, want ErrSlotOverflow", err)
 	}
 }

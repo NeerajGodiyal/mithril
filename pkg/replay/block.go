@@ -31,6 +31,7 @@ import (
 	b "github.com/Overclock-Validator/mithril/pkg/block"
 	"github.com/Overclock-Validator/mithril/pkg/blockstream"
 	consensusengine "github.com/Overclock-Validator/mithril/pkg/consensus"
+	"github.com/Overclock-Validator/mithril/pkg/costmodel"
 	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/global"
@@ -98,7 +99,6 @@ type BlockFetchOpts struct {
 	LocalBlocks          <-chan *b.Block
 	LocalLeaderForSlot   func(slot uint64) bool
 	GossipClient         *gossip.Client
-	PrewarmBlocks        []*b.Block
 	TurbineStakesForSlot func(slot uint64) map[solana.PublicKey]uint64
 	TurbineEpochForSlot  func(slot uint64) uint64
 	TurbineRootSlot      func() uint64
@@ -2010,6 +2010,8 @@ func ReplayBlocks(
 	if alpenglowMode {
 		applyAlpenglowRuntimeFeatureOverrides(replayCtx.CurrentFeatures, startSlot)
 	}
+	var turbineLimitFeatures atomic.Pointer[features.Features]
+	turbineLimitFeatures.Store(replayCtx.CurrentFeatures.Clone())
 	var initialLtHash *lthash.LtHash
 	var initialNumSignatures uint64
 	var initialLastBlockhash solana.Hash
@@ -2519,6 +2521,30 @@ func ReplayBlocks(
 		}
 	}
 	opts.FinalizedOnly = finalizedRPC
+	if useTurbine {
+		opts.TurbineMaxDataShredsForSlot = func(slot uint64) uint32 {
+			if alpenglowMode {
+				f := turbineLimitFeatures.Load()
+				raiseBlockLimits := f != nil && f.IsActive(features.RaiseBlockLimitsTo100m)
+				return uint32(costmodel.LimitsForSlotNanos(alpenglowNsPerSlot, raiseBlockLimits).MaxDataShreds)
+			}
+			return uint32(ProductionLimitsForSlot(turbineLimitFeatures.Load(), epochSchedule, slot).MaxDataShreds)
+		}
+		opts.TurbineFixedFECForSlot = func(slot uint64) bool {
+			if alpenglowMode {
+				return true
+			}
+			return shredFeatureEffective(turbineLimitFeatures.Load(), epochSchedule, features.EnforceFixedFECSet, slot)
+		}
+		opts.TurbineDiscardDataCompleteForSlot = func(slot uint64) bool {
+			if alpenglowMode {
+				return true
+			}
+			f := turbineLimitFeatures.Load()
+			return shredFeatureEffective(f, epochSchedule, features.DiscardUnexpectedDataCompleteShreds, slot) ||
+				shredFeatureEffective(f, epochSchedule, features.AgaveDiscardUnexpectedDataCompleteShreds, slot)
+		}
+	}
 	if alpenglowMode && useTurbine {
 		opts.TurbineAlpenglowBlockIDHints = true
 	}
@@ -2577,7 +2603,6 @@ func ReplayBlocks(
 		opts.LocalLeaderForSlot = blockFetchOpts.LocalLeaderForSlot
 		opts.LocalBlocks = blockFetchOpts.LocalBlocks
 		opts.GossipClient = blockFetchOpts.GossipClient
-		opts.PrewarmBlocks = append(opts.PrewarmBlocks, blockFetchOpts.PrewarmBlocks...)
 		opts.TurbineStakesForSlot = blockFetchOpts.TurbineStakesForSlot
 		opts.TurbineEpochForSlot = blockFetchOpts.TurbineEpochForSlot
 		opts.TurbineRootSlot = blockFetchOpts.TurbineRootSlot
@@ -2597,11 +2622,7 @@ func ReplayBlocks(
 	// second collected is a slot repair never fetches. Handover stops the
 	// prewarm receiver, freeing the turbine bind port for the source.
 	if blockFetchOpts != nil && blockFetchOpts.TurbinePrewarm != nil {
-		prewarmBlocks, prewarmDropped := blockFetchOpts.TurbinePrewarm.Handover()
-		opts.PrewarmBlocks = append(opts.PrewarmBlocks, prewarmBlocks...)
-		if len(prewarmBlocks) > 0 || prewarmDropped > 0 {
-			mlog.Log.Infof("turbine prewarm handover: %d blocks collected during boot (%d dropped over capacity)", len(prewarmBlocks), prewarmDropped)
-		}
+		blockFetchOpts.TurbinePrewarm.Handover()
 	}
 
 	blockStream := blockstream.NewBlockSource(opts)
@@ -3093,6 +3114,8 @@ func ReplayBlocks(
 			if alpenglowMode {
 				applyAlpenglowRuntimeFeatureOverrides(replayCtx.CurrentFeatures, currentSlot)
 			}
+			turbineLimitFeatures.Store(replayCtx.CurrentFeatures.Clone())
+			updateSlotsPerYearForSlot(replayCtx, epochSchedule, replayCtx.CurrentFeatures, block.Slot)
 			partitionedEpochRewardsEnabled = replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochReward) || replayCtx.CurrentFeatures.IsActive(features.EnablePartitionedEpochRewardsSuperfeature)
 			boundaryParentCtx := lastSlotCtx
 			if boundaryParentCtx == nil || unrootedTailState != nil {

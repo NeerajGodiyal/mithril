@@ -190,6 +190,27 @@ func (r *UDPReceiver) SetAlpenglowMode(enabled bool) {
 	r.assembler.SetAlpenglowMode(enabled)
 }
 
+func (r *UDPReceiver) SetMaxDataShredsForSlot(fn func(uint64) uint32) {
+	if r == nil || r.assembler == nil {
+		return
+	}
+	r.assembler.SetMaxDataShredsForSlot(fn)
+}
+
+func (r *UDPReceiver) SetFixedFECForSlot(fn func(uint64) bool) {
+	if r == nil || r.assembler == nil {
+		return
+	}
+	r.assembler.SetFixedFECForSlot(fn)
+}
+
+func (r *UDPReceiver) SetDiscardUnexpectedDataCompleteForSlot(fn func(uint64) bool) {
+	if r == nil || r.assembler == nil {
+		return
+	}
+	r.assembler.SetDiscardUnexpectedDataCompleteForSlot(fn)
+}
+
 func (r *UDPReceiver) noteFirstShred(slot uint64) {
 	r.firstShredMu.Lock()
 	if _, exists := r.firstShredSeen[slot]; exists {

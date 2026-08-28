@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/costmodel"
 	"github.com/Overclock-Validator/mithril/pkg/statsd"
 	"github.com/gagliardetto/solana-go"
 	"github.com/klauspost/reedsolomon"
@@ -76,7 +77,10 @@ type SlotAssembler struct {
 	onComplete func(slot uint64, lastIndex uint32, shreds uint32)
 	// Configured before ingestion; tests may replace it with a blocking probe.
 	// Production uses the process-wide bounded transaction verifier.
-	verifyTransactions func(context.Context, *block.Block) error
+	verifyTransactions                   func(context.Context, *block.Block) error
+	maxDataShredsForSlot                 func(uint64) uint32
+	fixedFECForSlot                      func(uint64) bool
+	discardUnexpectedDataCompleteForSlot func(uint64) bool
 }
 
 type SlotRepairRequest struct {
@@ -96,14 +100,17 @@ type PartialShredObservation struct {
 }
 
 type slotState struct {
-	slot        uint64
-	parentSlot  uint64
-	shreds      map[uint32]*Shred
-	fecSets     map[uint32]*fecState
-	lastIndex   uint32
-	haveLast    bool
-	shredVer    uint16
-	firstParent bool
+	slot                          uint64
+	parentSlot                    uint64
+	shreds                        map[uint32]*Shred
+	fecSets                       map[uint32]*fecState
+	lastIndex                     uint32
+	haveLast                      bool
+	shredVer                      uint16
+	maxDataShreds                 uint32
+	fixedFEC                      bool
+	discardUnexpectedDataComplete bool
+	firstParent                   bool
 
 	// Observability: when the slot's first shred was accepted, and how many of
 	// its shreds arrived via repair rather than turbine.
@@ -191,6 +198,26 @@ func NewSlotAssembler() *SlotAssembler {
 func (a *SlotAssembler) SetAlpenglowMode(enabled bool) {
 	a.mu.Lock()
 	a.alpenglowMode = enabled
+	a.mu.Unlock()
+}
+
+// SetMaxDataShredsForSlot installs the feature-derived SIMD-0525 limit.
+// Configure it before ingestion starts.
+func (a *SlotAssembler) SetMaxDataShredsForSlot(fn func(uint64) uint32) {
+	a.mu.Lock()
+	a.maxDataShredsForSlot = fn
+	a.mu.Unlock()
+}
+
+func (a *SlotAssembler) SetFixedFECForSlot(fn func(uint64) bool) {
+	a.mu.Lock()
+	a.fixedFECForSlot = fn
+	a.mu.Unlock()
+}
+
+func (a *SlotAssembler) SetDiscardUnexpectedDataCompleteForSlot(fn func(uint64) bool) {
+	a.mu.Lock()
+	a.discardUnexpectedDataCompleteForSlot = fn
 	a.mu.Unlock()
 }
 
@@ -635,12 +662,29 @@ func (a *SlotAssembler) slotState(slot uint64, version uint16) *slotState {
 	if state != nil {
 		return state
 	}
+	maxDataShreds := uint32(costmodel.DefaultMaxDataShredsPerSlot)
+	if a.maxDataShredsForSlot != nil {
+		if configured := a.maxDataShredsForSlot(slot); configured > 0 && configured <= maxDataShredsPerSlot {
+			maxDataShreds = configured
+		}
+	}
+	fixedFEC := false
+	if a.fixedFECForSlot != nil {
+		fixedFEC = a.fixedFECForSlot(slot)
+	}
+	discardUnexpectedDataComplete := false
+	if a.discardUnexpectedDataCompleteForSlot != nil {
+		discardUnexpectedDataComplete = a.discardUnexpectedDataCompleteForSlot(slot)
+	}
 	state = &slotState{
-		slot:      slot,
-		shreds:    make(map[uint32]*Shred),
-		fecSets:   make(map[uint32]*fecState),
-		shredVer:  version,
-		lastIndex: ^uint32(0),
+		slot:                          slot,
+		shreds:                        make(map[uint32]*Shred),
+		fecSets:                       make(map[uint32]*fecState),
+		shredVer:                      version,
+		maxDataShreds:                 maxDataShreds,
+		fixedFEC:                      fixedFEC,
+		discardUnexpectedDataComplete: discardUnexpectedDataComplete,
+		lastIndex:                     ^uint32(0),
 	}
 	a.slots[slot] = state
 	return state
@@ -843,14 +887,19 @@ func (a *SlotAssembler) prunePriorityRepairSlotsLocked() {
 }
 
 func (s *slotState) addDataShred(shred *Shred) error {
+	if s.maxDataShreds != 0 && shred.Index >= s.maxDataShreds {
+		return fmt.Errorf("%w: slot %d shred index %d", ErrSlotOverflow, shred.Slot, shred.Index)
+	}
+	if s.fixedFEC {
+		if err := s.validateFixedFECShred(shred); err != nil {
+			return err
+		}
+	}
 	if existing := s.shreds[shred.Index]; existing != nil {
 		if bytes.Equal(existing.Payload, shred.Payload) {
 			return ErrDuplicateShred
 		}
 		return fmt.Errorf("%w: slot %d shred index %d", ErrConflictingShred, shred.Slot, shred.Index)
-	}
-	if shred.Index >= maxDataShredsPerSlot {
-		return fmt.Errorf("%w: slot %d shred index %d", ErrSlotOverflow, shred.Slot, shred.Index)
 	}
 	if s.shredVer != shred.Version {
 		return fmt.Errorf("mixed shred versions for slot %d: %d and %d", shred.Slot, s.shredVer, shred.Version)
@@ -889,7 +938,7 @@ func (s *slotState) repairRequest(maxMissing int) (SlotRepairRequest, bool) {
 	}
 
 	req.NeedHighestDataShred = !s.haveLast
-	if haveData && maxObserved < maxDataShredsPerSlot-1 {
+	if haveData && maxObserved < s.maxDataShreds-1 {
 		req.HighestDataShredIndex = maxObserved + 1
 	}
 
@@ -965,8 +1014,8 @@ func (s *slotState) missingDataForRepair(maxObserved uint32, maxMissing int) []u
 			}
 		}
 	}
-	if missingThrough > maxDataShredsPerSlot-1 {
-		missingThrough = maxDataShredsPerSlot - 1
+	if missingThrough > s.maxDataShreds-1 {
+		missingThrough = s.maxDataShreds - 1
 	}
 
 	var uncovered []uint32
@@ -982,7 +1031,7 @@ func (s *slotState) missingDataForRepair(maxObserved uint32, maxMissing int) []u
 				uncovered = append(uncovered, index)
 			}
 		}
-		if index == maxDataShredsPerSlot-1 {
+		if index == s.maxDataShreds-1 {
 			break
 		}
 	}
@@ -1021,11 +1070,19 @@ func (s *slotState) missingDataForRepair(maxObserved uint32, maxMissing int) []u
 }
 
 func (s *slotState) addCodingShred(shred *Shred) error {
+	if s.maxDataShreds != 0 && shred.Index >= s.maxDataShreds {
+		return fmt.Errorf("%w: slot %d shred index %d", ErrSlotOverflow, shred.Slot, shred.Index)
+	}
 	if shred.NumDataShreds == 0 || shred.NumCodingShreds == 0 {
 		return fmt.Errorf("invalid coding shred FEC layout for slot %d fec_set=%d: data=%d coding=%d", shred.Slot, shred.FECSetIndex, shred.NumDataShreds, shred.NumCodingShreds)
 	}
 	if shred.Position >= shred.NumCodingShreds {
 		return fmt.Errorf("invalid coding shred position for slot %d fec_set=%d: position=%d coding=%d", shred.Slot, shred.FECSetIndex, shred.Position, shred.NumCodingShreds)
+	}
+	if s.fixedFEC {
+		if err := s.validateFixedFECShred(shred); err != nil {
+			return err
+		}
 	}
 	if s.shredVer != shred.Version {
 		return fmt.Errorf("mixed shred versions for slot %d: %d and %d", shred.Slot, s.shredVer, shred.Version)
@@ -1048,6 +1105,35 @@ func (s *slotState) addCodingShred(shred *Shred) error {
 		return err
 	}
 	fec.coding[shred.Position] = shred
+	return nil
+}
+
+func (s *slotState) validateFixedFECShred(shred *Shred) error {
+	const width = uint32(costmodel.DataShredsPerFECSet)
+	if shred.FECSetIndex%width != 0 {
+		return fmt.Errorf("invalid fixed FEC set index for slot %d: %d", shred.Slot, shred.FECSetIndex)
+	}
+	if uint64(shred.FECSetIndex)+uint64(width) > uint64(s.maxDataShreds) {
+		return fmt.Errorf("%w: slot %d FEC set %d extends past %d data shreds", ErrSlotOverflow, shred.Slot, shred.FECSetIndex, s.maxDataShreds)
+	}
+	if shred.Index >= s.maxDataShreds {
+		return fmt.Errorf("%w: slot %d shred index %d", ErrSlotOverflow, shred.Slot, shred.Index)
+	}
+	if shred.Index < shred.FECSetIndex || shred.Index >= shred.FECSetIndex+width {
+		return fmt.Errorf("invalid shred index for slot %d fec_set=%d: %d", shred.Slot, shred.FECSetIndex, shred.Index)
+	}
+	if shred.Type == ShredTypeData && (shred.LastInSlot() || s.discardUnexpectedDataComplete && shred.DataComplete()) && shred.Index != shred.FECSetIndex+width-1 {
+		return fmt.Errorf("invalid terminal data shred index for slot %d fec_set=%d: %d", shred.Slot, shred.FECSetIndex, shred.Index)
+	}
+	switch shred.Type {
+	case ShredTypeCode:
+		if shred.NumDataShreds != uint16(width) || shred.NumCodingShreds != uint16(width) {
+			return fmt.Errorf("invalid coding shred FEC layout for slot %d fec_set=%d: data=%d coding=%d", shred.Slot, shred.FECSetIndex, shred.NumDataShreds, shred.NumCodingShreds)
+		}
+		if shred.Position >= uint16(width) {
+			return fmt.Errorf("invalid coding shred position for slot %d fec_set=%d: position=%d", shred.Slot, shred.FECSetIndex, shred.Position)
+		}
+	}
 	return nil
 }
 

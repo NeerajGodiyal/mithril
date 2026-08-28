@@ -169,6 +169,17 @@ func inflationSlotsPerYearAtSlot(
 	return slotsPerYear
 }
 
+// InflationSlotsPerYearAtSlot returns the effective SIMD-0525 inflation clock
+// for a bank slot, including the feature's one-epoch delay.
+func InflationSlotsPerYearAtSlot(
+	epochSchedule *sealevel.SysvarEpochSchedule,
+	restoredSlotsPerYear float64,
+	bankEpoch, slot uint64,
+	f *features.Features,
+) float64 {
+	return inflationSlotsPerYearAtSlot(epochSchedule, restoredSlotsPerYear, bankEpoch, slot, f)
+}
+
 func SlotInYearForInflation(epochSchedule *sealevel.SysvarEpochSchedule, slotsPerYear float64, epoch uint64, f *features.Features) float64 {
 	inflationActivationSlot := GetInflationStartSlot(f)
 	inflationStartSlot := epochSchedule.FirstSlotInEpoch(safemath.SaturatingSubU64(epochSchedule.GetEpoch(inflationActivationSlot), 1))
@@ -753,11 +764,10 @@ func calculateStakePointsAndCredits(
 	}
 }
 
-func CalculateNumRewardPartitions(numStakingRewards uint64) uint64 {
+func CalculateNumRewardPartitions(numStakingRewards, rewardsPerBlock uint64) uint64 {
 	numEligible := numStakingRewards
-	target := uint64(4096)
 	slotsInEpoch := uint64(432000)
-	unclamped := (numEligible + (target - 1)) / target
+	unclamped := (numEligible + (rewardsPerBlock - 1)) / rewardsPerBlock
 	cap := slotsInEpoch / 10
 	// Agave always schedules at least one distribution block, including when
 	// there are no eligible stake rewards. The empty partition is what advances
@@ -810,6 +820,7 @@ func CalculateRewardsStreaming(
 	blockhash [32]byte,
 	slotCtx *sealevel.SlotCtx,
 	f *features.Features,
+	rewardsPerBlock uint64,
 	mode RewardCalculationMode,
 ) (*StreamingRewardsResult, error) {
 	minimum := minimumStakeDelegation(slotCtx)
@@ -1072,7 +1083,7 @@ func CalculateRewardsStreaming(
 
 	// ==================== Calculate numPartitions from ACTUAL count ====================
 	actualRewardCount := uint64(tempWriter.Count())
-	numPartitions := CalculateNumRewardPartitions(actualRewardCount)
+	numPartitions := CalculateNumRewardPartitions(actualRewardCount, rewardsPerBlock)
 
 	var totalVotingRewards uint64
 	for _, v := range validatorRewards {

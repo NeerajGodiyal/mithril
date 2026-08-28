@@ -25,8 +25,9 @@ const (
 	// DefaultMaxDataShredsPerSlot matches agave DEFAULT_MAX_DATA_SHREDS_PER_SLOT.
 	DefaultMaxDataShredsPerSlot = 32 * 1024
 	// SIMD-0525 max_entry_bytes_per_slot at the 400ms / 32,768-shred baseline.
-	DefaultMaxEntryBytesPerSlot = 20 * 1024 * 1024
-	PacketDataSize              = 4096
+	DefaultMaxEntryBytesPerSlot   = 20 * 1024 * 1024
+	DefaultRewardAccountsPerBlock = 4096
+	PacketDataSize                = 4096
 	// EntryHeaderBytes is the Agave/Firedancer 48-byte entry header used for
 	// pack byte accounting and the reserved ending-tick.
 	EntryHeaderBytes = 48
@@ -52,14 +53,45 @@ type Limits struct {
 	AllocatedDataSizeDelta uint64
 	MaxBatchBytes          uint64
 	MaxEntryBytes          uint64
+	MaxDataShreds          uint64
+	RewardAccountsPerBlock uint64
 }
 
 func DefaultLimits() Limits {
+	return LimitsForSlotNanos(400_000_000, false)
+}
+
+// LimitsForSlotNanos scales the 400ms protocol limits for SIMD-0525. Callers
+// must pass the effective slot duration after the feature's one-epoch delay
+// and whether the 100M block-limit feature is active for the bank.
+func LimitsForSlotNanos(nanosPerSlot uint64, raiseBlockLimitsTo100m bool) Limits {
+	if nanosPerSlot == 0 || nanosPerSlot > 400_000_000 {
+		nanosPerSlot = 400_000_000
+	}
+	scale := func(baseline uint64) uint64 {
+		return baseline * nanosPerSlot / 400_000_000
+	}
+	maxDataShreds := scale(DefaultMaxDataShredsPerSlot)
+	maxEntryBytes := scale(DefaultMaxEntryBytesPerSlot)
+	if shredSafe := PackEntryBytesMax(maxDataShreds, EntryHeaderBytes+PacketDataSize); shredSafe > 0 && shredSafe < maxEntryBytes {
+		maxEntryBytes = shredSafe
+	}
+	if maxEntryBytes > EntryHeaderBytes {
+		maxEntryBytes -= EntryHeaderBytes
+	}
+	blockCost := uint64(MaxBlockUnitsSIMD0256)
+	writableAccountCost := uint64(MaxWritableAccountUnits)
+	if raiseBlockLimitsTo100m {
+		blockCost = MaxBlockUnitsSIMD0286
+		writableAccountCost = uint64(MaxBlockUnitsSIMD0286) * MaxWritableAccountUnits / MaxBlockUnitsSIMD0256
+	}
 	return Limits{
-		BlockCost:              MaxBlockUnitsSIMD0256,
-		WritableAccountCost:    MaxWritableAccountUnits,
-		AllocatedDataSizeDelta: MaxBlockAccountsDataSizeDelta,
+		BlockCost:              scale(blockCost),
+		WritableAccountCost:    scale(writableAccountCost),
+		AllocatedDataSizeDelta: scale(MaxBlockAccountsDataSizeDelta),
 		MaxBatchBytes:          DefaultTargetBatchBytes,
-		MaxEntryBytes:          DefaultPackEntryBytes(),
+		MaxEntryBytes:          maxEntryBytes,
+		MaxDataShreds:          maxDataShreds,
+		RewardAccountsPerBlock: scale(DefaultRewardAccountsPerBlock),
 	}
 }
