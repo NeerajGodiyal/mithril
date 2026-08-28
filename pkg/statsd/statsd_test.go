@@ -153,6 +153,32 @@ func TestBeginSnapshotBootstrap(t *testing.T) {
 	}
 }
 
+func TestBeginSnapshotBootstrapKeepsNestedLifetimeActive(t *testing.T) {
+	readGauge := func(metric Metric) float64 {
+		m := &dto.Metric{}
+		if err := metricsCollection.gauges[metric].WithLabelValues().Write(m); err != nil {
+			t.Fatal(err)
+		}
+		return m.GetGauge().GetValue()
+	}
+
+	finishOuter := BeginSnapshotBootstrap()
+	started := readGauge(SnapshotBootstrapStartedAt)
+	finishInner := BeginSnapshotBootstrap()
+	if got := readGauge(SnapshotBootstrapStartedAt); got != started {
+		t.Fatalf("nested bootstrap replaced start timestamp: got %v, want %v", got, started)
+	}
+	finishInner()
+	if got := readGauge(SnapshotBootstrapActive); got != 1 {
+		t.Fatalf("nested bootstrap finish cleared outer lifetime: got %v", got)
+	}
+	finishInner()
+	finishOuter()
+	if got := readGauge(SnapshotBootstrapActive); got != 0 {
+		t.Fatalf("bootstrap active after outer finish = %v, want 0", got)
+	}
+}
+
 func TestSendTurbineReceiverMetrics(t *testing.T) {
 	readGauge := func(metric Metric) float64 {
 		m := &dto.Metric{}
@@ -407,6 +433,7 @@ func TestMithrilProgressAndVotingMetricContract(t *testing.T) {
 		{MithrilReplaySlot, "mithril_replay_slot", []string{}},
 		{MithrilRootedSlot, "mithril_rooted_slot", []string{}},
 		{MithrilFinalitySlot, "mithril_finality_slot", []string{}},
+		{MithrilFinalitySourceSlot, "mithril_finality_source_slot", []string{"source"}},
 		{MithrilVoterStageObservations, "mithril_voter_stage_observations", []string{"stage"}},
 		{MithrilVoterStageLatencyUS, "mithril_voter_stage_latency_us", []string{"stage", "statistic"}},
 		{MithrilVoterPeerConnections, "mithril_voter_peer_connections", []string{"state"}},
@@ -418,13 +445,20 @@ func TestMithrilProgressAndVotingMetricContract(t *testing.T) {
 			assert.Equal(t, test.name, test.metric.String())
 			assert.Equal(t, GaugeT, MetricToType[test.metric])
 			assert.Equal(t, test.labels, MetricToLabels[test.metric])
-			assert.Contains(t, metricsCollection.gauges, test.metric)
+			if test.metric == MithrilFinalitySourceSlot {
+				assert.Contains(t, metricsCollection.atomicGauges, test.metric)
+			} else {
+				assert.Contains(t, metricsCollection.gauges, test.metric)
+			}
 		})
 	}
 
 	assert.NoError(t, Gauge(MithrilReplaySlot, 1, nil))
 	assert.NoError(t, Gauge(MithrilRootedSlot, 1, nil))
 	assert.NoError(t, Gauge(MithrilFinalitySlot, 1, nil))
+	assert.NoError(t, ReplaceGaugeFamily(MithrilFinalitySourceSlot, map[string]float64{
+		"certificate": 1, "delegated": 0, "mixed": 0, "classic": 0,
+	}))
 	assert.NoError(t, Gauge(MithrilVoterStageObservations, 1, []string{"replay_to_voter_event"}))
 	assert.NoError(t, Gauge(MithrilVoterStageLatencyUS, 1, []string{"replay_to_voter_event", "max"}))
 	assert.NoError(t, Gauge(MithrilVoterPeerConnections, 1, []string{"active"}))
