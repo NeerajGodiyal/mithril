@@ -232,7 +232,11 @@ func (bs *BlockSource) runLightbringerStream() {
 				continue
 			}
 
-			blk := block.FromLightbringerStreamMsg(resp)
+			blk, err := block.DecodeLightbringerStreamMsg(resp)
+			if err != nil {
+				bs.requestLiveStreamReconnect(fmt.Sprintf("invalid slot %d payload: %v", resp.Slot, err))
+				continue
+			}
 			if !bs.ingestLiveShredBlock(blk) {
 				cancelStream()
 				<-streamDone

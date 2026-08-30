@@ -350,6 +350,152 @@ func (x *VersionedMessageV0) GetAddressTableLookups() []*MessageAddressTableLook
 	return nil
 }
 
+type TransactionConfig struct {
+	state                       protoimpl.MessageState `protogen:"open.v1"`
+	PriorityFee                 *uint64                `protobuf:"varint,1,opt,name=priority_fee,json=priorityFee,proto3,oneof" json:"priority_fee,omitempty"`
+	ComputeUnitLimit            *uint32                `protobuf:"varint,2,opt,name=compute_unit_limit,json=computeUnitLimit,proto3,oneof" json:"compute_unit_limit,omitempty"`
+	LoadedAccountsDataSizeLimit *uint32                `protobuf:"varint,3,opt,name=loaded_accounts_data_size_limit,json=loadedAccountsDataSizeLimit,proto3,oneof" json:"loaded_accounts_data_size_limit,omitempty"`
+	HeapSize                    *uint32                `protobuf:"varint,4,opt,name=heap_size,json=heapSize,proto3,oneof" json:"heap_size,omitempty"`
+	unknownFields               protoimpl.UnknownFields
+	sizeCache                   protoimpl.SizeCache
+}
+
+func (x *TransactionConfig) Reset() {
+	*x = TransactionConfig{}
+	mi := &file_slot_entry_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TransactionConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TransactionConfig) ProtoMessage() {}
+
+func (x *TransactionConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_slot_entry_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TransactionConfig.ProtoReflect.Descriptor instead.
+func (*TransactionConfig) Descriptor() ([]byte, []int) {
+	return file_slot_entry_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *TransactionConfig) GetPriorityFee() uint64 {
+	if x != nil && x.PriorityFee != nil {
+		return *x.PriorityFee
+	}
+	return 0
+}
+
+func (x *TransactionConfig) GetComputeUnitLimit() uint32 {
+	if x != nil && x.ComputeUnitLimit != nil {
+		return *x.ComputeUnitLimit
+	}
+	return 0
+}
+
+func (x *TransactionConfig) GetLoadedAccountsDataSizeLimit() uint32 {
+	if x != nil && x.LoadedAccountsDataSizeLimit != nil {
+		return *x.LoadedAccountsDataSizeLimit
+	}
+	return 0
+}
+
+func (x *TransactionConfig) GetHeapSize() uint32 {
+	if x != nil && x.HeapSize != nil {
+		return *x.HeapSize
+	}
+	return 0
+}
+
+type VersionedMessageV1 struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Header *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	Config *TransactionConfig     `protobuf:"bytes,2,opt,name=config,proto3" json:"config,omitempty"`
+	// 32 byte lifetime specifier hash
+	LifetimeSpecifier []byte `protobuf:"bytes,3,opt,name=lifetime_specifier,json=lifetimeSpecifier,proto3" json:"lifetime_specifier,omitempty"`
+	// Each key is a 32 bytes pubkey
+	AccountKeys   [][]byte               `protobuf:"bytes,4,rep,name=account_keys,json=accountKeys,proto3" json:"account_keys,omitempty"`
+	Instructions  []*CompiledInstruction `protobuf:"bytes,5,rep,name=instructions,proto3" json:"instructions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VersionedMessageV1) Reset() {
+	*x = VersionedMessageV1{}
+	mi := &file_slot_entry_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VersionedMessageV1) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VersionedMessageV1) ProtoMessage() {}
+
+func (x *VersionedMessageV1) ProtoReflect() protoreflect.Message {
+	mi := &file_slot_entry_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VersionedMessageV1.ProtoReflect.Descriptor instead.
+func (*VersionedMessageV1) Descriptor() ([]byte, []int) {
+	return file_slot_entry_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *VersionedMessageV1) GetHeader() *MessageHeader {
+	if x != nil {
+		return x.Header
+	}
+	return nil
+}
+
+func (x *VersionedMessageV1) GetConfig() *TransactionConfig {
+	if x != nil {
+		return x.Config
+	}
+	return nil
+}
+
+func (x *VersionedMessageV1) GetLifetimeSpecifier() []byte {
+	if x != nil {
+		return x.LifetimeSpecifier
+	}
+	return nil
+}
+
+func (x *VersionedMessageV1) GetAccountKeys() [][]byte {
+	if x != nil {
+		return x.AccountKeys
+	}
+	return nil
+}
+
+func (x *VersionedMessageV1) GetInstructions() []*CompiledInstruction {
+	if x != nil {
+		return x.Instructions
+	}
+	return nil
+}
+
 type VersionedTransaction struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Each signature is 64 bytes
@@ -358,6 +504,7 @@ type VersionedTransaction struct {
 	//
 	//	*VersionedTransaction_MessageLegacy
 	//	*VersionedTransaction_MessageV0
+	//	*VersionedTransaction_MessageV1
 	Message       isVersionedTransaction_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -365,7 +512,7 @@ type VersionedTransaction struct {
 
 func (x *VersionedTransaction) Reset() {
 	*x = VersionedTransaction{}
-	mi := &file_slot_entry_proto_msgTypes[5]
+	mi := &file_slot_entry_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -377,7 +524,7 @@ func (x *VersionedTransaction) String() string {
 func (*VersionedTransaction) ProtoMessage() {}
 
 func (x *VersionedTransaction) ProtoReflect() protoreflect.Message {
-	mi := &file_slot_entry_proto_msgTypes[5]
+	mi := &file_slot_entry_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -390,7 +537,7 @@ func (x *VersionedTransaction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VersionedTransaction.ProtoReflect.Descriptor instead.
 func (*VersionedTransaction) Descriptor() ([]byte, []int) {
-	return file_slot_entry_proto_rawDescGZIP(), []int{5}
+	return file_slot_entry_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *VersionedTransaction) GetSignatures() [][]byte {
@@ -425,6 +572,15 @@ func (x *VersionedTransaction) GetMessageV0() *VersionedMessageV0 {
 	return nil
 }
 
+func (x *VersionedTransaction) GetMessageV1() *VersionedMessageV1 {
+	if x != nil {
+		if x, ok := x.Message.(*VersionedTransaction_MessageV1); ok {
+			return x.MessageV1
+		}
+	}
+	return nil
+}
+
 type isVersionedTransaction_Message interface {
 	isVersionedTransaction_Message()
 }
@@ -437,9 +593,15 @@ type VersionedTransaction_MessageV0 struct {
 	MessageV0 *VersionedMessageV0 `protobuf:"bytes,3,opt,name=message_v0,json=messageV0,proto3,oneof"`
 }
 
+type VersionedTransaction_MessageV1 struct {
+	MessageV1 *VersionedMessageV1 `protobuf:"bytes,4,opt,name=message_v1,json=messageV1,proto3,oneof"`
+}
+
 func (*VersionedTransaction_MessageLegacy) isVersionedTransaction_Message() {}
 
 func (*VersionedTransaction_MessageV0) isVersionedTransaction_Message() {}
+
+func (*VersionedTransaction_MessageV1) isVersionedTransaction_Message() {}
 
 type Entry struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
@@ -453,7 +615,7 @@ type Entry struct {
 
 func (x *Entry) Reset() {
 	*x = Entry{}
-	mi := &file_slot_entry_proto_msgTypes[6]
+	mi := &file_slot_entry_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -465,7 +627,7 @@ func (x *Entry) String() string {
 func (*Entry) ProtoMessage() {}
 
 func (x *Entry) ProtoReflect() protoreflect.Message {
-	mi := &file_slot_entry_proto_msgTypes[6]
+	mi := &file_slot_entry_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -478,7 +640,7 @@ func (x *Entry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Entry.ProtoReflect.Descriptor instead.
 func (*Entry) Descriptor() ([]byte, []int) {
-	return file_slot_entry_proto_rawDescGZIP(), []int{6}
+	return file_slot_entry_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Entry) GetNumHashes() uint64 {
@@ -531,14 +693,32 @@ const file_slot_entry_proto_rawDesc = "" +
 	"\faccount_keys\x18\x02 \x03(\fR\vaccountKeys\x12)\n" +
 	"\x10recent_blockhash\x18\x03 \x01(\fR\x0frecentBlockhash\x12C\n" +
 	"\finstructions\x18\x04 \x03(\v2\x1f.slot_entry.CompiledInstructionR\finstructions\x12Y\n" +
-	"\x15address_table_lookups\x18\x05 \x03(\v2%.slot_entry.MessageAddressTableLookupR\x13addressTableLookups\"\xcf\x01\n" +
+	"\x15address_table_lookups\x18\x05 \x03(\v2%.slot_entry.MessageAddressTableLookupR\x13addressTableLookups\"\xb5\x02\n" +
+	"\x11TransactionConfig\x12&\n" +
+	"\fpriority_fee\x18\x01 \x01(\x04H\x00R\vpriorityFee\x88\x01\x01\x121\n" +
+	"\x12compute_unit_limit\x18\x02 \x01(\rH\x01R\x10computeUnitLimit\x88\x01\x01\x12I\n" +
+	"\x1floaded_accounts_data_size_limit\x18\x03 \x01(\rH\x02R\x1bloadedAccountsDataSizeLimit\x88\x01\x01\x12 \n" +
+	"\theap_size\x18\x04 \x01(\rH\x03R\bheapSize\x88\x01\x01B\x0f\n" +
+	"\r_priority_feeB\x15\n" +
+	"\x13_compute_unit_limitB\"\n" +
+	" _loaded_accounts_data_size_limitB\f\n" +
+	"\n" +
+	"_heap_size\"\x95\x02\n" +
+	"\x12VersionedMessageV1\x121\n" +
+	"\x06header\x18\x01 \x01(\v2\x19.slot_entry.MessageHeaderR\x06header\x125\n" +
+	"\x06config\x18\x02 \x01(\v2\x1d.slot_entry.TransactionConfigR\x06config\x12-\n" +
+	"\x12lifetime_specifier\x18\x03 \x01(\fR\x11lifetimeSpecifier\x12!\n" +
+	"\faccount_keys\x18\x04 \x03(\fR\vaccountKeys\x12C\n" +
+	"\finstructions\x18\x05 \x03(\v2\x1f.slot_entry.CompiledInstructionR\finstructions\"\x90\x02\n" +
 	"\x14VersionedTransaction\x12\x1e\n" +
 	"\n" +
 	"signatures\x18\x01 \x03(\fR\n" +
 	"signatures\x12K\n" +
 	"\x0emessage_legacy\x18\x02 \x01(\v2\".slot_entry.VersionedMessageLegacyH\x00R\rmessageLegacy\x12?\n" +
 	"\n" +
-	"message_v0\x18\x03 \x01(\v2\x1e.slot_entry.VersionedMessageV0H\x00R\tmessageV0B\t\n" +
+	"message_v0\x18\x03 \x01(\v2\x1e.slot_entry.VersionedMessageV0H\x00R\tmessageV0\x12?\n" +
+	"\n" +
+	"message_v1\x18\x04 \x01(\v2\x1e.slot_entry.VersionedMessageV1H\x00R\tmessageV1B\t\n" +
 	"\amessage\"\x80\x01\n" +
 	"\x05Entry\x12\x1d\n" +
 	"\n" +
@@ -558,30 +738,36 @@ func file_slot_entry_proto_rawDescGZIP() []byte {
 	return file_slot_entry_proto_rawDescData
 }
 
-var file_slot_entry_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_slot_entry_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_slot_entry_proto_goTypes = []any{
 	(*MessageHeader)(nil),             // 0: slot_entry.MessageHeader
 	(*CompiledInstruction)(nil),       // 1: slot_entry.CompiledInstruction
 	(*MessageAddressTableLookup)(nil), // 2: slot_entry.MessageAddressTableLookup
 	(*VersionedMessageLegacy)(nil),    // 3: slot_entry.VersionedMessageLegacy
 	(*VersionedMessageV0)(nil),        // 4: slot_entry.VersionedMessageV0
-	(*VersionedTransaction)(nil),      // 5: slot_entry.VersionedTransaction
-	(*Entry)(nil),                     // 6: slot_entry.Entry
+	(*TransactionConfig)(nil),         // 5: slot_entry.TransactionConfig
+	(*VersionedMessageV1)(nil),        // 6: slot_entry.VersionedMessageV1
+	(*VersionedTransaction)(nil),      // 7: slot_entry.VersionedTransaction
+	(*Entry)(nil),                     // 8: slot_entry.Entry
 }
 var file_slot_entry_proto_depIdxs = []int32{
-	0, // 0: slot_entry.VersionedMessageLegacy.header:type_name -> slot_entry.MessageHeader
-	1, // 1: slot_entry.VersionedMessageLegacy.instructions:type_name -> slot_entry.CompiledInstruction
-	0, // 2: slot_entry.VersionedMessageV0.header:type_name -> slot_entry.MessageHeader
-	1, // 3: slot_entry.VersionedMessageV0.instructions:type_name -> slot_entry.CompiledInstruction
-	2, // 4: slot_entry.VersionedMessageV0.address_table_lookups:type_name -> slot_entry.MessageAddressTableLookup
-	3, // 5: slot_entry.VersionedTransaction.message_legacy:type_name -> slot_entry.VersionedMessageLegacy
-	4, // 6: slot_entry.VersionedTransaction.message_v0:type_name -> slot_entry.VersionedMessageV0
-	5, // 7: slot_entry.Entry.transactions:type_name -> slot_entry.VersionedTransaction
-	8, // [8:8] is the sub-list for method output_type
-	8, // [8:8] is the sub-list for method input_type
-	8, // [8:8] is the sub-list for extension type_name
-	8, // [8:8] is the sub-list for extension extendee
-	0, // [0:8] is the sub-list for field type_name
+	0,  // 0: slot_entry.VersionedMessageLegacy.header:type_name -> slot_entry.MessageHeader
+	1,  // 1: slot_entry.VersionedMessageLegacy.instructions:type_name -> slot_entry.CompiledInstruction
+	0,  // 2: slot_entry.VersionedMessageV0.header:type_name -> slot_entry.MessageHeader
+	1,  // 3: slot_entry.VersionedMessageV0.instructions:type_name -> slot_entry.CompiledInstruction
+	2,  // 4: slot_entry.VersionedMessageV0.address_table_lookups:type_name -> slot_entry.MessageAddressTableLookup
+	0,  // 5: slot_entry.VersionedMessageV1.header:type_name -> slot_entry.MessageHeader
+	5,  // 6: slot_entry.VersionedMessageV1.config:type_name -> slot_entry.TransactionConfig
+	1,  // 7: slot_entry.VersionedMessageV1.instructions:type_name -> slot_entry.CompiledInstruction
+	3,  // 8: slot_entry.VersionedTransaction.message_legacy:type_name -> slot_entry.VersionedMessageLegacy
+	4,  // 9: slot_entry.VersionedTransaction.message_v0:type_name -> slot_entry.VersionedMessageV0
+	6,  // 10: slot_entry.VersionedTransaction.message_v1:type_name -> slot_entry.VersionedMessageV1
+	7,  // 11: slot_entry.Entry.transactions:type_name -> slot_entry.VersionedTransaction
+	12, // [12:12] is the sub-list for method output_type
+	12, // [12:12] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_slot_entry_proto_init() }
@@ -589,9 +775,11 @@ func file_slot_entry_proto_init() {
 	if File_slot_entry_proto != nil {
 		return
 	}
-	file_slot_entry_proto_msgTypes[5].OneofWrappers = []any{
+	file_slot_entry_proto_msgTypes[5].OneofWrappers = []any{}
+	file_slot_entry_proto_msgTypes[7].OneofWrappers = []any{
 		(*VersionedTransaction_MessageLegacy)(nil),
 		(*VersionedTransaction_MessageV0)(nil),
+		(*VersionedTransaction_MessageV1)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -599,7 +787,7 @@ func file_slot_entry_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_slot_entry_proto_rawDesc), len(file_slot_entry_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
