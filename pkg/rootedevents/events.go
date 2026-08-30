@@ -354,6 +354,13 @@ func validateTransaction(slot uint64, index uint32, transaction TransactionObser
 	if err != nil {
 		return fmt.Errorf("rooted slot %d transaction %d wire is invalid: %w", slot, index, err)
 	}
+	if err := decoded.Sanitize(); err != nil {
+		return fmt.Errorf("rooted slot %d transaction %d wire is not sanitized: %w", slot, index, err)
+	}
+	canonical, err := decoded.MarshalBinary()
+	if err != nil || !bytes.Equal(canonical, transaction.Transaction) {
+		return fmt.Errorf("rooted slot %d transaction %d wire is not canonical", slot, index)
+	}
 	if decoded.Message.GetVersion() != solana.MessageVersionV1 && len(transaction.Transaction) > maxLegacyTransactionBytes {
 		return fmt.Errorf("rooted slot %d transaction %d legacy/v0 wire exceeds %d bytes", slot, index, maxLegacyTransactionBytes)
 	}
@@ -370,6 +377,19 @@ func validateTransaction(slot uint64, index uint32, transaction TransactionObser
 	for accountIndex, key := range transaction.AccountKeys {
 		if _, err := solana.PublicKeyFromBase58(key); err != nil {
 			return fmt.Errorf("rooted slot %d transaction %d account %d is invalid: %w", slot, index, accountIndex, err)
+		}
+	}
+	staticKeys := decoded.Message.AccountKeys
+	wantAccounts := len(staticKeys)
+	if decoded.Message.GetVersion() == solana.MessageVersionV0 {
+		wantAccounts += decoded.Message.GetAddressTableLookups().NumLookups()
+	}
+	if len(transaction.AccountKeys) != wantAccounts {
+		return fmt.Errorf("rooted slot %d transaction %d account keys do not match wire", slot, index)
+	}
+	for accountIndex, key := range staticKeys {
+		if transaction.AccountKeys[accountIndex] != key.String() {
+			return fmt.Errorf("rooted slot %d transaction %d static account %d does not match wire", slot, index, accountIndex)
 		}
 	}
 	if transaction.Succeeded && transaction.Failure != "" {

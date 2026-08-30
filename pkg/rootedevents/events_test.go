@@ -30,9 +30,13 @@ func testTransactionObservationFromTransaction(t testing.TB, tx *solana.Transact
 	require.NoError(t, err)
 	hash, err := txstatus.TransactionMessageHash(tx)
 	require.NoError(t, err)
+	accountKeys := make([]string, len(tx.Message.AccountKeys))
+	for index, key := range tx.Message.AccountKeys {
+		accountKeys[index] = key.String()
+	}
 	return TransactionObservation{
 		Signature: tx.Signatures[0].String(), Transaction: wire,
-		MessageHash: solana.Hash(hash).String(), AccountKeys: []string{solana.PublicKey{1}.String()}, Succeeded: true,
+		MessageHash: solana.Hash(hash).String(), AccountKeys: accountKeys, Succeeded: true,
 	}
 }
 
@@ -217,6 +221,78 @@ func TestValidateTransactionUsesVersionSpecificWireLimit(t *testing.T) {
 	v1 := testTransactionObservationFromTransaction(t, makeTransaction(solana.MessageVersionV1))
 	require.LessOrEqual(t, len(v1.Transaction), solana.MaxTransactionSizeV1)
 	require.NoError(t, validateTransaction(10, 0, v1))
+
+	var exactV1 TransactionObservation
+	for dataBytes := 0; dataBytes <= solana.MaxTransactionSizeV1; dataBytes++ {
+		tx := makeTransaction(solana.MessageVersionV1)
+		tx.Message.Instructions[0].Data = make([]byte, dataBytes)
+		candidate := testTransactionObservationFromTransaction(t, tx)
+		if len(candidate.Transaction) == solana.MaxTransactionSizeV1 {
+			exactV1 = candidate
+			break
+		}
+	}
+	require.Len(t, exactV1.Transaction, solana.MaxTransactionSizeV1)
+	require.NoError(t, validateTransaction(10, 0, exactV1))
+	exactV1.Transaction = append(exactV1.Transaction, 0)
+	require.ErrorContains(t, validateTransaction(10, 0, exactV1), "wire size")
+}
+
+func TestValidateTransactionBindsCanonicalWireIdentityAndAccounts(t *testing.T) {
+	valid := testTransactionObservation(t)
+
+	trailing := valid
+	trailing.Transaction = append(append([]byte(nil), valid.Transaction...), 0)
+	require.ErrorContains(t, validateTransaction(10, 0, trailing), "canonical")
+
+	badSignature := valid
+	badSignature.Signature = solana.Signature{9}.String()
+	require.ErrorContains(t, validateTransaction(10, 0, badSignature), "signature does not match")
+
+	badHash := valid
+	badHash.MessageHash = solana.Hash{9}.String()
+	require.ErrorContains(t, validateTransaction(10, 0, badHash), "message hash does not match")
+
+	badStaticKey := valid
+	badStaticKey.AccountKeys = []string{solana.PublicKey{9}.String()}
+	require.ErrorContains(t, validateTransaction(10, 0, badStaticKey), "static account")
+
+	unsanitized := &solana.Transaction{
+		Signatures: []solana.Signature{{1}},
+		Message: solana.Message{
+			Header: solana.MessageHeader{
+				NumRequiredSignatures: 1, NumReadonlySignedAccounts: 1,
+			},
+			AccountKeys: []solana.PublicKey{{1}}, RecentBlockhash: solana.Hash{2},
+		},
+	}
+	require.ErrorContains(t, validateTransaction(
+		10, 0, testTransactionObservationFromTransaction(t, unsanitized),
+	), "not sanitized")
+}
+
+func TestValidateTransactionBindsV0StaticPrefixAndLookupCount(t *testing.T) {
+	message := solana.Message{
+		Header:          solana.MessageHeader{NumRequiredSignatures: 1},
+		AccountKeys:     []solana.PublicKey{{1}},
+		RecentBlockhash: solana.Hash{2},
+	}
+	message.SetAddressTableLookups([]solana.MessageAddressTableLookup{{
+		AccountKey: solana.PublicKey{9}, WritableIndexes: []uint8{0},
+	}})
+	tx := testTransactionObservationFromTransaction(t, &solana.Transaction{
+		Signatures: []solana.Signature{{1}}, Message: message,
+	})
+	tx.AccountKeys = append(tx.AccountKeys, solana.PublicKey{3}.String())
+	require.NoError(t, validateTransaction(10, 0, tx))
+
+	missingDynamic := tx
+	missingDynamic.AccountKeys = missingDynamic.AccountKeys[:1]
+	require.ErrorContains(t, validateTransaction(10, 0, missingDynamic), "account keys do not match")
+
+	badStatic := tx
+	badStatic.AccountKeys = append([]string{solana.PublicKey{4}.String()}, badStatic.AccountKeys[1:]...)
+	require.ErrorContains(t, validateTransaction(10, 0, badStatic), "static account")
 }
 
 func TestBuildEventsRejectsOversizedAccountData(t *testing.T) {

@@ -3,6 +3,7 @@ package rootedfeed
 import (
 	"bufio"
 	"bytes"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/rootedevents"
 	"github.com/Overclock-Validator/mithril/pkg/state"
+	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/require"
 )
@@ -533,6 +535,133 @@ func TestGoldenFramedContractBindsCanonicalSidecarBytes(t *testing.T) {
 	require.NoError(t, scanner.Err())
 	require.Equal(t, 5, line)
 	require.Equal(t, hex.EncodeToString(digest.Sum(nil)), batch.SHA256)
+}
+
+func TestGoldenFramedV1TransactionContract(t *testing.T) {
+	got := goldenFramedV1Transaction(t)
+	want, err := os.ReadFile("testdata/framed-transaction-v1.jsonl")
+	require.NoError(t, err)
+	require.Equal(t, string(want), string(got))
+
+	lines := bytes.Split(bytes.TrimSpace(want), []byte{'\n'})
+	require.Len(t, lines, 5)
+	var event rootedevents.Event
+	require.NoError(t, json.Unmarshal(lines[3], &event))
+	require.Equal(t, rootedevents.SchemaVersion, event.SchemaVersion)
+	require.NotNil(t, event.Transaction)
+	decoded, err := solana.TransactionFromBytes(event.Transaction.Transaction)
+	require.NoError(t, err)
+	require.NoError(t, decoded.Sanitize())
+	require.NoError(t, decoded.VerifySignatures())
+	require.Equal(t, solana.MessageVersionV1, decoded.Message.GetVersion())
+	require.NotNil(t, decoded.Message.TransactionConfig.PriorityFee)
+	require.NotNil(t, decoded.Message.TransactionConfig.ComputeUnitLimit)
+	require.NotNil(t, decoded.Message.TransactionConfig.LoadedAccountsDataSizeLimit)
+	require.NotNil(t, decoded.Message.TransactionConfig.HeapSize)
+	require.Equal(t, uint64(9_001), *decoded.Message.TransactionConfig.PriorityFee)
+	require.Equal(t, uint32(300_000), *decoded.Message.TransactionConfig.ComputeUnitLimit)
+	require.Equal(t, uint32(65_536), *decoded.Message.TransactionConfig.LoadedAccountsDataSizeLimit)
+	require.Equal(t, uint32(64*1024), *decoded.Message.TransactionConfig.HeapSize)
+	require.Equal(t, event.Transaction.Signature, decoded.Signatures[0].String())
+	require.Equal(t, wantMessageHash(t, decoded), event.Transaction.MessageHash)
+}
+
+func wantMessageHash(t *testing.T, tx *solana.Transaction) string {
+	t.Helper()
+	hash, err := txstatus.TransactionMessageHash(tx)
+	require.NoError(t, err)
+	return solana.Hash(hash).String()
+}
+
+func goldenFramedV1Transaction(t *testing.T) []byte {
+	t.Helper()
+	keys := []solana.PrivateKey{
+		solana.PrivateKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, ed25519.SeedSize))),
+		solana.PrivateKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{2}, ed25519.SeedSize))),
+	}
+	config := solana.TransactionConfig{}.
+		WithPriorityFee(9_001).
+		WithComputeUnitLimit(300_000).
+		WithLoadedAccountsDataSizeLimit(65_536).
+		WithHeapSize(64 * 1024)
+	message := solana.Message{
+		Header: solana.MessageHeader{
+			NumRequiredSignatures:       2,
+			NumReadonlySignedAccounts:   1,
+			NumReadonlyUnsignedAccounts: 1,
+		},
+		AccountKeys:     []solana.PublicKey{keys[0].PublicKey(), keys[1].PublicKey(), {3}},
+		RecentBlockhash: testHash(7),
+		Instructions: []solana.CompiledInstruction{{
+			ProgramIDIndex: 2,
+			Accounts:       []uint16{0, 1},
+			Data:           []byte{0xde, 0xad, 0xbe, 0xef},
+		}},
+		TransactionConfig: config,
+	}
+	_, err := message.SetVersion(solana.MessageVersionV1)
+	require.NoError(t, err)
+	tx := &solana.Transaction{Message: message}
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		for i := range keys {
+			if keys[i].PublicKey().Equals(key) {
+				return &keys[i]
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, tx.Sanitize())
+	require.NoError(t, tx.VerifySignatures())
+	wire, err := tx.MarshalBinary()
+	require.NoError(t, err)
+	messageHash, err := txstatus.TransactionMessageHash(tx)
+	require.NoError(t, err)
+
+	meta := alpenglowMeta(40, 39, rootedevents.FinalityAlpenglowCertificate)
+	meta.Transactions = []rootedevents.TransactionObservation{{
+		Signature:    tx.Signatures[0].String(),
+		Transaction:  wire,
+		MessageHash:  solana.Hash(messageHash).String(),
+		AccountKeys:  []string{keys[0].PublicKey().String(), keys[1].PublicKey().String(), solana.PublicKey{3}.String()},
+		Succeeded:    true,
+		ComputeUnits: 123_456,
+	}}
+	events, err := rootedevents.BuildEvents(
+		[]accounts.SlotDelta{{Slot: meta.Slot}},
+		map[uint64]rootedevents.SlotMeta{meta.Slot: meta},
+	)
+	require.NoError(t, err)
+
+	var eventWire bytes.Buffer
+	for _, event := range events {
+		encoded, err := json.Marshal(event)
+		require.NoError(t, err)
+		eventWire.Write(encoded)
+		eventWire.WriteByte('\n')
+	}
+	digest := sha256.Sum256(eventWire.Bytes())
+	records := []MetadataRecord{
+		{RecordType: RecordTypeSource, Source: &SourceDescriptor{
+			Cluster: "alpenglow", GenesisHash: solana.Hash{9}.String(),
+			AccountsDBRootRunID: "0123456789abcdef0123456789abcdef",
+		}},
+		{RecordType: RecordTypeStart, Start: &StartDescriptor{}},
+		{RecordType: RecordTypeBatch, Batch: &BatchDescriptor{
+			ManifestSequence: 1, SidecarVersion: rootedevents.SidecarVersion,
+			FromSlot: meta.Slot, ThroughSlot: meta.Slot,
+			SHA256: hex.EncodeToString(digest[:]),
+		}},
+	}
+	var framed bytes.Buffer
+	for _, record := range records {
+		encoded, err := json.Marshal(record)
+		require.NoError(t, err)
+		framed.Write(encoded)
+		framed.WriteByte('\n')
+	}
+	framed.Write(eventWire.Bytes())
+	return framed.Bytes()
 }
 
 func requireStreamOK(t *testing.T, root string) {
