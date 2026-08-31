@@ -121,7 +121,8 @@ With --ssh, the entry launches Mithril on a remote node through SSH. The remote
 binary must be an absolute path. Use --remote-config for a config file on that
 node; the root --config flag always refers to a local file. Before adding the
 entry to a client, verify noninteractive key authentication and known_hosts
-with "ssh NODE true"; MCP cannot answer password or host-key prompts.`,
+with "ssh -T -o BatchMode=yes NODE </dev/null"; MCP cannot answer password or
+host-key prompts.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		entry, err := generatedStdioConfig(cmd)

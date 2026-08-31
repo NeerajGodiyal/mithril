@@ -92,17 +92,54 @@ server entry is the same.
 
 ## Remote node
 
-First confirm that SSH works without a password or host-key prompt:
+Use a dedicated SSH key and a dedicated account that can read only the node
+configuration and local observability endpoints needed by the selected MCP
+profile. Give the account no general SSH command access: keep a valid login
+shell because `sshd` uses it to launch forced commands, but place the key in
+that account's `authorized_keys` with a forced Mithril command and OpenSSH's
+`restrict` option. For example:
+
+```text
+restrict,command="/absolute/path/to/mithril mcp --config /absolute/path/to/config.toml --profile monitor" ssh-ed25519 AAAA... mithril-mcp
+```
+
+The forced command ignores any command requested by the client. `restrict`
+disables PTY allocation, port, agent, and X11 forwarding, and `~/.ssh/rc`.
+Keep `PermitUserEnvironment no` for this account. This restriction applies to
+this key: remove other authorized keys and disable password and
+keyboard-interactive authentication for the account, or enforce the same
+restrictions account-wide with `Match User`, `ForceCommand`,
+`DisableForwarding yes`, `PermitTTY no`, `PermitTunnel no`, and
+`PermitUserRC no`. Do not reuse an administrator key or grant this account
+write access to node state, validator keys, wallets, or signer sockets.
+
+Pin the server host key in a separate known-hosts file after verifying its
+fingerprint through an independent channel. A minimal client alias is:
+
+```sshconfig
+Host mithril-mcp
+  HostName NODE_ADDRESS
+  User mithril-mcp
+  IdentityFile ~/.ssh/mithril_mcp_ed25519
+  IdentitiesOnly yes
+  UserKnownHostsFile ~/.ssh/known_hosts_mithril_mcp
+  StrictHostKeyChecking yes
+```
+
+Then confirm that SSH works without a password or host-key prompt. The forced
+MCP command expects protocol input, so use the generated client configuration
+for the actual connection rather than testing it with an arbitrary remote
+command.
 
 ```bash
-ssh NODE true
+ssh -T -o BatchMode=yes mithril-mcp </dev/null
 ```
 
 Codex can add the remote server directly:
 
 ```bash
 ./mithril mcp setup codex \
-  --ssh NODE \
+  --ssh mithril-mcp \
   --remote-binary /absolute/path/to/mithril
 ```
 
@@ -110,12 +147,13 @@ For another client, generate its stdio entry:
 
 ```bash
 ./mithril mcp config \
-  --ssh NODE \
+  --ssh mithril-mcp \
   --remote-binary /absolute/path/to/mithril
 ```
 
-SSH uses your existing host alias, known-hosts entry, and authentication
-configuration.
+SSH uses the pinned host alias, dedicated identity, and authentication
+configuration. When `authorized_keys` forces the same Mithril command, the
+requested remote command generated here is deliberately ignored by `sshd`.
 
 ## Check the connection
 
@@ -138,5 +176,8 @@ not required. To pin the same workflow in a repository, add this to
 - `monitor` is the default read-only profile.
 - `diagnostic` adds account reads, transaction simulation, and profiling. Use
   `./mithril mcp config --profile diagnostic` only when those tools are needed.
+  A remote profile argument is ignored when `authorized_keys` forces the
+  `monitor` command; remote diagnostic access needs a separately reviewed
+  forced command and dedicated key or account alias.
 
 Access is controlled by the local user account or the SSH connection.
