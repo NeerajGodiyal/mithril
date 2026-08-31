@@ -105,8 +105,8 @@ restrict,command="/absolute/path/to/mithril mcp --config /absolute/path/to/confi
 
 The forced command ignores any command requested by the client. `restrict`
 disables PTY allocation, port, agent, and X11 forwarding, and `~/.ssh/rc`.
-Keep `PermitUserEnvironment no` for this account. This restriction applies to
-this key: remove other authorized keys and disable password and
+Keep the server-wide `PermitUserEnvironment no` default. This restriction
+applies to this key: remove other authorized keys and disable password and
 keyboard-interactive authentication for the account, or enforce the same
 restrictions account-wide with `Match User`, `ForceCommand`,
 `DisableForwarding yes`, `PermitTTY no`, `PermitTunnel no`, and
