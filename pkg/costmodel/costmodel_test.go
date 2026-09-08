@@ -84,28 +84,6 @@ func TestEstimateTransactionCostV0CountsResolvedWritableLookups(t *testing.T) {
 	require.NotContains(t, cost.WritableAccounts, loadedReadonly)
 }
 
-func TestSignatureCostIncludesPrecompiles(t *testing.T) {
-	tx := &solana.Transaction{
-		Signatures: []solana.Signature{{}},
-		Message: solana.Message{
-			AccountKeys: []solana.PublicKey{
-				solana.PublicKey(addresses.Ed25519PrecompileAddr),
-				solana.PublicKey(addresses.Secp256kPrecompileAddr),
-				solana.PublicKey(addresses.Secp256r1PrecompileAddr),
-			},
-			Instructions: []solana.CompiledInstruction{
-				{ProgramIDIndex: 0, Data: []byte{2}},
-				{ProgramIDIndex: 1, Data: []byte{3}},
-				{ProgramIDIndex: 2, Data: []byte{4}},
-			},
-		},
-	}
-	feats := features.NewFeaturesDefault()
-	require.Equal(t, uint64(SignatureCost+2*Ed25519VerifyStrictCost+3*Secp256k1VerifyCost), signatureCost(tx, feats))
-	feats.EnableFeature(features.EnableSecp256r1Precompile, 0)
-	require.Equal(t, uint64(SignatureCost+2*Ed25519VerifyStrictCost+3*Secp256k1VerifyCost+4*Secp256r1VerifyCost), signatureCost(tx, feats))
-}
-
 func marshalAllocateCostTest(t *testing.T, space uint64) []byte {
 	t.Helper()
 	var buffer bytes.Buffer
@@ -274,4 +252,141 @@ func TestCostTrackerAcceptsUnderLimits(t *testing.T) {
 	tracker.Record(cost)
 	assert.Equal(t, ExceedNone, tracker.WouldExceed(cost))
 	_ = wire
+}
+
+func TestEstimateTransactionCostCountsPrecompileSignatures(t *testing.T) {
+	tx := &solana.Transaction{
+		Signatures: []solana.Signature{{}},
+		Message: solana.Message{
+			Header: solana.MessageHeader{
+				NumRequiredSignatures:       1,
+				NumReadonlyUnsignedAccounts: 3,
+			},
+			AccountKeys: []solana.PublicKey{
+				{1},
+				solana.PublicKey(addresses.Secp256kPrecompileAddr),
+				solana.PublicKey(addresses.Ed25519PrecompileAddr),
+				solana.PublicKey(addresses.Secp256r1PrecompileAddr),
+			},
+			Instructions: []solana.CompiledInstruction{
+				{ProgramIDIndex: 1, Data: []byte{2}},
+				{ProgramIDIndex: 2, Data: []byte{3}},
+				{ProgramIDIndex: 3, Data: []byte{4}},
+			},
+		},
+	}
+	feats := features.NewFeaturesDefault()
+
+	cost, err := EstimateTransactionCost(tx, feats)
+	require.NoError(t, err)
+	assert.Equal(t,
+		uint64(SignatureCost+2*Secp256k1VerifyCost+3*Ed25519VerifyCost),
+		cost.SignatureCost,
+	)
+
+	feats.EnableFeature(features.Ed25519PrecompileVerifyStrict, 1)
+	cost, err = EstimateTransactionCost(tx, feats)
+	require.NoError(t, err)
+	assert.Equal(t,
+		uint64(SignatureCost+2*Secp256k1VerifyCost+3*Ed25519VerifyStrictCost),
+		cost.SignatureCost,
+	)
+
+	feats.EnableFeature(features.EnableSecp256r1Precompile, 2)
+	cost, err = EstimateTransactionCost(tx, feats)
+	require.NoError(t, err)
+	assert.Equal(t,
+		uint64(SignatureCost+2*Secp256k1VerifyCost+3*Ed25519VerifyStrictCost+4*Secp256r1VerifyCost),
+		cost.SignatureCost,
+	)
+}
+
+func TestLimitsForFeaturesRaiseBlockLimitsTo100m(t *testing.T) {
+	feats := features.NewFeaturesDefault()
+	assert.Equal(t, uint64(MaxBlockUnitsSIMD0256), LimitsForFeatures(feats).BlockCost)
+
+	feats.EnableFeature(features.RaiseBlockLimitsTo100m, 123)
+	assert.Equal(t, uint64(MaxBlockUnitsSIMD0286), LimitsForFeatures(feats).BlockCost)
+	assert.Equal(t, uint64(40_000_000), LimitsForFeatures(feats).WritableAccountCost)
+	assert.Equal(t, LimitsForSlotNanos(400_000_000, true), LimitsForFeatures(feats))
+	assert.Equal(t, uint64(MaxBlockUnitsSIMD0256), DefaultLimits().BlockCost)
+}
+
+func TestRaisedCostLimitsScaleWithSlotDuration(t *testing.T) {
+	for _, test := range []struct {
+		nanos, blockCost, accountCost uint64
+	}{
+		{400_000_000, 100_000_000, 40_000_000},
+		{350_000_000, 87_500_000, 35_000_000},
+		{300_000_000, 75_000_000, 30_000_000},
+		{250_000_000, 62_500_000, 25_000_000},
+		{200_000_000, 50_000_000, 20_000_000},
+	} {
+		limits := LimitsForSlotNanos(test.nanos, true)
+		assert.Equal(t, test.blockCost, limits.BlockCost, "slot duration %d", test.nanos)
+		assert.Equal(t, test.accountCost, limits.WritableAccountCost, "slot duration %d", test.nanos)
+	}
+}
+
+func TestWritableAccountsUsesUnsignedWritableRange(t *testing.T) {
+	tx := &solana.Transaction{Message: solana.Message{
+		Header: solana.MessageHeader{
+			NumRequiredSignatures:       2,
+			NumReadonlySignedAccounts:   1,
+			NumReadonlyUnsignedAccounts: 2,
+		},
+		AccountKeys: []solana.PublicKey{{1}, {2}, {3}, {4}, {5}, {6}},
+	}}
+
+	metas, err := tx.AccountMetaList()
+	require.NoError(t, err)
+	writable, err := writableAccounts(tx, metas, features.NewFeaturesDefault())
+	require.NoError(t, err)
+	assert.Equal(t, []solana.PublicKey{{1}, {3}, {4}}, writable)
+}
+
+func TestEstimateTransactionCostV1UsesInlineLimits(t *testing.T) {
+	msg := solana.Message{
+		Header: solana.MessageHeader{
+			NumRequiredSignatures:       1,
+			NumReadonlyUnsignedAccounts: 1,
+		},
+		AccountKeys: []solana.PublicKey{{1}, solana.ComputeBudget},
+		TransactionConfig: solana.TransactionConfig{}.
+			WithComputeUnitLimit(123_456).
+			WithLoadedAccountsDataSizeLimit(64 * 1024),
+		Instructions: []solana.CompiledInstruction{{
+			ProgramIDIndex: 1,
+			Data:           []byte{0xff}, // invalid legacy CB data; ignored by V1 config parsing
+		}},
+	}
+	_, err := msg.SetVersion(solana.MessageVersionV1)
+	require.NoError(t, err)
+	tx := &solana.Transaction{Message: msg, Signatures: []solana.Signature{{}}}
+
+	cost, err := EstimateTransactionCost(tx, features.NewFeaturesDefault())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(123_456), cost.ProgramsExecutionCost)
+	assert.Equal(t, loadedAccountsDataSizeCost(64*1024), cost.LoadedAccountsDataSizeCost)
+}
+
+func TestEstimateTransactionCostV1ReservesOnePageForZeroLoadedLimit(t *testing.T) {
+	msg := solana.Message{
+		Header:      solana.MessageHeader{NumRequiredSignatures: 1},
+		AccountKeys: []solana.PublicKey{{1}},
+		TransactionConfig: solana.TransactionConfig{}.
+			WithLoadedAccountsDataSizeLimit(0),
+	}
+	_, err := msg.SetVersion(solana.MessageVersionV1)
+	require.NoError(t, err)
+	tx := &solana.Transaction{Message: msg, Signatures: []solana.Signature{{}}}
+
+	cost, err := EstimateTransactionCost(tx, features.NewFeaturesDefault())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(HeapCost), cost.LoadedAccountsDataSizeCost)
+}
+
+func TestMaxMicroblockBytesIncludesV1Transaction(t *testing.T) {
+	require.Equal(t, EntryHeaderBytes+MaxTransactionSize, MaxMicroblockBytes)
+	require.Greater(t, MaxMicroblockBytes, EntryHeaderBytes+PacketDataSize)
 }

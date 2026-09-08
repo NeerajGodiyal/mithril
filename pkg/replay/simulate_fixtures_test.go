@@ -98,19 +98,14 @@ func withEmptyRecentBlockhashesSysvarFixture() func() {
 	return func() { sealevel.SysvarCache.RecentBlockHashes.Sysvar = prev }
 }
 
-// Without a populated AccountsDb, the fee payer itself is absent. With a
-// partially populated source the loader may instead reach the missing program;
-// a production source reaches the payer balance check. Every outcome is a
-// clean TransactionError, never a panic.
+// Agave validates the fee payer before loading the remaining accounts, so the
+// empty fixture bank deterministically reports AccountNotFound rather than a
+// later program-load failure. Either way, malformed local state must never
+// panic the simulation worker.
 func TestSimulateFixture_MissingAccount(t *testing.T) {
 	out := runSimulateFixture(t, fixtureMissingAccount)
 	require.NotNil(t, out.ProcessingResult.TransactionError)
-	got := out.ProcessingResult.TransactionError.ErrorType
-	assert.Contains(t,
-		[]TransactionErrorType{TransactionErrorAccountNotFound, TransactionErrorProgramAccountNotFound, TransactionErrorInsufficientFundsForFee},
-		got,
-		"expected ProgramAccountNotFound (no AccountsDb) or InsufficientFundsForFee (with AccountsDb), got %v", got,
-	)
+	assert.Equal(t, TransactionErrorAccountNotFound, out.ProcessingResult.TransactionError.ErrorType)
 }
 
 func TestSimulateFixture_ZeroSig(t *testing.T) {
@@ -155,20 +150,15 @@ func TestSimulateFixture_NoInstructions(t *testing.T) {
 	assert.Equal(t, TransactionErrorAccountNotFound, out.ProcessingResult.TransactionError.ErrorType)
 }
 
-// Same caveat as MissingAccount: the empty fixture may fail at the absent payer
-// before program loading or the fee-balance check.
 func TestSimulateFixture_SelfTransfer(t *testing.T) {
 	out := runSimulateFixture(t, fixtureSelfTransfer)
 	require.NotNil(t, out.ProcessingResult.TransactionError)
-	got := out.ProcessingResult.TransactionError.ErrorType
-	assert.Contains(t,
-		[]TransactionErrorType{TransactionErrorAccountNotFound, TransactionErrorProgramAccountNotFound, TransactionErrorInsufficientFundsForFee},
-		got,
-	)
+	assert.Equal(t, TransactionErrorAccountNotFound, out.ProcessingResult.TransactionError.ErrorType)
 }
 
 func TestSimulateFixture_DuplicateKeys(t *testing.T) {
 	out := runSimulateFixture(t, fixtureDuplicateKeys)
 	require.NotNil(t, out.ProcessingResult.TransactionError)
+	// Account locking rejects duplicates before loading the fee payer.
 	assert.Equal(t, TransactionErrorAccountLoadedTwice, out.ProcessingResult.TransactionError.ErrorType)
 }

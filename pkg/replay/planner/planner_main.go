@@ -25,7 +25,7 @@ func unmarshalBlockJSON(filename string) (*block.Block, error) {
 
 	b, err := block.FromBlockResult(gbr, 0, nil)
 	if err != nil {
-		return nil, fmt.Errorf("parsing block: %w", err)
+		return nil, fmt.Errorf("converting block: %w", err)
 	}
 	return b, nil
 }

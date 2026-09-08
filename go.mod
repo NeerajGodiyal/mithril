@@ -2,8 +2,6 @@ module github.com/Overclock-Validator/mithril
 
 go 1.26.6
 
-replace github.com/gagliardetto/solana-go => github.com/solana-foundation/solana-go v1.22.1-0.20260825060128-9b95d84971be
-
 replace github.com/gagliardetto/binary => github.com/palmerlao/binary v0.0.0-20250617062159-3054b4d33aed
 
 require (
@@ -14,7 +12,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/gagliardetto/binary v0.8.0
-	github.com/gagliardetto/solana-go v1.12.1-0.20250116180958-3786857b86e5
+	github.com/gagliardetto/solana-go v1.23.0
 	github.com/google/flatbuffers v25.12.19+incompatible
 	github.com/google/nftables v0.3.0
 	github.com/minio/sha256-simd v1.0.1
