@@ -34,10 +34,7 @@ func TestReadTrustedRegularRejectsFIFOWithoutBlocking(t *testing.T) {
 }
 
 func TestReadTrustedRegularPolicy(t *testing.T) {
-	dir, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir := trustedTempDir(t)
 	path := filepath.Join(dir, "trusted")
 	if err := os.WriteFile(path, []byte("value"), 0o600); err != nil {
 		t.Fatal(err)
@@ -103,10 +100,7 @@ func TestReadTrustedRegularPolicy(t *testing.T) {
 }
 
 func TestReadTrustedRegularRejectsWritableAncestor(t *testing.T) {
-	dir, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir := trustedTempDir(t)
 	writable := filepath.Join(dir, "writable")
 	if err := os.Mkdir(writable, 0o700); err != nil {
 		t.Fatal(err)
@@ -114,6 +108,13 @@ func TestReadTrustedRegularRejectsWritableAncestor(t *testing.T) {
 	path := filepath.Join(writable, "trusted")
 	if err := os.WriteFile(path, []byte("value"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := ReadTrustedRegular(path, ReadOptions{
+		MaxBytes:               5,
+		ForbiddenPerm:          0o077,
+		RejectAncestorSymlinks: true,
+	}); err != nil {
+		t.Fatalf("private ancestor rejected: %v", err)
 	}
 	if err := os.Chmod(writable, 0o777); err != nil {
 		t.Fatal(err)
@@ -125,4 +126,28 @@ func TestReadTrustedRegularRejectsWritableAncestor(t *testing.T) {
 	}); !errors.Is(err, ErrPermissions) {
 		t.Fatalf("writable ancestor error = %v", err)
 	}
+}
+
+// trustedTempDir avoids shared temporary directories, whose writable ancestors
+// are intentionally rejected by trusted reads.
+func trustedTempDir(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(home, ".mithril-safefile-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error(err)
+		}
+	})
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

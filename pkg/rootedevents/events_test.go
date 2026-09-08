@@ -238,6 +238,35 @@ func TestValidateTransactionUsesVersionSpecificWireLimit(t *testing.T) {
 	require.ErrorContains(t, validateTransaction(10, 0, exactV1), "wire size")
 }
 
+func TestValidateTransactionAppliesSharedInstructionLimit(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		version solana.MessageVersion
+	}{{"legacy", solana.MessageVersionLegacy}, {"v0", solana.MessageVersionV0}} {
+		t.Run(test.name, func(t *testing.T) {
+			tx := &solana.Transaction{
+				Signatures: []solana.Signature{{1}},
+				Message: solana.Message{
+					Header:          solana.MessageHeader{NumRequiredSignatures: 1},
+					AccountKeys:     []solana.PublicKey{{1}, {2}},
+					RecentBlockhash: solana.Hash{3},
+					Instructions:    make([]solana.CompiledInstruction, 64),
+				},
+			}
+			_, err := tx.Message.SetVersion(test.version)
+			require.NoError(t, err)
+			for i := range tx.Message.Instructions {
+				tx.Message.Instructions[i].ProgramIDIndex = 1
+			}
+			require.NoError(t, validateTransaction(10, 0, testTransactionObservationFromTransaction(t, tx)))
+			tx.Message.Instructions = append(tx.Message.Instructions, solana.CompiledInstruction{ProgramIDIndex: 1})
+			observation := testTransactionObservationFromTransaction(t, tx)
+			require.Less(t, len(observation.Transaction), maxLegacyTransactionBytes)
+			require.ErrorContains(t, validateTransaction(10, 0, observation), "too many instructions")
+		})
+	}
+}
+
 func TestValidateTransactionBindsCanonicalWireIdentityAndAccounts(t *testing.T) {
 	valid := testTransactionObservation(t)
 

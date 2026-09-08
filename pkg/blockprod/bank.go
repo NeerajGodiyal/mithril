@@ -411,12 +411,13 @@ func (b *WorkingBank) ForgeTransaction(tx *solana.Transaction, wireSize int) (Fo
 }
 
 func actualExecutionUsage(output replay.LoadAndExecuteTransactionOutput) (execCU, loadedCost uint64) {
+	loadedCost = costmodel.LoadedAccountsDataSizeCost(output.LoadedAccountsDataSize)
 	execCtx := output.ExecCtx
 	if execCtx == nil {
-		return 0, costmodel.LoadedAccountsDataSizeCost(output.LoadedAccountsDataSize)
+		return 0, loadedCost
 	}
 	execCU = execCtx.ComputeMeter.Used()
-	return execCU, costmodel.LoadedAccountsDataSizeCost(output.LoadedAccountsDataSize)
+	return execCU, loadedCost
 }
 
 // BufferedDropReason classifies why a buffered transaction should be discarded.

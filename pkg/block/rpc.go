@@ -7,23 +7,32 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/global"
 	"github.com/Overclock-Validator/mithril/pkg/mlog"
 	"github.com/Overclock-Validator/mithril/pkg/rpcclient"
+	tpuwire "github.com/Overclock-Validator/mithril/pkg/tpu/wire"
+	"github.com/Overclock-Validator/mithril/pkg/txverify"
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
 func FromBlockResult(blockResult *rpc.GetBlockResult, slot uint64, rpcc *rpcclient.RpcClient) (*Block, error) {
 	if blockResult == nil {
-		return nil, fmt.Errorf("slot %d: nil getBlock result", slot)
+		return nil, fmt.Errorf("convert RPC block at slot %d: nil block result", slot)
 	}
 	block := new(Block)
 	block.Slot = slot
 
-	for index, tx := range blockResult.Transactions {
-		if tx.Transaction == nil {
-			return nil, fmt.Errorf("slot %d transaction %d: missing encoded transaction", slot, index)
+	for txIndex, tx := range blockResult.Transactions {
+		if tx.Transaction != nil {
+			if encoded := tx.Transaction.GetBinary(); encoded != nil {
+				if _, err := tpuwire.Sanitize(encoded); err != nil {
+					return nil, fmt.Errorf("convert RPC block at slot %d transaction %d: invalid wire transaction: %w", slot, txIndex, err)
+				}
+			}
 		}
 		txParsed, err := tx.GetTransaction()
 		if err != nil {
-			return nil, fmt.Errorf("slot %d transaction %d: parse encoded transaction: %w", slot, index, err)
+			return nil, fmt.Errorf("convert RPC block at slot %d transaction %d: %w", slot, txIndex, err)
+		}
+		if err := txverify.SanitizeTransaction(txParsed); err != nil {
+			return nil, fmt.Errorf("convert RPC block at slot %d transaction %d: sanitize: %w", slot, txIndex, err)
 		}
 		block.Transactions = append(block.Transactions, txParsed)
 		block.TxMetas = append(block.TxMetas, tx.Meta)

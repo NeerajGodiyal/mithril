@@ -3,6 +3,8 @@ package node
 import (
 	"errors"
 	"net"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +13,28 @@ import (
 	"github.com/Overclock-Validator/mithril/pkg/state"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRootedEventStartupFollowsAlpenglowValidation(t *testing.T) {
+	source, err := os.ReadFile("node.go")
+	require.NoError(t, err)
+	previous := -1
+	for _, call := range []string{
+		"replay.InitialAlpenglowParentBlockID(mithrilState, resumeState)",
+		"replay.ValidateAlpenglowStartupState(accountsDb, parentSlot)",
+		"bindRootRunID(mithrilState, accountsPath, replay.CurrentRunID)",
+		"initializeVerificationStatusForRPC(vcfg, mithrilState, rootedDurableMode, alpenglowMode)",
+		"rootedfeed.NewRetainer(accountsPath, compactCfg.RewindHorizonBatches)",
+		"publishRootedEventHead(accountsPath, accountsDb)",
+		"rootedEventRetainer.Cleanup(currentRef)",
+		"rpcServer.Start()",
+		"consensusengine.NewEngine(",
+	} {
+		position := strings.Index(string(source), call)
+		require.NotEqual(t, -1, position, "startup call missing: %s", call)
+		require.Greater(t, position, previous, "startup call out of order: %s", call)
+		previous = position
+	}
+}
 
 func TestAlpenglowModeForCluster(t *testing.T) {
 	alpenglow, err := alpenglowModeForCluster("alpenglow")

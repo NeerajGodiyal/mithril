@@ -43,7 +43,7 @@ func TestVerifyBlockTransactionSignaturesFailsClosed(t *testing.T) {
 	wrongArity := *valid
 	wrongArity.Signatures = nil
 	block = &b.Block{Slot: 79, Transactions: []*solana.Transaction{&wrongArity}}
-	require.ErrorContains(t, verifyBlockTransactionSignatures(block), "got 1 signers, but 0 signatures")
+	require.ErrorContains(t, verifyBlockTransactionSignatures(block), "not enough signatures: required 1, got 0")
 	require.False(t, block.TransactionSignaturesVerified())
 }
 
@@ -166,14 +166,15 @@ func TestPlanBlockTransactionExecutionRejectsMalformedHeaderBeforePlanner(t *tes
 	})
 	require.NoError(t, err)
 	block := &b.Block{Slot: 81, FromLiveStream: true, Transactions: []*solana.Transaction{tx}}
-	require.NoError(t, verifyBlockTransactionSignatures(block))
+	require.ErrorContains(t, verifyBlockTransactionSignatures(block), "no writable signer")
+	require.False(t, block.TransactionSignaturesVerified())
 
 	_, err = planBlockTransactionExecution(block)
 	require.ErrorIs(t, err, TxErrSanitizeFailure)
 	require.NotPanics(t, func() {
 		_, err = ProcessBlock(nil, block, nil, 1, nil, nil, nil, NewTransactionStatusCache(), nil, false, nil)
 	})
-	require.ErrorIs(t, err, TxErrSanitizeFailure)
+	require.ErrorContains(t, err, "no writable signer")
 }
 
 func TestTransactionLoopsRejectUnprocessableTransactionWithoutFees(t *testing.T) {
