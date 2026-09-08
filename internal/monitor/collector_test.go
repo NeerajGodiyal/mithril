@@ -731,13 +731,24 @@ func TestProbeOnceRejectsUnusableRequests(t *testing.T) {
 	}
 }
 
-// trustedTempDir is t.TempDir() with every symlink resolved. Trusted reads
-// reject a symlinked ancestor, and on macOS t.TempDir() sits under /var, which
-// is itself a symlink to /private/var — so an unresolved temp path fails the
-// check for a reason that has nothing to do with what the test is asserting.
+// trustedTempDir avoids shared temporary directories, whose writable ancestors
+// are intentionally rejected by trusted reads.
 func trustedTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := filepath.EvalSymlinks(t.TempDir())
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(home, ".mithril-monitor-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error(err)
+		}
+	})
+	dir, err = filepath.EvalSymlinks(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

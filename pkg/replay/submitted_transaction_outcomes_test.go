@@ -8,10 +8,13 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
 	b "github.com/Overclock-Validator/mithril/pkg/block"
+	"github.com/Overclock-Validator/mithril/pkg/features"
+	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
 	"github.com/Overclock-Validator/mithril/pkg/txstatus"
 	"github.com/gagliardetto/solana-go"
+	"github.com/stretchr/testify/require"
 )
 
 func submitReceipt(t *testing.T, index *txstatus.Index, signature solana.Signature, recentBlockhash solana.Hash, deadline *uint64) {
@@ -58,6 +61,33 @@ func TestFollowerOutcomeUsesCanonicalTransactionFailure(t *testing.T) {
 	if outcome != "InstructionError(0, InvalidInstructionData)" {
 		t.Fatalf("canonical outcome = %q", outcome)
 	}
+}
+
+func TestFollowerOutcomeCapturesNoOpWithoutChargingFees(t *testing.T) {
+	slotCtx, cleanup := newCommitTestSlotCtx()
+	defer cleanup()
+	slotCtx.Features.EnableFeature(features.EnableTxV1, 0)
+	slotCtx.Features.EnableFeature(features.RelaxFeePayerConstraint, 0)
+	tx := signedV1Transfer(t, solana.TransactionConfig{}.WithComputeUnitLimit(12_345))
+	payer, err := slotCtx.GetAccount(txfixture.PayerPubkey())
+	require.NoError(t, err)
+	payer.Owner = addresses.VoteProgramAddr
+	require.NoError(t, slotCtx.SetAccount(txfixture.PayerPubkey(), payer))
+	before := payer.Clone()
+
+	var outcome string
+	feeInfo, computeUnits, processErr := processTransactionForReplay(
+		slotCtx, &sync.WaitGroup{}, tx, nil, nil, nil, nil, &outcome, false,
+	)
+	require.ErrorIs(t, processErr, fees.ErrInvalidAccountForFee)
+	require.Equal(t, "InvalidAccountForFee", outcome)
+	require.NotNil(t, feeInfo)
+	require.Zero(t, feeInfo.TotalFee)
+	require.Equal(t, uint64(12_345), computeUnits)
+	after, err := slotCtx.GetAccount(txfixture.PayerPubkey())
+	require.NoError(t, err)
+	require.True(t, sameAccountState(before, after))
+	require.Empty(t, slotCtx.ModifiedAccts)
 }
 
 type receiptObservingSlotCtxSetter struct {

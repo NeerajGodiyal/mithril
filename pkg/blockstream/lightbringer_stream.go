@@ -232,10 +232,27 @@ func (bs *BlockSource) runLightbringerStream() {
 				continue
 			}
 
-			blk, err := block.DecodeLightbringerStreamMsg(resp)
+			blk, err := block.FromLightbringerStreamMsg(resp)
 			if err != nil {
-				bs.requestLiveStreamReconnect(fmt.Sprintf("invalid slot %d payload: %v", resp.Slot, err))
-				continue
+				connectionClosedOnce.Do(func() {
+					close(connectionClosed)
+				})
+				reason := fmt.Sprintf("cannot decode Lightbringer slot %d: %v", resp.Slot, err)
+				bs.handleLiveShredStreamClosed(reason)
+				cancelStream()
+				<-streamDone
+				_ = conn.Close()
+				bs.liveReconnectRequested.Store(false)
+				mlog.Log.Warnf("Lightbringer stream decode failed closed; reconnecting")
+
+				if bs.waitForStopOrTimeout(backoff) {
+					return
+				}
+				backoff *= 2
+				if backoff > liveMaxRetryBackoff {
+					backoff = liveMaxRetryBackoff
+				}
+				break
 			}
 			if !bs.ingestLiveShredBlock(blk) {
 				cancelStream()

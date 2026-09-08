@@ -173,26 +173,42 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 		}
 	}
 
-	// Base58 remains capped at the legacy packet size. Base64 can carry the
-	// larger v1 envelope; decoded legacy and v0 transactions are checked again
-	// below against the 1232-byte limit.
+	// Reject oversized encoded inputs BEFORE decode, matching Agave's
+	// version-sensitive decode_and_deserialize limits.
+	maxEncodedSize := maxBase58TxSize
+	maxRawSize := legacyTransactionSize
 	if conf.encoding == "base58" {
-		if len(txStr) > maxBase58TxSize {
+		if len(txStr) > maxEncodedSize {
 			return SimulateTransactionResp{}, &InvalidParamsError{
-				Message: fmt.Sprintf("base58 encoded solana_transaction too large: %d bytes (max: encoded/raw %d/%d)", len(txStr), maxBase58TxSize, packetDataSize),
+				Message: fmt.Sprintf("base58 encoded solana_transaction too large: %d bytes (max: encoded/raw %d/%d)", len(txStr), maxEncodedSize, maxRawSize),
 			}
 		}
 	} else {
-		if len(txStr) > maxBase64TxSize {
+		maxEncodedSize, maxRawSize = base64TransactionSizeLimits(txStr)
+		if len(txStr) > maxEncodedSize {
 			return SimulateTransactionResp{}, &InvalidParamsError{
-				Message: fmt.Sprintf("base64 encoded solana_transaction too large: %d bytes (max: encoded/raw %d/%d)", len(txStr), maxBase64TxSize, v1PacketDataSize),
+				Message: fmt.Sprintf("base64 encoded solana_transaction too large: %d bytes (max: encoded/raw %d/%d)", len(txStr), maxEncodedSize, maxRawSize),
 			}
 		}
 	}
 
-	tx, err := decodeSimulationTransaction(txStr, conf.encoding)
+	var wire []byte
+	if conf.encoding == "base58" {
+		wire, err = base58.Decode(txStr)
+	} else {
+		wire, err = base64.StdEncoding.DecodeString(txStr)
+	}
 	if err != nil {
-		return SimulateTransactionResp{}, err
+		return SimulateTransactionResp{}, &InvalidParamsError{Message: fmt.Sprintf("failed to decode transaction: %v", err)}
+	}
+	if len(wire) > maxRawSize {
+		return SimulateTransactionResp{}, &InvalidParamsError{
+			Message: fmt.Sprintf("decoded solana_transaction too large: %d bytes (max: %d bytes)", len(wire), maxRawSize),
+		}
+	}
+	tx, err := decodeTransactionExact(wire)
+	if err != nil {
+		return SimulateTransactionResp{}, &InvalidParamsError{Message: fmt.Sprintf("failed to decode transaction: %v", err)}
 	}
 
 	// Conflict check runs after decode so a bad tx surfaces as "failed to
@@ -268,6 +284,15 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 		return earlyFailResponse("AddressLookupTableNotFound", replacementBlockhash, conf, tx, slotCtx.Slot), nil
 	}
 
+	// RuntimeTransaction::try_create sanitizes unconditionally in Agave's
+	// simulateTransaction path. Do the same after ALT resolution so malformed
+	// transactions are rejected as invalid params before replay applies any
+	// transaction-version feature gate. This must not depend on sigVerify.
+	if err := txverify.SanitizeTransaction(tx); err != nil {
+		metrics.GlobalSimulate.SanitizeFailures.Inc()
+		return SimulateTransactionResp{}, errInvalidSanitizedTransaction
+	}
+
 	// Cap uses post-ALT-resolve key count; pre-resolve would reject valid
 	// requests for versioned txs.
 	if conf.accounts != nil && len(conf.accounts.addresses) > len(tx.Message.AccountKeys) {
@@ -299,6 +324,18 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 	if err := ctx.Err(); err != nil {
 		return SimulateTransactionResp{}, err
 	}
+	if output.LoadError != nil {
+		return SimulateTransactionResp{}, fmt.Errorf("transaction simulation unavailable: %w", output.LoadError)
+	}
+	preAccountSnapshots, postAccountSnapshots := simulationAccountSnapshotsForOutput(slotCtx, tx, output, supplementalReader.Read)
+	preBalances := output.PreBalances
+	if preBalances == nil {
+		preBalances = balancesFromAccountSnapshots(preAccountSnapshots)
+	}
+	postBalances := postBalancesFromExecCtx(output.ExecCtx)
+	if postBalances == nil {
+		postBalances = nonExecutedSimulationPostBalances(output, preBalances)
+	}
 
 	// Default to empty slice so JSON marshals "logs":[] not null when the
 	// simulator ran.
@@ -319,14 +356,14 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 			Logs:                 ptrSlice(logs),
 			ReplacementBlockhash: replacementBlockhash,
 			InnerInstructions:    nil,
-			PreBalances:          ptrSlice(output.PreBalances),
-			PostBalances:         ptrSlice(postBalancesFromExecCtx(output.ExecCtx)),
-			PreTokenBalances:     ptrSliceTokenBalance(tokenBalancesForTransaction(tx, output.PreAccountSnapshots, supplementalReader.Read)),
-			PostTokenBalances:    ptrSliceTokenBalance(tokenBalancesForTransaction(tx, postExecAccounts(output.ExecCtx), supplementalReader.Read)),
+			PreBalances:          ptrSlice(preBalances),
+			PostBalances:         ptrSlice(postBalances),
+			PreTokenBalances:     ptrSliceTokenBalance(tokenBalancesForTransaction(tx, preAccountSnapshots, supplementalReader.Read)),
+			PostTokenBalances:    ptrSliceTokenBalance(tokenBalancesForTransaction(tx, postAccountSnapshots, supplementalReader.Read)),
 			LoadedAddresses:      loadedAddressesFromTx(tx),
 		},
 	}
-	if output.FeeInfo != nil {
+	if processingOutputChargesFee(output) {
 		fee := output.FeeInfo.TotalFee
 		resp.Value.Fee = &fee
 	}
@@ -337,15 +374,22 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 
 		// InstructionError / InsufficientFundsForRent reach this path AFTER
 		// execution started, so execCtx carries real CU/data-size/logs/CPIs.
-		// Pre-execution failures (sanitize, load, fee) leave it nil.
+		// Agave drops SIMD-0290 no-ops from simulation, so its externally visible
+		// result is the original fee-payer error with nil fee and zero resource
+		// usage. Replay still retains the requested maxima for block accounting.
 		executionRan := output.ExecCtx != nil &&
 			(txErr.ErrorType == replay.TransactionErrorInstructionError ||
 				txErr.ErrorType == replay.TransactionErrorInsufficientFundsForRent)
 
-		if executionRan {
+		if output.ProcessedAsNoOp {
+			zeroUnits := uint64(0)
+			zeroSize := uint32(0)
+			resp.Value.UnitsConsumed = &zeroUnits
+			resp.Value.LoadedAccountsDataSize = &zeroSize
+		} else if executionRan {
 			units := output.ExecCtx.ComputeMeter.Used()
 			resp.Value.UnitsConsumed = &units
-			dataSize := loadedAccountsDataSizeFromExecCtx(output.ExecCtx)
+			dataSize := output.LoadedAccountsDataSize
 			resp.Value.LoadedAccountsDataSize = &dataSize
 			if logRecorder, ok := output.ExecCtx.Log.(*sealevel.LogRecorder); ok && logRecorder != nil && logRecorder.Logs != nil {
 				clamped := clampLogs(logRecorder.Logs)
@@ -353,9 +397,9 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 			}
 		} else {
 			zeroUnits := uint64(0)
-			zeroSize := uint32(0)
 			resp.Value.UnitsConsumed = &zeroUnits
-			resp.Value.LoadedAccountsDataSize = &zeroSize
+			dataSize := failureLoadedAccountsDataSize(output)
+			resp.Value.LoadedAccountsDataSize = &dataSize
 		}
 
 		if conf.innerInstructions {
@@ -442,43 +486,6 @@ func (rpcServer *RpcServer) SimulateTransaction(ctx context.Context, p jsonrpc.R
 	}
 
 	return resp, nil
-}
-
-func decodeSimulationTransaction(txStr, encoding string) (*solana.Transaction, error) {
-	var (
-		wire []byte
-		err  error
-	)
-	if encoding == "base58" {
-		wire, err = base58.Decode(txStr)
-	} else {
-		wire, err = base64.StdEncoding.DecodeString(txStr)
-	}
-	if err != nil {
-		return nil, &InvalidParamsError{Message: fmt.Sprintf("failed to decode transaction: %v", err)}
-	}
-	rawLimit := packetDataSize
-	if encoding != "base58" {
-		rawLimit = v1PacketDataSize
-	}
-	if len(wire) > rawLimit {
-		return nil, &InvalidParamsError{
-			Message: fmt.Sprintf("decoded solana_transaction too large: %d bytes (max: %d bytes)", len(wire), rawLimit),
-		}
-	}
-	// Mithril applies the TPU's exact v1 envelope rule to simulation too. This is
-	// stricter than Agave RPC's lenient decoder and avoids simulating bytes that
-	// no leader can accept.
-	tx, err := solana.TransactionFromBytes(wire)
-	if err != nil {
-		return nil, &InvalidParamsError{Message: fmt.Sprintf("failed to decode transaction: %v", err)}
-	}
-	if tx.Message.GetVersion() != solana.MessageVersionV1 && len(wire) > packetDataSize {
-		return nil, &InvalidParamsError{
-			Message: fmt.Sprintf("decoded solana_transaction too large: %d bytes (max: %d bytes)", len(wire), packetDataSize),
-		}
-	}
-	return tx, nil
 }
 
 func parseSimulateConfig(params []interface{}) (simulateTransactionConfig, error) {
@@ -599,22 +606,118 @@ func postBalancesFromExecCtx(execCtx *sealevel.ExecutionCtx) []uint64 {
 	return out
 }
 
-// loadedAccountsDataSizeFromExecCtx sums the data size of all loaded
-// accounts on the failure path, mirroring the success-path calculation
-// in transaction_processing_pure.go. Used so InstructionError responses
-// emit a non-zero loadedAccountsDataSize, matching Agave's wire format.
-func loadedAccountsDataSizeFromExecCtx(execCtx *sealevel.ExecutionCtx) uint32 {
-	if execCtx == nil {
+// simulationAccountSnapshots mirrors Agave's balance collector around
+// transaction processing. It runs only when an early return prevented the
+// execution path from loading accounts; absent accounts remain nil entries.
+func simulationAccountSnapshots(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, read func(solana.PublicKey) (*accounts.Account, error)) []*accounts.Account {
+	if slotCtx == nil || tx == nil {
+		return nil
+	}
+	snapshots := make([]*accounts.Account, len(tx.Message.AccountKeys))
+	for i, key := range tx.Message.AccountKeys {
+		acct, err := slotCtx.GetAccount(key)
+		if err != nil && read != nil && (slotCtx.UnrootedRead != nil || slotCtx.AccountsDb != nil) {
+			acct, err = read(key)
+		}
+		if err == nil && acct != nil {
+			snapshots[i] = acct
+		}
+	}
+	return snapshots
+}
+
+func balancesFromAccountSnapshots(snapshots []*accounts.Account) []uint64 {
+	if snapshots == nil {
+		return nil
+	}
+	balances := make([]uint64, len(snapshots))
+	for i, acct := range snapshots {
+		if acct != nil {
+			balances[i] = acct.Lamports
+		}
+	}
+	return balances
+}
+
+// simulationAccountSnapshotsForOutput selects the same account views Agave's
+// balance collector exposes around processing. Early no-op, fee-payer, and
+// fees-only results have no ExecutionCtx, but their token accounts are still
+// observed and remain unchanged.
+func simulationAccountSnapshotsForOutput(
+	slotCtx *sealevel.SlotCtx,
+	tx *solana.Transaction,
+	output replay.LoadAndExecuteTransactionOutput,
+	read func(solana.PublicKey) (*accounts.Account, error),
+) (pre []*accounts.Account, post []*accounts.Account) {
+	pre = output.PreAccountSnapshots
+	if pre == nil {
+		pre = simulationAccountSnapshots(slotCtx, tx, read)
+	}
+	post = postExecAccounts(output.ExecCtx)
+	if post == nil {
+		post = pre
+	}
+	return pre, post
+}
+
+// processingOutputChargesFee reports whether Agave represents this result as
+// a committed Executed or FeesOnly transaction. Validation failures (including
+// dropped SIMD-0290 no-ops) expose a null fee even if calculation completed.
+func processingOutputChargesFee(output replay.LoadAndExecuteTransactionOutput) bool {
+	if output.FeeInfo == nil || output.ProcessedAsNoOp {
+		return false
+	}
+	if output.ProcessingResult.TransactionError == nil || output.ExecCtx != nil {
+		return true
+	}
+	switch output.ProcessingResult.TransactionError.ErrorType {
+	case replay.TransactionErrorMaxLoadedAccountsDataSizeExceeded,
+		replay.TransactionErrorInvalidProgramForExecution,
+		replay.TransactionErrorProgramAccountNotFound:
+		return true
+	default:
+		return false
+	}
+}
+
+// nonExecutedSimulationPostBalances derives the observable rollback state for
+// results that never produced an ExecutionCtx. No-ops and unprocessable
+// failures leave balances unchanged. Processable fees-only load failures debit
+// the payer; advancing a durable nonce does not change any lamport balance.
+func nonExecutedSimulationPostBalances(output replay.LoadAndExecuteTransactionOutput, pre []uint64) []uint64 {
+	post := append([]uint64(nil), pre...)
+	if output.ProcessedAsNoOp || output.FeeInfo == nil || output.ProcessingResult.TransactionError == nil || len(post) == 0 {
+		return post
+	}
+	switch output.ProcessingResult.TransactionError.ErrorType {
+	case replay.TransactionErrorMaxLoadedAccountsDataSizeExceeded,
+		replay.TransactionErrorInvalidProgramForExecution,
+		replay.TransactionErrorProgramAccountNotFound:
+		if post[0] >= output.FeeInfo.TotalFee {
+			post[0] -= output.FeeInfo.TotalFee
+		}
+	}
+	return post
+}
+
+func failureLoadedAccountsDataSize(output replay.LoadAndExecuteTransactionOutput) uint32 {
+	if output.ExecCtx != nil {
+		return output.LoadedAccountsDataSize
+	}
+	if output.ProcessingResult.TransactionError == nil {
 		return 0
 	}
-	var total uint32
-	for _, acct := range execCtx.TransactionContext.Accounts.Accounts {
-		if acct == nil || acct.IsDummy {
-			continue
-		}
-		total += uint32(len(acct.Data))
+	switch output.ProcessingResult.TransactionError.ErrorType {
+	case replay.TransactionErrorMaxLoadedAccountsDataSizeExceeded,
+		replay.TransactionErrorInvalidProgramForExecution,
+		replay.TransactionErrorProgramAccountNotFound:
+		// The loader has already selected the feature-correct value: rollback
+		// account data before the amendment, or the partial SIMD-0186
+		// accumulator after it.
+		return output.LoadedAccountsDataSize
+	default:
+		return 0
 	}
-	return total
 }
 
 // postExecAccounts returns the live post-execution transaction accounts
@@ -831,7 +934,7 @@ func renderInnerInstructions(lists []replay.InnerInstructionsList) []InnerInstru
 // to keep the response shape stable for clients.
 func loadedAddressesFromTx(tx *solana.Transaction) *LoadedAddressesPayload {
 	out := &LoadedAddressesPayload{Readonly: []string{}, Writable: []string{}}
-	if !tx.Message.IsVersioned() || tx.Message.AddressTableLookups.NumLookups() == 0 {
+	if tx.Message.GetVersion() != solana.MessageVersionV0 || tx.Message.AddressTableLookups.NumLookups() == 0 {
 		return out
 	}
 

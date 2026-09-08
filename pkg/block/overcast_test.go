@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/overcast"
+	"github.com/Overclock-Validator/mithril/pkg/txverify"
 	"github.com/gagliardetto/solana-go"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -25,7 +27,8 @@ func TestFromLightbringerStreamMsgLeavesBlockHeightUnset(t *testing.T) {
 		},
 	}
 
-	block := FromLightbringerStreamMsg(resp)
+	block, err := FromLightbringerStreamMsg(resp)
+	require.NoError(t, err)
 
 	if block.BlockHeight != 0 {
 		t.Fatalf("expected block height to be unset, got %d", block.BlockHeight)
@@ -38,6 +41,115 @@ func TestFromLightbringerStreamMsgLeavesBlockHeightUnset(t *testing.T) {
 	}
 }
 
+func TestFromLightbringerStreamMsgRejectsUnknownTransactionVariant(t *testing.T) {
+	entryHash := make([]byte, overcastHashSize)
+	entryHash[0] = 0xAB
+
+	// Field 5 is outside the supported message oneof. Future variants must
+	// remain an explicit decode failure rather than silently losing fields.
+	futureTx := &overcast.VersionedTransaction{}
+	futureTx.ProtoReflect().SetUnknown([]byte{0x2a, 0x00})
+	resp := &overcast.SlotResponse{
+		Slot: 123,
+		Entries: []*overcast.Entry{{
+			Hash:         entryHash,
+			Transactions: []*overcast.VersionedTransaction{futureTx},
+		}},
+	}
+
+	var (
+		got *Block
+		err error
+	)
+	require.NotPanics(t, func() {
+		got, err = FromLightbringerStreamMsg(resp)
+	})
+	require.Nil(t, got)
+	require.ErrorContains(t, err, "unsupported transaction fields")
+}
+
+func TestFromLightbringerStreamMsgRejectsMissingTransactionMessage(t *testing.T) {
+	resp := &overcast.SlotResponse{
+		Slot: 123,
+		Entries: []*overcast.Entry{{
+			Hash:         make([]byte, overcastHashSize),
+			Transactions: []*overcast.VersionedTransaction{{}},
+		}},
+	}
+
+	got, err := FromLightbringerStreamMsg(resp)
+	require.Nil(t, got)
+	require.ErrorContains(t, err, "unsupported or missing transaction message")
+}
+
+func TestFromLightbringerStreamMsgConvertsV0(t *testing.T) {
+	entryHash := make([]byte, overcastHashSize)
+	recentBlockhash := make([]byte, overcastHashSize)
+	accountKey := make([]byte, overcastPubkeySize)
+	tableKey := make([]byte, overcastPubkeySize)
+	resp := &overcast.SlotResponse{
+		Slot: 123,
+		Entries: []*overcast.Entry{{
+			Hash: entryHash,
+			Transactions: []*overcast.VersionedTransaction{{
+				Signatures: [][]byte{make([]byte, overcastSignatureSize)},
+				Message: &overcast.VersionedTransaction_MessageV0{
+					MessageV0: &overcast.VersionedMessageV0{
+						Header: &overcast.MessageHeader{
+							NumRequiredSignatures: 1,
+						},
+						AccountKeys:     [][]byte{accountKey},
+						RecentBlockhash: recentBlockhash,
+						AddressTableLookups: []*overcast.MessageAddressTableLookup{{
+							AccountKey:      tableKey,
+							WritableIndexes: []byte{1},
+						}},
+					},
+				},
+			}},
+		}},
+	}
+
+	got, err := FromLightbringerStreamMsg(resp)
+	require.NoError(t, err)
+	require.Len(t, got.Transactions, 1)
+	require.Equal(t, solana.MessageVersionV0, got.Transactions[0].Message.GetVersion())
+	require.Equal(t, []uint8{uint8(solana.MessageVersionV0)}, got.Versions)
+}
+
+func TestFromLightbringerStreamMsgSanitizesConvertedTransaction(t *testing.T) {
+	resp := &overcast.SlotResponse{
+		Slot: 123,
+		Entries: []*overcast.Entry{{
+			Hash: make([]byte, overcastHashSize),
+			Transactions: []*overcast.VersionedTransaction{{
+				Signatures: [][]byte{
+					make([]byte, overcastSignatureSize),
+					make([]byte, overcastSignatureSize),
+				},
+				Message: &overcast.VersionedTransaction_MessageLegacy{
+					MessageLegacy: &overcast.VersionedMessageLegacy{
+						Header: &overcast.MessageHeader{
+							NumRequiredSignatures: 2,
+						},
+						AccountKeys:     [][]byte{make([]byte, overcastPubkeySize)},
+						RecentBlockhash: make([]byte, overcastHashSize),
+					},
+				},
+			}},
+		}},
+	}
+
+	var (
+		got *Block
+		err error
+	)
+	require.NotPanics(t, func() {
+		got, err = FromLightbringerStreamMsg(resp)
+	})
+	require.Nil(t, got)
+	require.ErrorContains(t, err, "more signatures (2) than static account keys (1)")
+}
 func TestFromLightbringerStreamMsgCarriesV1ProducerPayload(t *testing.T) {
 	priorityFee := uint64(50_000)
 	computeUnitLimit := uint32(200_000)
@@ -79,7 +191,7 @@ func TestFromLightbringerStreamMsgCarriesV1ProducerPayload(t *testing.T) {
 
 	entryHash := make([]byte, len(solana.Hash{}))
 	entryHash[0] = 0x77
-	block, err := DecodeLightbringerStreamMsg(&overcast.SlotResponse{
+	block, err := FromLightbringerStreamMsg(&overcast.SlotResponse{
 		Slot:       123,
 		ParentSlot: 122,
 		Entries: []*overcast.Entry{{
@@ -173,7 +285,7 @@ func TestFromLightbringerStreamMsgKeepsLegacyAndV0Compatible(t *testing.T) {
 				t.Fatalf("unmarshal producer transaction: %v", err)
 			}
 			entryHash := make([]byte, len(solana.Hash{}))
-			block, err := DecodeLightbringerStreamMsg(&overcast.SlotResponse{Entries: []*overcast.Entry{{
+			block, err := FromLightbringerStreamMsg(&overcast.SlotResponse{Entries: []*overcast.Entry{{
 				Hash: entryHash, Transactions: []*overcast.VersionedTransaction{decoded},
 			}}})
 			if err != nil {
@@ -192,18 +304,8 @@ func TestFromLightbringerStreamMsgKeepsLegacyAndV0Compatible(t *testing.T) {
 	}
 }
 
-func TestFromLightbringerStreamMsgRejectsMissingTransactionMessage(t *testing.T) {
-	_, err := DecodeLightbringerStreamMsg(&overcast.SlotResponse{Entries: []*overcast.Entry{{
-		Hash:         make([]byte, len(solana.Hash{})),
-		Transactions: []*overcast.VersionedTransaction{{}},
-	}}})
-	if err == nil {
-		t.Fatal("missing transaction message was accepted")
-	}
-}
-
 func TestFromLightbringerStreamMsgRejectsProgramIDIndexOutsideWireRange(t *testing.T) {
-	_, err := DecodeLightbringerStreamMsg(&overcast.SlotResponse{Entries: []*overcast.Entry{{
+	_, err := FromLightbringerStreamMsg(&overcast.SlotResponse{Entries: []*overcast.Entry{{
 		Hash: make([]byte, len(solana.Hash{})),
 		Transactions: []*overcast.VersionedTransaction{{
 			Message: &overcast.VersionedTransaction_MessageV1{MessageV1: &overcast.VersionedMessageV1{
@@ -215,7 +317,7 @@ func TestFromLightbringerStreamMsgRejectsProgramIDIndexOutsideWireRange(t *testi
 			}},
 		}},
 	}}})
-	if err == nil || !strings.Contains(err.Error(), "program id index exceeds uint8") {
+	if err == nil || !strings.Contains(err.Error(), "program ID index 256 exceeds u8 limit") {
 		t.Fatalf("program id index outside the Solana wire range error = %v", err)
 	}
 }
@@ -226,7 +328,7 @@ func TestFromLightbringerStreamMsgRejectsUnsanitizedTransaction(t *testing.T) {
 		make([]byte, len(solana.PublicKey{})),
 	}
 	accountKeys[1][0] = 1
-	_, err := DecodeLightbringerStreamMsg(&overcast.SlotResponse{Entries: []*overcast.Entry{{
+	_, err := FromLightbringerStreamMsg(&overcast.SlotResponse{Entries: []*overcast.Entry{{
 		Hash: make([]byte, len(solana.Hash{})),
 		Transactions: []*overcast.VersionedTransaction{{
 			Signatures: [][]byte{make([]byte, len(solana.Signature{}))},
@@ -240,7 +342,7 @@ func TestFromLightbringerStreamMsgRejectsUnsanitizedTransaction(t *testing.T) {
 			}},
 		}},
 	}}})
-	if err == nil || !strings.Contains(err.Error(), "sanitize transaction") {
+	if err == nil || !strings.Contains(err.Error(), "invalid transaction version") {
 		t.Fatalf("unsanitized transaction error = %v", err)
 	}
 }
@@ -263,7 +365,7 @@ func TestFromLightbringerStreamMsgRejectsOversizedTransaction(t *testing.T) {
 			transaction: &overcast.VersionedTransaction{Signatures: signatures, Message: &overcast.VersionedTransaction_MessageLegacy{
 				MessageLegacy: &overcast.VersionedMessageLegacy{
 					Header: header, AccountKeys: accountKeys, RecentBlockhash: blockhash,
-					Instructions: []*overcast.CompiledInstruction{{ProgramIdIndex: 1, Data: make([]byte, maxLegacyTransactionBytes)}},
+					Instructions: []*overcast.CompiledInstruction{{ProgramIdIndex: 1, Data: make([]byte, txverify.MaxLegacyTransactionSize)}},
 				},
 			}},
 		},
@@ -272,7 +374,7 @@ func TestFromLightbringerStreamMsgRejectsOversizedTransaction(t *testing.T) {
 			transaction: &overcast.VersionedTransaction{Signatures: signatures, Message: &overcast.VersionedTransaction_MessageV0{
 				MessageV0: &overcast.VersionedMessageV0{
 					Header: header, AccountKeys: accountKeys, RecentBlockhash: blockhash,
-					Instructions: []*overcast.CompiledInstruction{{ProgramIdIndex: 1, Data: make([]byte, maxLegacyTransactionBytes)}},
+					Instructions: []*overcast.CompiledInstruction{{ProgramIdIndex: 1, Data: make([]byte, txverify.MaxLegacyTransactionSize)}},
 				},
 			}},
 		},
@@ -288,12 +390,69 @@ func TestFromLightbringerStreamMsgRejectsOversizedTransaction(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := DecodeLightbringerStreamMsg(&overcast.SlotResponse{Entries: []*overcast.Entry{{
+			_, err := FromLightbringerStreamMsg(&overcast.SlotResponse{Entries: []*overcast.Entry{{
 				Hash: make([]byte, len(solana.Hash{})), Transactions: []*overcast.VersionedTransaction{test.transaction},
 			}}})
-			if err == nil || !strings.Contains(err.Error(), "maximum") {
+			if err == nil || !strings.Contains(err.Error(), "limit") {
 				t.Fatalf("oversized transaction error = %v", err)
 			}
+		})
+	}
+}
+
+func TestFromLightbringerStreamMsgRejectsNilMessagePayloads(t *testing.T) {
+	for name, tx := range map[string]*overcast.VersionedTransaction{
+		"legacy wrapper": {Message: (*overcast.VersionedTransaction_MessageLegacy)(nil)},
+		"legacy payload": {Message: &overcast.VersionedTransaction_MessageLegacy{}},
+		"v0 wrapper":     {Message: (*overcast.VersionedTransaction_MessageV0)(nil)},
+		"v0 payload":     {Message: &overcast.VersionedTransaction_MessageV0{}},
+		"v1 wrapper":     {Message: (*overcast.VersionedTransaction_MessageV1)(nil)},
+		"v1 payload":     {Message: &overcast.VersionedTransaction_MessageV1{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NotPanics(t, func() {
+				_, _, err := overcastTransactionToTransaction(tx)
+				require.ErrorContains(t, err, "no message payload")
+			})
+		})
+	}
+}
+
+func TestOvercastInstructionRejectsProgramIndexTruncation(t *testing.T) {
+	for _, index := range []uint32{256, 65536, math.MaxUint32} {
+		_, err := overcastInstrToInstr(&overcast.CompiledInstruction{ProgramIdIndex: index})
+		require.ErrorContains(t, err, "exceeds u8 limit")
+	}
+}
+
+func TestOvercastV1PreservesOptionalZeroConfiguration(t *testing.T) {
+	zeroFee, zeroUnits := uint64(0), uint32(0)
+	for name, config := range map[string]*overcast.TransactionConfig{
+		"absent":        nil,
+		"empty":         {},
+		"explicit zero": {PriorityFee: &zeroFee, ComputeUnitLimit: &zeroUnits, LoadedAccountsDataSizeLimit: &zeroUnits},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tx, _, err := overcastTransactionToTransaction(&overcast.VersionedTransaction{
+				Signatures: [][]byte{make([]byte, overcastSignatureSize)},
+				Message: &overcast.VersionedTransaction_MessageV1{MessageV1: &overcast.VersionedMessageV1{
+					Header:            &overcast.MessageHeader{NumRequiredSignatures: 1},
+					Config:            config,
+					AccountKeys:       [][]byte{make([]byte, overcastPubkeySize)},
+					LifetimeSpecifier: make([]byte, overcastHashSize),
+				}},
+			})
+			require.NoError(t, err)
+			raw, err := tx.MarshalBinary()
+			require.NoError(t, err)
+			decoded, err := solana.TransactionFromBytes(raw)
+			require.NoError(t, err)
+			want := solana.TransactionConfig{}
+			if config != nil {
+				want.PriorityFee, want.ComputeUnitLimit = config.PriorityFee, config.ComputeUnitLimit
+				want.LoadedAccountsDataSizeLimit = config.LoadedAccountsDataSizeLimit
+			}
+			require.Equal(t, want, decoded.Message.TransactionConfig)
 		})
 	}
 }

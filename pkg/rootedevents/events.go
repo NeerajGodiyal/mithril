@@ -13,6 +13,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
 	"github.com/Overclock-Validator/mithril/pkg/txstatus"
+	"github.com/Overclock-Validator/mithril/pkg/txverify"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -354,15 +355,15 @@ func validateTransaction(slot uint64, index uint32, transaction TransactionObser
 	if err != nil {
 		return fmt.Errorf("rooted slot %d transaction %d wire is invalid: %w", slot, index, err)
 	}
-	if err := decoded.Sanitize(); err != nil {
+	if decoded.Message.GetVersion() != solana.MessageVersionV1 && len(transaction.Transaction) > maxLegacyTransactionBytes {
+		return fmt.Errorf("rooted slot %d transaction %d legacy/v0 wire exceeds %d bytes", slot, index, maxLegacyTransactionBytes)
+	}
+	if err := txverify.SanitizeTransaction(decoded); err != nil {
 		return fmt.Errorf("rooted slot %d transaction %d wire is not sanitized: %w", slot, index, err)
 	}
 	canonical, err := decoded.MarshalBinary()
 	if err != nil || !bytes.Equal(canonical, transaction.Transaction) {
 		return fmt.Errorf("rooted slot %d transaction %d wire is not canonical", slot, index)
-	}
-	if decoded.Message.GetVersion() != solana.MessageVersionV1 && len(transaction.Transaction) > maxLegacyTransactionBytes {
-		return fmt.Errorf("rooted slot %d transaction %d legacy/v0 wire exceeds %d bytes", slot, index, maxLegacyTransactionBytes)
 	}
 	if len(decoded.Signatures) == 0 || decoded.Signatures[0].String() != transaction.Signature {
 		return fmt.Errorf("rooted slot %d transaction %d signature does not match wire", slot, index)
