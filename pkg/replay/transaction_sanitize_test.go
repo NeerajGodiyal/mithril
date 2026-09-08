@@ -82,7 +82,7 @@ func TestValidateTransactionShapeAppliesV1Limits(t *testing.T) {
 	inactive := features.NewFeaturesDefault()
 	require.ErrorIs(t, ValidateTransactionShape(tx, inactive), TxErrSanitizeFailure)
 	active := features.NewFeaturesDefault()
-	active.EnableFeature(features.EnableTransactionV1, 0)
+	active.EnableFeature(features.EnableTxV1, 0)
 	require.NoError(t, ValidateTransactionShape(tx, active))
 	require.NoError(t, ValidateTransactionShape(tx, nil), "bank-independent validation may decode v1")
 
@@ -116,7 +116,7 @@ func v1TransactionWithWireSize(t *testing.T, target int) *solana.Transaction {
 
 func TestValidateTransactionShapeAppliesExactV1WireLimit(t *testing.T) {
 	active := features.NewFeaturesDefault()
-	active.EnableFeature(features.EnableTransactionV1, 0)
+	active.EnableFeature(features.EnableTxV1, 0)
 	require.NoError(t, ValidateTransactionShape(v1TransactionWithWireSize(t, solana.MaxTransactionSizeV1), active))
 	require.ErrorIs(t,
 		ValidateTransactionShape(v1TransactionWithWireSize(t, solana.MaxTransactionSizeV1+1), active),
@@ -159,7 +159,7 @@ func TestTransactionAccountLocksMatchAgaveOrderingAndLimit(t *testing.T) {
 	tooMany.Message.AccountKeys[1] = tooMany.Message.AccountKeys[0]
 	errorType, failed = transactionAccountLockError(tooMany, increased)
 	require.True(t, failed)
-	require.Equal(t, TransactionErrorAccountLoadedTwice, errorType, "duplicates take precedence over the lock limit")
+	require.Equal(t, TransactionErrorTooManyAccountLocks, errorType, "the lock limit takes precedence over duplicates")
 }
 
 func TestTransactionAccountLocksDetectStaticLoadedDuplicate(t *testing.T) {
@@ -180,13 +180,24 @@ func TestTransactionAccountLocksDetectStaticLoadedDuplicate(t *testing.T) {
 
 func TestLoadAndExecuteTransactionReturnsAccountLockErrors(t *testing.T) {
 	slotCtx := &sealevel.SlotCtx{Features: features.NewFeaturesDefault()}
+	tooMany := transactionWithDistinctKeys(legacyMaxTransactionAccountLocks + 1)
+	loaded := append(solana.PublicKeySlice(nil), tooMany.Message.AccountKeys[1:]...)
+	indexes := make([]uint8, len(loaded))
+	for i := range indexes {
+		indexes[i] = uint8(i)
+	}
+	table := solana.PublicKey{0xfa}
+	tooMany.Message.AccountKeys = tooMany.Message.AccountKeys[:1]
+	tooMany.Message.SetAddressTableLookups([]solana.MessageAddressTableLookup{{AccountKey: table, ReadonlyIndexes: indexes}})
+	require.NoError(t, tooMany.Message.SetAddressTables(map[solana.PublicKey]solana.PublicKeySlice{table: loaded}))
+	require.NoError(t, tooMany.Message.ResolveLookups())
 	for _, test := range []struct {
 		name string
 		tx   *solana.Transaction
 		want TransactionErrorType
 	}{
 		{"duplicate", transactionWithDistinctKeys(2), TransactionErrorAccountLoadedTwice},
-		{"too many", transactionWithDistinctKeys(legacyMaxTransactionAccountLocks + 1), TransactionErrorTooManyAccountLocks},
+		{"too many", tooMany, TransactionErrorTooManyAccountLocks},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if test.want == TransactionErrorAccountLoadedTwice {

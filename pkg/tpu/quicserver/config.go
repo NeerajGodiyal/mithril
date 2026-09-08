@@ -10,7 +10,7 @@ import (
 const (
 	ALPNTPUProtocolID = "solana-tpu"
 
-	PacketDataSize = 4096
+	PacketDataSize = packet.DataSize
 
 	DefaultMaxConnections       = 1024
 	DefaultMaxStreamsPerConn    = 16

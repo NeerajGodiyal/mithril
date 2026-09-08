@@ -33,25 +33,25 @@ func TestComputeBudgetForV1UsesInlineConfig(t *testing.T) {
 	_, err := tx.Message.SetVersion(solana.MessageVersionV1)
 	require.NoError(t, err)
 
-	limits, err := ComputeBudgetForTransaction(tx, []Instruction{{ProgramId: a.ComputeBudgetProgramAddr}}, nil)
+	limits, err := ComputeBudgetLimitsForTransaction(tx, []Instruction{{ProgramId: a.ComputeBudgetProgramAddr}}, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint32(64*1024), limits.UpdatedHeapBytes)
 	require.Equal(t, uint32(MaxComputeUnitLimit), limits.ComputeUnitLimit)
 	require.Equal(t, uint32(MaxLoadedAccountsDataSizeBytes), limits.LoadedAccountBytes)
-	require.Equal(t, uint64(9876), limits.PrioritizationFeeLamports)
+	require.Equal(t, uint64(9876), limits.DirectPriorityFeeLamports)
 	require.Zero(t, limits.ComputeUnitPrice)
 
 	tx.Message.TransactionConfig = solana.TransactionConfig{}
-	limits, err = ComputeBudgetForTransaction(tx, nil, nil)
+	limits, err = ComputeBudgetLimitsForTransaction(tx, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint32(MinHeapFrameBytes), limits.UpdatedHeapBytes)
 	require.Zero(t, limits.ComputeUnitLimit)
 	require.Zero(t, limits.LoadedAccountBytes)
-	require.Zero(t, limits.PrioritizationFeeLamports)
+	require.Zero(t, limits.DirectPriorityFeeLamports)
 
 	badHeap := uint32(MinHeapFrameBytes + 1)
 	tx.Message.TransactionConfig.HeapSize = &badHeap
-	_, err = ComputeBudgetForTransaction(tx, nil, nil)
+	_, err = ComputeBudgetLimitsForTransaction(tx, nil, nil)
 	require.Error(t, err)
 }
 

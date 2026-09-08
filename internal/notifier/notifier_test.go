@@ -972,13 +972,32 @@ func TestAlertMessageRedactsCredentialsBeforeDelivery(t *testing.T) {
 	}
 }
 
-func TestConfigRejectsUnsafePermissionsAndLeaks(t *testing.T) {
-	// Resolved because a trusted read now rejects a symlinked ancestor, and on
-	// macOS t.TempDir() sits under /var, which is a symlink to /private/var.
-	dir, err := filepath.EvalSymlinks(t.TempDir())
+// trustedTempDir avoids shared temporary directories, whose writable ancestors
+// are intentionally rejected by trusted reads.
+func trustedTempDir(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
 	}
+	dir, err := os.MkdirTemp(home, ".mithril-notifier-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error(err)
+		}
+	})
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestConfigRejectsUnsafePermissionsAndLeaks(t *testing.T) {
+	dir := trustedTempDir(t)
 	path := filepath.Join(dir, "config.toml")
 	content := "bot_token = \"" + testToken + "\"\nallowed_chat_ids = [111]\n" + testTLSFields
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
@@ -1206,12 +1225,7 @@ func TestConfigDefaultsAndRejections(t *testing.T) {
 		t.Errorf("explicit API base was ignored: %q", got)
 	}
 
-	// Resolved because a trusted read now rejects a symlinked ancestor, and on
-	// macOS t.TempDir() sits under /var, which is a symlink to /private/var.
-	dir, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir := trustedTempDir(t)
 	tokenLine := "bot_token = \"" + testToken + "\"\n"
 	good := tokenLine + "allowed_chat_ids = [1]\n" + testTLSFields
 
@@ -1401,12 +1415,7 @@ func TestConfigDefaultsAndRejections(t *testing.T) {
 }
 
 func TestLoadSecretFileUsesPrivateRegularFile(t *testing.T) {
-	// Resolved because a trusted read now rejects a symlinked ancestor, and on
-	// macOS t.TempDir() sits under /var, which is a symlink to /private/var.
-	dir, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir := trustedTempDir(t)
 	path := filepath.Join(dir, "secret")
 	if err := os.WriteFile(path, []byte("smtp-secret\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1586,7 +1595,7 @@ func TestOversizedTelegramResponseIsFailure(t *testing.T) {
 }
 
 func TestMalformedConfigFileIsRejected(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.toml")
+	path := filepath.Join(trustedTempDir(t), "config.toml")
 	content := "bot_token = \"" + testToken + "\"\nthis is not valid toml at all\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
