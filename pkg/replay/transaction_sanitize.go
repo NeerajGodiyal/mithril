@@ -20,7 +20,7 @@ func ValidateTransactionShape(tx *solana.Transaction, feats *features.Features) 
 		return fmt.Errorf("%w: nil transaction", TxErrSanitizeFailure)
 	}
 	if tx.Message.GetVersion() == solana.MessageVersionV1 {
-		if feats != nil && !feats.IsActive(features.EnableTransactionV1) {
+		if feats != nil && !feats.IsActive(features.EnableTxV1) {
 			return fmt.Errorf("%w: transaction v1 is not active for this bank", TxErrSanitizeFailure)
 		}
 		if err := tx.Sanitize(); err != nil {
@@ -72,19 +72,19 @@ func ValidateTransactionShape(tx *solana.Transaction, feats *features.Features) 
 }
 
 func transactionAccountLockError(tx *solana.Transaction, feats *features.Features) (TransactionErrorType, bool) {
-	seen := make(map[solana.PublicKey]struct{}, len(tx.Message.AccountKeys))
-	for _, key := range tx.Message.AccountKeys {
-		if _, ok := seen[key]; ok {
-			return TransactionErrorAccountLoadedTwice, true
-		}
-		seen[key] = struct{}{}
-	}
 	limit := legacyMaxTransactionAccountLocks
 	if feats != nil && feats.IsActive(features.IncreaseTxAccountLockLimit) {
 		limit = maxTransactionAccountLocks
 	}
 	if len(tx.Message.AccountKeys) > limit {
 		return TransactionErrorTooManyAccountLocks, true
+	}
+	seen := make(map[solana.PublicKey]struct{}, len(tx.Message.AccountKeys))
+	for _, key := range tx.Message.AccountKeys {
+		if _, ok := seen[key]; ok {
+			return TransactionErrorAccountLoadedTwice, true
+		}
+		seen[key] = struct{}{}
 	}
 	return 0, false
 }

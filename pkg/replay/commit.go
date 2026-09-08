@@ -1,13 +1,26 @@
 package replay
 
 import (
+	"bytes"
 	"fmt"
 	"sync/atomic"
 	"time"
 
+	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/fees"
 	"github.com/Overclock-Validator/mithril/pkg/metrics"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
+	"github.com/gagliardetto/solana-go"
 )
+
+func sameAccountState(a, b *accounts.Account) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Key == b.Key && a.Lamports == b.Lamports && a.Owner == b.Owner &&
+		a.Executable == b.Executable && a.RentEpoch == b.RentEpoch &&
+		a.IsDummy == b.IsDummy && bytes.Equal(a.Data, b.Data)
+}
 
 func applySuccessfulTransactionState(slotCtx *sealevel.SlotCtx, execCtx *sealevel.ExecutionCtx, executionResult *TransactionExecutionResult) error {
 	if execCtx == nil {
@@ -63,4 +76,53 @@ func ApplySuccessfulTransaction(slotCtx *sealevel.SlotCtx, output LoadAndExecute
 		return fmt.Errorf("cannot apply failed transaction: %s", output.ProcessingResult.TransactionError.ErrorType.String())
 	}
 	return applySuccessfulTransactionState(slotCtx, output.ExecCtx, output.ExecutionResult)
+}
+
+// ApplyFailedTransaction commits only the rollback view of an executed
+// failure: deducted fees and an advanced durable nonce. Instruction writes
+// remain diagnostic-only in ExecCtx.
+func ApplyFailedTransaction(slotCtx *sealevel.SlotCtx, output LoadAndExecuteTransactionOutput) error {
+	if output.ProcessingResult.TransactionError == nil {
+		return fmt.Errorf("cannot apply successful transaction as failed")
+	}
+	if len(output.PostAccountSnapshots) == 0 || len(output.PostAccountSnapshots) != len(output.PreAccountSnapshots) {
+		return fmt.Errorf("missing failed transaction rollback accounts")
+	}
+	touched := make([]bool, len(output.PostAccountSnapshots))
+	for i := range touched {
+		touched[i] = !sameAccountState(output.PreAccountSnapshots[i], output.PostAccountSnapshots[i])
+	}
+	if err := accounts.SetTransactionAccounts(slotCtx.Accounts, output.PostAccountSnapshots, touched); err != nil {
+		return err
+	}
+	for i, changed := range touched {
+		if changed {
+			slotCtx.RecordModifiedAcct(output.PostAccountSnapshots[i].Key)
+		}
+	}
+	return nil
+}
+
+// ApplyFeesOnlyTransaction commits the fee-payer and durable-nonce rollback
+// state for an account-load failure that Agave treats as processable. The
+// transaction itself remains failed, but must be recorded in the block.
+func ApplyFeesOnlyTransaction(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, output LoadAndExecuteTransactionOutput) (*fees.TxFeeInfo, error) {
+	txErr := output.ProcessingResult.TransactionError
+	if txErr == nil {
+		return nil, fmt.Errorf("fees-only transaction has no transaction error")
+	}
+	switch txErr.ErrorType {
+	case TransactionErrorMaxLoadedAccountsDataSizeExceeded,
+		TransactionErrorInvalidProgramForExecution,
+		TransactionErrorProgramAccountNotFound:
+	default:
+		return nil, fmt.Errorf("transaction error %s is not a processable fees-only load failure", txErr.ErrorType.String())
+	}
+	if slotCtx == nil || tx == nil || output.ComputeBudgetLimits == nil || output.FeeInfo == nil {
+		return nil, fmt.Errorf("fees-only transaction is missing required processing state")
+	}
+
+	// The load error is the transaction's recorded status, not a failure to
+	// publish its fee/nonce effects, so do not return it as an apply error.
+	return handleFailedTx(slotCtx, tx, output.Instrs, output.ComputeBudgetLimits, nil, nil)
 }

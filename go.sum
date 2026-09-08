@@ -107,6 +107,8 @@ github.com/fsnotify/fsnotify v1.9.0 h1:2Ml+OJNzbYCTzsxtv8vKSFD9PbJjmhYF14k/jKC7S
 github.com/fsnotify/fsnotify v1.9.0/go.mod h1:8jBTzvmWwFyi3Pb8djgCCO5IBqzKJ/Jwo8TRcHyHii0=
 github.com/gagliardetto/gofuzz v1.2.2 h1:XL/8qDMzcgvR4+CyRQW9UGdwPRPMHVJfqQ/uMvSUuQw=
 github.com/gagliardetto/gofuzz v1.2.2/go.mod h1:bkH/3hYLZrMLbfYWA0pWzXmi5TTRZnu4pMGZBkqMKvY=
+github.com/gagliardetto/solana-go v1.23.0 h1:Bw4fPmtgt9Z1VSEfqNVbNe1tJTDW2elYJ42HuvaZFwE=
+github.com/gagliardetto/solana-go v1.23.0/go.mod h1:IvX/MCo9XX9GOxIp6Hz7ZvEz9m3p/5XIz/kiNvUDUAo=
 github.com/gagliardetto/treeout v0.1.4 h1:ozeYerrLCmCubo1TcIjFiOWTTGteOOHND1twdFpgwaw=
 github.com/gagliardetto/treeout v0.1.4/go.mod h1:loUefvXTrlRG5rYmJmExNryyBRh8f89VZhmMOyCyqok=
 github.com/gammazero/deque v1.0.0 h1:LTmimT8H7bXkkCy6gZX7zNLtkbz4NdS2z8LZuor3j34=
@@ -303,8 +305,6 @@ github.com/shopspring/decimal v1.3.1 h1:2Usl1nmF/WZucqkFZhnfFYxxxu8LG21F6nPQBE5g
 github.com/shopspring/decimal v1.3.1/go.mod h1:DKyhrW/HYNuLGql+MJL6WCR6knT2jwCFRcu2hWCYk4o=
 github.com/smcio/go-ethereum v1.15.12-0.20250621134551-8b739407bb93 h1:SyVKMYtLvEIo1v/rVlHXu9c+DLDuad6rGZedFTsvT9c=
 github.com/smcio/go-ethereum v1.15.12-0.20250621134551-8b739407bb93/go.mod h1:Yt8yVvAdi0Bzks6fBid2WM6MXbP5VRYPUJRKYCylDw4=
-github.com/solana-foundation/solana-go v1.22.1-0.20260825060128-9b95d84971be h1:HYIJsm7gxvNyzWQiiFM8UKkp7paIlyc+QMSEMvics3Y=
-github.com/solana-foundation/solana-go v1.22.1-0.20260825060128-9b95d84971be/go.mod h1:IvX/MCo9XX9GOxIp6Hz7ZvEz9m3p/5XIz/kiNvUDUAo=
 github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 h1:+jumHNA0Wrelhe64i8F6HNlS8pkoyMv5sreGx2Ry5Rw=
 github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8/go.mod h1:3n1Cwaq1E1/1lhQhtRK2ts/ZwZEhjcQeJQ1RuC6Q/8U=
 github.com/spf13/afero v1.15.0 h1:b/YBCLWAJdFWJTN9cLhiXXcD7mzKn9Dm86dNnfyQw1I=

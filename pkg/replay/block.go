@@ -275,7 +275,7 @@ func resolveAddrTableLookups(accountsDb blockAccountSource, block *b.Block) erro
 	tables := make(map[solana.PublicKey]solana.PublicKeySlice)
 
 	for _, tx := range block.Transactions {
-		if !tx.Message.IsVersioned() {
+		if tx.Message.GetVersion() != solana.MessageVersionV0 {
 			continue
 		}
 
@@ -307,7 +307,7 @@ func resolveAddrTableLookups(accountsDb blockAccountSource, block *b.Block) erro
 
 txResolveLoop:
 	for _, tx := range block.Transactions {
-		if !tx.Message.IsVersioned() || tx.Message.AddressTableLookups.NumLookups() == 0 {
+		if tx.Message.GetVersion() != solana.MessageVersionV0 || tx.Message.AddressTableLookups.NumLookups() == 0 {
 			continue
 		}
 		for _, addrTableKey := range tx.Message.GetAddressTableLookups().GetTableIDs() {
@@ -336,7 +336,7 @@ txResolveLoop:
 // callers can map missing/invalid tables to AddressLookupTableNotFound or
 // InvalidAddressLookupTableData.
 func ResolveAddrTableLookupsForTx(ctx context.Context, accountsDb *accountsdb.AccountsDb, slot uint64, tx *solana.Transaction) error {
-	if !tx.Message.IsVersioned() || tx.Message.AddressTableLookups.NumLookups() == 0 {
+	if tx.Message.GetVersion() != solana.MessageVersionV0 || tx.Message.AddressTableLookups.NumLookups() == 0 {
 		return nil
 	}
 
@@ -362,6 +362,97 @@ func ResolveAddrTableLookupsForTx(ctx context.Context, accountsDb *accountsdb.Ac
 		return err
 	}
 	return tx.Message.ResolveLookups()
+}
+
+func activeAddressLookupTableAddresses(key solana.PublicKey, acct *accounts.Account, currentSlot uint64, slotHashes sealevel.SysvarSlotHashes) (solana.PublicKeySlice, error) {
+	if acct == nil || len(acct.Data) == 0 {
+		return nil, newAddressLookupTableError(TransactionErrorAddressLookupTableNotFound, fmt.Errorf("address lookup table %s not found", key))
+	}
+	if acct.Owner != [32]byte(a.AddressLookupTableAddr) {
+		return nil, newAddressLookupTableError(TransactionErrorInvalidAddressLookupTableOwner, fmt.Errorf("address lookup table %s has invalid owner", key))
+	}
+	table, err := sealevel.UnmarshalAddressLookupTable(acct.Data)
+	if err != nil {
+		return nil, newAddressLookupTableError(TransactionErrorInvalidAddressLookupTableData, fmt.Errorf("address lookup table %s: invalid data: %w", key, err))
+	}
+	if table.Meta.Status(currentSlot, slotHashes).Status == sealevel.AddressLookupTableStatusTypeDeactivated {
+		return nil, newAddressLookupTableError(TransactionErrorAddressLookupTableNotFound, fmt.Errorf("address lookup table %s is deactivated", key))
+	}
+	activeLen := len(table.Addresses)
+	if currentSlot <= table.Meta.LastExtendedSlot {
+		activeLen = int(table.Meta.LastExtendedSlotStartIndex)
+	}
+	if activeLen > len(table.Addresses) {
+		return nil, newAddressLookupTableError(TransactionErrorInvalidAddressLookupTableData, fmt.Errorf("address lookup table %s has invalid active address length %d", key, activeLen))
+	}
+	return table.Addresses[:activeLen], nil
+}
+
+type addressLookupTableError struct {
+	errorType TransactionErrorType
+	err       error
+}
+
+func newAddressLookupTableError(errorType TransactionErrorType, err error) error {
+	return &addressLookupTableError{errorType: errorType, err: err}
+}
+
+func (e *addressLookupTableError) Error() string { return e.err.Error() }
+func (e *addressLookupTableError) Unwrap() error { return e.err }
+
+func AddressLookupTableTransactionError(err error) (TransactionErrorType, bool) {
+	var lookupErr *addressLookupTableError
+	if !errors.As(err, &lookupErr) {
+		return 0, false
+	}
+	return lookupErr.errorType, true
+}
+
+// ResolveAddrTableLookupsForTxInBank resolves lookup tables through one
+// captured bank, including its exact slot and SlotHashes activation rules.
+func ResolveAddrTableLookupsForTxInBank(ctx context.Context, tx *solana.Transaction, slotCtx *sealevel.SlotCtx) error {
+	if tx.Message.GetVersion() != solana.MessageVersionV0 || tx.Message.AddressTableLookups.NumLookups() == 0 {
+		return nil
+	}
+	if slotCtx == nil {
+		return fmt.Errorf("address lookup table resolution unavailable")
+	}
+	bankSysvars := slotCtx.BankSysvars()
+	if bankSysvars == nil {
+		return fmt.Errorf("address lookup table resolution requires SlotHashes at slot %d", slotCtx.Slot)
+	}
+	slotHashes, ok := bankSysvars.SlotHashes()
+	if !ok {
+		return fmt.Errorf("address lookup table resolution requires SlotHashes at slot %d", slotCtx.Slot)
+	}
+
+	tableIDs := tx.Message.GetAddressTableLookups().GetTableIDs()
+	tables := make(map[solana.PublicKey]solana.PublicKeySlice, len(tableIDs))
+	for _, key := range tableIDs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		acct, err := slotCtx.GetAccountFromAccountsDb(key)
+		if errors.Is(err, accountsdb.ErrNoAccount) {
+			return newAddressLookupTableError(TransactionErrorAddressLookupTableNotFound, fmt.Errorf("address lookup table %s not found", key))
+		}
+		if err != nil {
+			return err
+		}
+		addresses, err := activeAddressLookupTableAddresses(key, acct, slotCtx.Slot, slotHashes)
+		if err != nil {
+			return err
+		}
+		tables[key] = addresses
+	}
+
+	if err := tx.Message.SetAddressTables(tables); err != nil {
+		return err
+	}
+	if err := tx.Message.ResolveLookups(); err != nil {
+		return newAddressLookupTableError(TransactionErrorInvalidAddressLookupTableIndex, err)
+	}
+	return nil
 }
 
 const transactionPublicationNonTransactionSlack = 8
@@ -1781,6 +1872,10 @@ func ReplayBlocks(
 	isFirstSlotInEpoch := epochSchedule.FirstSlotInEpoch(startEpoch) == startSlot
 	replayCtx.CurrentFeatures, featuresActivatedInFirstSlot, parentFeaturesActivatedInFirstSlot = scanAndEnableFeatures(acctsDb, replayCtx, startSlot, isFirstSlotInEpoch)
 	if alpenglowMode {
+		if err := validateAlpenglowRuntimeFeatureSet(replayCtx.CurrentFeatures, startSlot); err != nil {
+			result.Error = err
+			return result
+		}
 		applyAlpenglowRuntimeFeatureOverrides(replayCtx.CurrentFeatures, startSlot)
 	}
 	var initialLtHash *lthash.LtHash
@@ -3634,6 +3729,28 @@ type blockTransactionExecutionPlan struct {
 	processedSignatures uint64
 }
 
+// validateBlockTransactionVersions is the authoritative bank-boundary feature
+// check for transactions arriving from any block source. Native Turbine must be
+// able to decode a V1 wire packet before the candidate bank is constructed, so
+// ingress cannot safely decide whether V1 is active. The candidate block's
+// feature snapshot can, and must reject pre-activation V1 before transaction
+// execution can turn UnsupportedVersion into a nil-fee replay invariant panic.
+func validateBlockTransactionVersions(block *b.Block) error {
+	if block == nil {
+		return errors.New("nil block")
+	}
+	v1Active := block.Features != nil && block.Features.IsActive(features.EnableTxV1)
+	if v1Active {
+		return nil
+	}
+	for idx, tx := range block.Transactions {
+		if tx != nil && tx.Message.GetVersion() == solana.MessageVersionV1 {
+			return fmt.Errorf("transaction %d uses V1 before EnableTxV1 activation: %w", idx, TxErrUnsupportedVersion)
+		}
+	}
+	return nil
+}
+
 // planBlockTransactionExecution mirrors Agave's AlreadyProcessed check for
 // transactions presented to one bank. A duplicate message makes the whole
 // block invalid; replay must never silently filter it and compute a bank hash
@@ -4043,6 +4160,9 @@ func ProcessBlock(
 	if block == nil {
 		return nil, errors.New("validate transaction messages: nil block")
 	}
+	if err := validateBlockTransactionVersions(block); err != nil {
+		return nil, fmt.Errorf("validate transaction versions for slot %d: %w", block.Slot, err)
+	}
 	executionPlanStart := time.Now()
 	executionPlan, err := planBlockTransactionExecution(block)
 	metrics.GlobalBlockReplay.TransactionExecutionPlan.AddTimingSince(executionPlanStart)
@@ -4277,13 +4397,6 @@ func ProcessBlock(
 		if err := acctsDb.StoreBankHashForSlot(persistedSlot, persistedBankhash); err != nil {
 			return nil, fmt.Errorf("store bankhash for slot %d: %w", persistedSlot, err)
 		}
-		flushed, err := global.FlushPendingStakePubkeys(filepath.Join(acctsDb.AcctsDir, ".."))
-		if err != nil {
-			return nil, fmt.Errorf("flush stake pubkey index after slot %d: %w", persistedSlot, err)
-		}
-		if flushed > 0 {
-			mlog.Log.Debugf("flushed %d new stake pubkeys to index", flushed)
-		}
 	}
 
 	persistedHashes.Set(persistedBlockSlot, persistedBankhash)
@@ -4296,6 +4409,16 @@ func ProcessBlock(
 	metrics.GlobalBlockReplay.TransactionStatusCommit.AddTimingSince(statusCommitStart)
 	if statusErr != nil {
 		return nil, fmt.Errorf("commit transaction statuses for slot %d after bank state commit: %w", block.Slot, statusErr)
+	}
+	commitVoteStakeCacheUpdates(slotCtx)
+	if tail == nil {
+		flushed, flushErr := global.FlushPendingStakePubkeys(filepath.Join(acctsDb.AcctsDir, ".."))
+		if flushErr != nil {
+			return nil, fmt.Errorf("flush stake pubkey index after slot %d: %w", persistedSlot, flushErr)
+		}
+		if flushed > 0 {
+			mlog.Log.Debugf("flushed %d new stake pubkeys to index", flushed)
+		}
 	}
 
 	global.IncrTransactionCount(executionPlan.processedTxCount)

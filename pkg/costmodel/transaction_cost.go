@@ -49,7 +49,7 @@ func EstimateTransactionCost(tx *solana.Transaction, feats *features.Features) (
 	}
 	writeLocks := countWriteLocks(metas)
 
-	limits, err := sealevel.ComputeBudgetForTransaction(tx, instrs, feats)
+	limits, err := sealevel.ComputeBudgetLimitsForTransaction(tx, instrs, feats)
 	if err != nil {
 		// A compute-budget parse failure yields zero execution cost; the transaction will not execute.
 		return TransactionCost{
@@ -61,9 +61,8 @@ func EstimateTransactionCost(tx *solana.Transaction, feats *features.Features) (
 	}
 
 	loadedDataCost := loadedAccountsDataSizeCost(limits.LoadedAccountBytes)
-	if tx.Message.GetVersion() == solana.MessageVersionV1 && limits.LoadedAccountBytes == 0 {
-		loadedDataCost = HeapCost
-	}
+	// Reserve at least one loaded-data page for the fee payer, including V1's zero default.
+	loadedDataCost = max(loadedDataCost, uint64(HeapCost))
 	return TransactionCost{
 		SignatureCost:              signatureCost(tx, feats),
 		WriteLockCost:              writeLockCost(writeLocks),
@@ -77,6 +76,10 @@ func EstimateTransactionCost(tx *solana.Transaction, feats *features.Features) (
 
 func signatureCost(tx *solana.Transaction, feats *features.Features) uint64 {
 	cost := safemath.SaturatingMulU64(uint64(len(tx.Signatures)), SignatureCost)
+	ed25519Cost := uint64(Ed25519VerifyCost)
+	if feats != nil && feats.IsActive(features.Ed25519PrecompileVerifyStrict) {
+		ed25519Cost = Ed25519VerifyStrictCost
+	}
 	for _, instruction := range tx.Message.Instructions {
 		if len(instruction.Data) == 0 {
 			continue
@@ -93,7 +96,7 @@ func signatureCost(tx *solana.Transaction, feats *features.Features) uint64 {
 		case programID == secp256k:
 			perSignature = Secp256k1VerifyCost
 		case programID == ed25519:
-			perSignature = Ed25519VerifyStrictCost
+			perSignature = ed25519Cost
 		case programID == secp256r1:
 			if feats != nil && feats.IsActive(features.EnableSecp256r1Precompile) {
 				perSignature = Secp256r1VerifyCost
@@ -287,6 +290,5 @@ func isWritableForCost(am *solana.AccountMeta, programIDSet map[solana.PublicKey
 			return false
 		}
 	}
-	_ = feats
 	return true
 }
