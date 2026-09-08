@@ -265,16 +265,26 @@ func (b *Block) FixupTxVersions() error {
 		return nil
 	}
 	if len(b.Versions) != len(b.Transactions) {
-		return fmt.Errorf("transaction version count %d does not match transaction count %d", len(b.Versions), len(b.Transactions))
+		return fmt.Errorf("restore transaction versions: have %d versions for %d transactions", len(b.Versions), len(b.Transactions))
 	}
-	b.invalidateTransactionDerivedState()
+
+	// Validate into copies first so malformed persisted metadata cannot leave a
+	// partially updated block or invalidate otherwise reusable derived state.
+	messages := make([]solana.Message, len(b.Transactions))
 	for idx, tx := range b.Transactions {
 		if tx == nil {
-			return fmt.Errorf("transaction %d is nil", idx)
+			return fmt.Errorf("restore transaction version %d: nil transaction", idx)
 		}
-		if _, err := tx.Message.SetVersion(solana.MessageVersion(b.Versions[idx])); err != nil {
-			return fmt.Errorf("transaction %d version %d: %w", idx, b.Versions[idx], err)
+		messages[idx] = tx.Message
+		version := solana.MessageVersion(b.Versions[idx])
+		if _, err := messages[idx].SetVersion(version); err != nil {
+			return fmt.Errorf("restore transaction version %d as message version %d: %w", idx, version, err)
 		}
+	}
+
+	b.invalidateTransactionDerivedState()
+	for idx := range b.Transactions {
+		b.Transactions[idx].Message = messages[idx]
 	}
 	return nil
 }

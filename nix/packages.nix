@@ -61,7 +61,7 @@ in {
           "cmd/mithril"
           "cmd/mithril-monitor"
         ];
-        vendorHash = "sha256-HPlXrXi+EDAag2L9YrcEi52NNallhY4II8PxfsUgfng=";
+        vendorHash = "sha256-Vh2jJoKjuikI0IKEEniZVPsavfZYXtDzPKxJUxl7d8s=";
         nativeBuildInputs = [pkgs.pkg-config];
         buildInputs = [pkgs.zstd];
         env = {
