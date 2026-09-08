@@ -1812,7 +1812,7 @@ func (bs *BlockSource) tryGetBlockFromFile(slot uint64) (*block.Block, error) {
 	}
 	if err := out.FixupTxVersions(); err != nil {
 		file.Close()
-		return nil, fmt.Errorf("block transaction versions: %w", err)
+		return nil, fmt.Errorf("block transaction-version fixup: %w", err)
 	}
 
 	file.Close()

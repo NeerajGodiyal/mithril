@@ -80,6 +80,43 @@ func TestAdoptLocalLeaderBlockFailsClosedWithoutCommit(t *testing.T) {
 	require.ErrorContains(t, err, "missing producer SlotCtx")
 }
 
+func TestLocalLeaderBookkeepingPublishesOnlyAfterStatusCommit(t *testing.T) {
+	for _, rejectStatus := range []bool{false, true} {
+		name := "committed"
+		if rejectStatus {
+			name = "status rejected"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Cleanup(ResetLocalLeaderCommits)
+			global.ClearPendingStakePubkeys()
+			t.Cleanup(global.ClearPendingStakePubkeys)
+			voteKey, stakeKey := solana.PublicKey{0x94}, solana.PublicKey{0x95}
+			global.DeleteVoteCacheItem(voteKey)
+			t.Cleanup(func() { global.DeleteVoteCacheItem(voteKey) })
+			slotCtx := localLeaderTestSlotCtx(t, 20)
+			slotCtx.RecordVoteCacheUpdate(voteKey, &sealevel.VoteStateVersions{})
+			slotCtx.RecordPendingStakePubkey(stakeKey)
+			RegisterLocalLeaderCommitData(slotCtx, nil, true, nil, true, nil)
+			cache := NewTransactionStatusCache()
+			if rejectStatus {
+				require.NoError(t, cache.CommitBlock(statusCacheTestBlock(18)))
+			}
+			_, err := adoptLocalLeaderBlock(&b.Block{Slot: 20, ParentSlot: 19, FromLocalProduction: true}, nil, cache, &persistedTracker{}, nil)
+			if rejectStatus {
+				require.Error(t, err)
+				require.Nil(t, global.VoteCacheItem(voteKey))
+				require.Empty(t, global.PendingStakeEntriesSnapshot())
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, global.VoteCacheItem(voteKey))
+				pending := global.PendingStakeEntriesSnapshot()
+				require.Len(t, pending, 1)
+				require.Equal(t, stakeKey, pending[0].Pubkey)
+			}
+		})
+	}
+}
+
 func TestAdoptLocalLeaderBlockFailsClosedWithoutBankSysvars(t *testing.T) {
 	t.Cleanup(ResetLocalLeaderCommits)
 	RegisterLocalLeaderCommit(&sealevel.SlotCtx{Slot: 4})

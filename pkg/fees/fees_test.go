@@ -75,7 +75,8 @@ func TestCalculateTxFeesUsesV1DirectPriorityFee(t *testing.T) {
 	tx := newEmptyTransaction()
 	limits := &sealevel.ComputeBudgetLimits{
 		ComputeUnitLimit:          200_000,
-		PrioritizationFeeLamports: 777,
+		DirectPriorityFeeLamports: 777,
+		UsesDirectPriorityFee:     true,
 	}
 	fee := CalculateTxFees(tx, nil, limits, features.NewFeaturesDefault())
 	require.Equal(t, uint64(5_000), fee.ExecutionFee)
