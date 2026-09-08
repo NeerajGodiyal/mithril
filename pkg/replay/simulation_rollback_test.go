@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"github.com/Overclock-Validator/mithril/pkg/accounts"
+	"github.com/Overclock-Validator/mithril/pkg/accountsdb"
 	"github.com/Overclock-Validator/mithril/pkg/addresses"
+	"github.com/Overclock-Validator/mithril/pkg/features"
 	"github.com/Overclock-Validator/mithril/pkg/sealevel"
 	"github.com/Overclock-Validator/mithril/pkg/tpu/txfixture"
 	"github.com/gagliardetto/solana-go"
@@ -68,6 +70,7 @@ func TestFailedSimulationPublishesRollbackBalances(t *testing.T) {
 func TestProgramLoadFailureIsFeesOnly(t *testing.T) {
 	slotCtx, cleanup := newCommitTestSlotCtx()
 	defer cleanup()
+	slotCtx.Features.EnableFeature(features.DefineLtdsFeeOnlySemantics, 0)
 	payer := txfixture.PayerPubkey()
 	missingProgram := solana.NewWallet().PublicKey()
 	tx, err := solana.NewTransaction(
@@ -105,13 +108,22 @@ func TestProgramLoadFailureIsFeesOnly(t *testing.T) {
 }
 
 func TestDurableNonceAdvancesForFeesOnlyFailure(t *testing.T) {
-	for _, payerIsNonce := range []bool{false, true} {
-		t.Run(map[bool]string{false: "separate payer", true: "payer is nonce"}[payerIsNonce], func(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		payerIsNonce bool
+		parentOnly   bool
+	}{
+		{"separate payer", false, false},
+		{"payer is nonce", true, false},
+		{"parent-only nonce", false, true},
+		{"parent-only payer is nonce", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			slotCtx, cleanup := newCommitTestSlotCtx()
 			defer cleanup()
 			payer := txfixture.PayerPubkey()
 			nonceKey := solana.PublicKey{0xd5}
-			if payerIsNonce {
+			if tc.payerIsNonce {
 				nonceKey = payer
 			}
 			initialNonce := [32]byte{0xaa}
@@ -126,10 +138,20 @@ func TestDurableNonceAdvancesForFeesOnlyFailure(t *testing.T) {
 			}
 			nonceData, err := nonceState.Marshal()
 			require.NoError(t, err)
-			require.NoError(t, slotCtx.SetAccount(nonceKey, &accounts.Account{
+			nonceAccount := &accounts.Account{
 				Key: nonceKey, Lamports: 10_000_000_000, Owner: addresses.SystemProgramAddr,
-				Data: nonceData, RentEpoch: math.MaxUint64,
-			}))
+				Data: nonceData, RentEpoch: 7,
+			}
+			payerBefore, err := slotCtx.GetAccount(payer)
+			require.NoError(t, err)
+			payerBefore.RentEpoch = 7
+			require.NoError(t, slotCtx.SetAccount(payer, payerBefore))
+			if tc.parentOnly {
+				delete(slotCtx.Accounts.(accounts.MemAccounts).Map, nonceKey)
+				slotCtx.UnrootedRead = rollbackAccountSource{nonceKey: nonceAccount}
+			} else {
+				require.NoError(t, slotCtx.SetAccount(nonceKey, nonceAccount))
+			}
 			advance := system.NewAdvanceNonceAccountInstruction(
 				nonceKey,
 				solana.SysVarRecentBlockHashesPubkey,
@@ -154,6 +176,7 @@ func TestDurableNonceAdvancesForFeesOnlyFailure(t *testing.T) {
 			out := LoadAndExecuteTransaction(LoadAndExecuteTransactionInput{
 				SlotCtx: slotCtx, Transaction: tx, CaptureRollbackAccounts: true,
 			})
+			require.NoError(t, out.LoadError)
 			require.True(t, out.FeesOnly)
 			require.NotNil(t, out.FeeInfo)
 			require.NotNil(t, out.ProcessingResult.TransactionError)
@@ -165,11 +188,27 @@ func TestDurableNonceAdvancesForFeesOnlyFailure(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, initialNonce, before.State().DurableNonce)
 			require.NotEqual(t, initialNonce, after.State().DurableNonce)
-			if payerIsNonce {
+			if tc.payerIsNonce {
 				require.Equal(t,
 					out.PreAccountSnapshots[0].Lamports-out.FeeInfo.TotalFee,
 					out.PostAccountSnapshots[0].Lamports,
 				)
+			}
+			require.Equal(t, uint64(math.MaxUint64), out.PostAccountSnapshots[0].RentEpoch)
+			require.Equal(t, uint64(7), nonceAccount.RentEpoch)
+			require.Equal(t, nonceData, nonceAccount.Data, "processing must not mutate the source account")
+			// Compare the new captured rollback path to the existing replay commit semantics.
+			comparison, comparisonCleanup := newCommitTestSlotCtx()
+			defer comparisonCleanup()
+			for _, account := range out.PreAccountSnapshots {
+				require.NoError(t, comparison.SetAccount(account.Key, account.Clone()))
+			}
+			_, err = handleFailedTx(comparison, tx, out.Instrs, out.ComputeBudgetLimits, nil, nil)
+			require.NoError(t, err)
+			for _, key := range []solana.PublicKey{payer, nonceKey} {
+				want, err := comparison.GetAccount(key)
+				require.NoError(t, err)
+				require.True(t, sameAccountState(want, out.PostAccountSnapshots[indexOfKey(t, tx.Message.AccountKeys, key)]))
 			}
 
 			require.NoError(t, ApplyFailedTransaction(slotCtx, out))
@@ -185,6 +224,7 @@ func TestDurableNonceAdvancesForFeesOnlyFailure(t *testing.T) {
 func TestLoadedAccountsLimitFailureReportsRequestedLimit(t *testing.T) {
 	slotCtx, cleanup := newCommitTestSlotCtx()
 	defer cleanup()
+	slotCtx.Features.EnableFeature(features.DefineLtdsFeeOnlySemantics, 0)
 	payer := txfixture.PayerPubkey()
 	limitData := []byte{sealevel.ComputeBudgetInstrTypeSetLoadedAccountsDataSizeLimit, 1, 0, 0, 0}
 	tx, err := solana.NewTransaction([]solana.Instruction{
@@ -217,4 +257,13 @@ func indexOfKey(t *testing.T, keys []solana.PublicKey, key solana.PublicKey) int
 	}
 	t.Fatalf("key %s missing", key)
 	return -1
+}
+
+type rollbackAccountSource map[solana.PublicKey]*accounts.Account
+
+func (source rollbackAccountSource) GetAccount(_ uint64, key solana.PublicKey) (*accounts.Account, error) {
+	if account := source[key]; account != nil {
+		return account, nil
+	}
+	return nil, accountsdb.ErrNoAccount
 }

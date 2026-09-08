@@ -53,9 +53,12 @@ type sendTransactionConfig struct {
 
 const (
 	maxBase58TxSize                         = 1683
-	packetDataSize                          = 1232
-	v1PacketDataSize                        = solana.MaxTransactionSizeV1
-	maxBase64TxSize                         = (v1PacketDataSize + 2) / 3 * 4
+	maxBase64LegacyTxSize                   = 1644
+	maxBase64TxSize                         = 5464
+	legacyTransactionSize                   = 1232
+	packetDataSize                          = legacyTransactionSize // legacy compatibility
+	v1TransactionSize                       = solana.MaxTransactionSizeV1
+	v1Base64PrefixLowerBound                = "gQ"
 	sendTransactionLeaderForwardCount       = 10
 	sendTransactionTargetCount              = sendTransactionLeaderForwardCount + 1
 	sendTransactionLeaderLookahead          = 64
@@ -239,14 +242,16 @@ func decodeSendTransaction(txStr string, encoding string) (*solana.Transaction, 
 		}
 	}
 
-	if encoding == "base58" && len(txStr) > maxBase58TxSize {
-		return nil, nil, &InvalidParamsError{
-			Message: fmt.Sprintf("base58 encoded solana_transaction too large: %d bytes (max: encoded/raw %d/%d)", len(txStr), maxBase58TxSize, packetDataSize),
-		}
+	maxEncodedSize := maxBase58TxSize
+	maxRawSize := legacyTransactionSize
+	if encoding == "base64" {
+		maxEncodedSize, maxRawSize = base64TransactionSizeLimits(txStr)
 	}
-	if encoding == "base64" && len(txStr) > maxBase64TxSize {
+
+	if len(txStr) > maxEncodedSize {
+		encodingName := encoding
 		return nil, nil, &InvalidParamsError{
-			Message: fmt.Sprintf("base64 encoded solana_transaction too large: %d bytes (max: encoded/raw %d/%d)", len(txStr), maxBase64TxSize, v1PacketDataSize),
+			Message: fmt.Sprintf("%s encoded solana_transaction too large: %d bytes (max: encoded/raw %d/%d)", encodingName, len(txStr), maxEncodedSize, maxRawSize),
 		}
 	}
 
@@ -267,33 +272,43 @@ func decodeSendTransaction(txStr string, encoding string) (*solana.Transaction, 
 		}
 	}
 
-	rawLimit := packetDataSize
-	if encoding == "base64" {
-		rawLimit = v1PacketDataSize
-	}
-	if len(wire) > rawLimit {
+	if len(wire) > maxRawSize {
 		return nil, nil, &InvalidParamsError{
-			Message: fmt.Sprintf("decoded solana_transaction too large: %d bytes (max: %d bytes)", len(wire), rawLimit),
+			Message: fmt.Sprintf("decoded solana_transaction too large: %d bytes (max: %d bytes)", len(wire), maxRawSize),
 		}
 	}
-
-	decoder := bin.NewBinDecoder(wire)
-	tx, err := solana.TransactionFromDecoder(decoder)
+	tx, err := decodeTransactionExact(wire)
 	if err != nil {
 		return nil, nil, &InvalidParamsError{Message: fmt.Sprintf("failed to deserialize solana_transaction: %v", err)}
 	}
-	if tx.Message.GetVersion() != solana.MessageVersionV1 && len(wire) > packetDataSize {
-		return nil, nil, &InvalidParamsError{
-			Message: fmt.Sprintf("decoded solana_transaction too large: %d bytes (max: %d bytes)", len(wire), packetDataSize),
-		}
-	}
-	// Agave's RPC decoder is lenient, but TPU rejects trailing v1 bytes. Refuse
-	// them here rather than returning a receipt for a packet no leader accepts.
-	if tx.Message.GetVersion() == solana.MessageVersionV1 && decoder.HasRemaining() {
-		return nil, nil, &InvalidParamsError{Message: "failed to deserialize solana_transaction: trailing bytes after transaction v1"}
-	}
 
 	return tx, wire, nil
+}
+
+// decodeTransactionExact keeps parsing separate from semantic sanitization,
+// but unlike the legacy/v0 SDK convenience decoder it requires EOF. This
+// prevents RPC forwarding from signing off on a valid prefix while preserving
+// Agave's parse-then-sanitize error ordering.
+func decodeTransactionExact(wire []byte) (*solana.Transaction, error) {
+	decoder := bin.NewBinDecoder(wire)
+	tx, err := solana.TransactionFromDecoder(decoder)
+	if err != nil {
+		return nil, err
+	}
+	if decoder.HasRemaining() {
+		return nil, fmt.Errorf("trailing bytes after transaction: %d", decoder.Remaining())
+	}
+	return tx, nil
+}
+
+// base64TransactionSizeLimits mirrors Agave's pre-decode discriminator. V1+
+// starts at 0x81, whose first two base64 characters are lexicographically at
+// least "gQ". Base58 remains deprecated and capped at the legacy packet size.
+func base64TransactionSizeLimits(encoded string) (maxEncoded int, maxRaw int) {
+	if len(encoded) >= 2 && encoded[:2] >= v1Base64PrefixLowerBound {
+		return maxBase64TxSize, v1TransactionSize
+	}
+	return maxBase64LegacyTxSize, legacyTransactionSize
 }
 
 func featuresForSendValidation(slotCtx *sealevel.SlotCtx) *features.Features {
@@ -304,7 +319,7 @@ func featuresForSendValidation(slotCtx *sealevel.SlotCtx) *features.Features {
 }
 
 func validateSendTransactionSanitize(tx *solana.Transaction, feats *features.Features) error {
-	if err := replay.ValidateTransactionShape(tx, nil); err != nil {
+	if err := txverify.SanitizeTransaction(tx); err != nil {
 		return errInvalidSanitizedTransaction
 	}
 	if feats != nil &&
@@ -312,6 +327,7 @@ func validateSendTransactionSanitize(tx *solana.Transaction, feats *features.Fea
 		len(tx.Message.Instructions) > maxSanitizedInstructionCount {
 		return errInvalidSanitizedTransaction
 	}
+
 	return nil
 }
 
@@ -351,6 +367,9 @@ func (rpcServer *RpcServer) preflightSendTransaction(ctx context.Context, tx *so
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if output.LoadError != nil {
+		return fmt.Errorf("transaction preflight unavailable: %w", output.LoadError)
+	}
 
 	if output.ProcessingResult.TransactionError == nil {
 		return nil
@@ -367,7 +386,7 @@ func (rpcServer *RpcServer) preflightSendTransaction(ctx context.Context, tx *so
 }
 
 func (rpcServer *RpcServer) resolveAddressTablesForPreflight(ctx context.Context, tx *solana.Transaction, slotCtx *sealevel.SlotCtx) error {
-	if !tx.Message.IsVersioned() || tx.Message.AddressTableLookups.NumLookups() == 0 {
+	if tx.Message.GetVersion() != solana.MessageVersionV0 || tx.Message.AddressTableLookups.NumLookups() == 0 {
 		return nil
 	}
 	if err := replay.ResolveAddrTableLookupsForTxInBank(ctx, tx, slotCtx); err != nil {
@@ -415,18 +434,21 @@ func sendTransactionFailureResultFromOutput(output replay.LoadAndExecuteTransact
 				Data:      []string{base64.StdEncoding.EncodeToString(clamped), "base64"},
 			}
 		}
-	} else if output.ExecCtx != nil {
-		unitsConsumed = output.ExecCtx.ComputeMeter.Used()
-		dataSize = loadedAccountsDataSizeFromExecCtx(output.ExecCtx)
+	} else {
+		if output.ExecCtx != nil {
+			unitsConsumed = output.ExecCtx.ComputeMeter.Used()
+		}
+		dataSize = failureLoadedAccountsDataSize(output)
 	}
 
-	return sendTransactionFailureResult(
+	result := sendTransactionFailureResult(
 		output.ProcessingResult.TransactionError,
 		logs,
 		unitsConsumed,
 		dataSize,
 		returnData,
-	).withFee(output)
+	)
+	return result.withFee(output)
 }
 
 func sendTransactionFailureResult(errValue interface{}, logs []string, unitsConsumed uint64, dataSize uint32, returnData *ReturnDataPayload) SimulateTransactionRespValue {
@@ -447,7 +469,7 @@ func sendTransactionFailureResult(errValue interface{}, logs []string, unitsCons
 }
 
 func (v SimulateTransactionRespValue) withFee(output replay.LoadAndExecuteTransactionOutput) SimulateTransactionRespValue {
-	if output.FeeInfo != nil {
+	if processingOutputChargesFee(output) {
 		fee := output.FeeInfo.TotalFee
 		v.Fee = &fee
 	}
@@ -508,6 +530,12 @@ func (rpcServer *RpcServer) forwardTransactionToUpcomingLeaders(ctx context.Cont
 	var sendWg sync.WaitGroup
 	for _, target := range targets {
 		target := target
+		if target.Transport == tpuTransportUDP && len(wire) > legacyTransactionSize {
+			sendMu.Lock()
+			sendErrs = append(sendErrs, fmt.Errorf("%s: transaction is %d bytes; UDP TPU supports at most %d bytes", target.String(), len(wire), legacyTransactionSize))
+			sendMu.Unlock()
+			continue
+		}
 		sendWg.Add(1)
 		go func() {
 			defer sendWg.Done()
@@ -701,6 +729,9 @@ func defaultTransactionSender(ctx context.Context, payload []byte, target tpuEnd
 	case tpuTransportQUIC:
 		return defaultTPUQUICSender.Send(ctx, payload, target.Addr)
 	case tpuTransportUDP:
+		if len(payload) > legacyTransactionSize {
+			return fmt.Errorf("transaction is %d bytes; UDP TPU supports at most %d bytes", len(payload), legacyTransactionSize)
+		}
 		return defaultUDPPacketSender(payload, target.Addr)
 	default:
 		return fmt.Errorf("unsupported TPU transport %q", target.Transport)

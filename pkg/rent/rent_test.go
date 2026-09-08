@@ -26,7 +26,9 @@ func TestVerifyRentStateChangesReturnsOffendingAccountIndex(t *testing.T) {
 	txCtx.Accounts.Accounts[1].Lamports = 1
 	post := NewRentStateInfo(&rent, txCtx, feats)
 
-	idx, err := VerifyRentStateChanges(pre, post, txCtx)
+	err := VerifyRentStateChanges(pre, post, txCtx)
 	require.Error(t, err)
-	assert.Equal(t, uint8(1), idx)
+	var transitionErr *RentStateTransitionError
+	require.ErrorAs(t, err, &transitionErr)
+	assert.Equal(t, uint8(1), transitionErr.AccountIndex)
 }

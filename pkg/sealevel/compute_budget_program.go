@@ -25,8 +25,9 @@ type ComputeBudgetLimits struct {
 	UpdatedHeapBytes          uint32
 	ComputeUnitLimit          uint32
 	ComputeUnitPrice          uint64
-	PrioritizationFeeLamports uint64
 	LoadedAccountBytes        uint32
+	DirectPriorityFeeLamports uint64
+	UsesDirectPriorityFee     bool
 }
 
 type ComputeBudgetErrorKind uint8
@@ -347,23 +348,23 @@ func ComputeBudgetExecuteInstructions(instructions []Instruction, f *features.Fe
 	return computeBudgetLimits, nil
 }
 
-// ComputeBudgetForTransaction reads v1's inline transaction configuration and
-// keeps the instruction preprocessor for legacy and v0 transactions.
-func ComputeBudgetForTransaction(tx *solana.Transaction, instructions []Instruction, f *features.Features) (*ComputeBudgetLimits, error) {
-	if tx == nil {
-		return nil, fmt.Errorf("nil transaction")
-	}
-	if tx.Message.GetVersion() != solana.MessageVersionV1 {
+// ComputeBudgetLimitsForTransaction returns the transaction's effective
+// resource limits. Legacy and v0 transactions configure their budget through
+// ComputeBudget program instructions. SIMD-0385 v1 transactions carry the
+// configuration inline; any ComputeBudget instructions in a v1 message are
+// deliberately ignored here and execute later as ordinary 150-CU no-ops.
+func ComputeBudgetLimitsForTransaction(tx *solana.Transaction, instructions []Instruction, f *features.Features) (*ComputeBudgetLimits, error) {
+	if tx == nil || tx.Message.GetVersion() != solana.MessageVersionV1 {
 		return ComputeBudgetExecuteInstructions(instructions, f)
-	}
-	if err := tx.Sanitize(); err != nil {
-		return nil, err
 	}
 
 	config := tx.Message.TransactionConfig
 	heapBytes := uint32(MinHeapFrameBytes)
 	if config.HeapSize != nil {
 		heapBytes = *config.HeapSize
+		if !sanitizeRequestedHeapSize(heapBytes) {
+			return nil, fmt.Errorf("invalid v1 heap size %d", heapBytes)
+		}
 	}
 	var computeUnitLimit uint32
 	if config.ComputeUnitLimit != nil {
@@ -377,11 +378,13 @@ func ComputeBudgetForTransaction(tx *solana.Transaction, instructions []Instruct
 	if config.PriorityFee != nil {
 		priorityFee = *config.PriorityFee
 	}
+
 	return &ComputeBudgetLimits{
 		UpdatedHeapBytes:          heapBytes,
 		ComputeUnitLimit:          computeUnitLimit,
-		PrioritizationFeeLamports: priorityFee,
 		LoadedAccountBytes:        loadedAccountBytes,
+		DirectPriorityFeeLamports: priorityFee,
+		UsesDirectPriorityFee:     true,
 	}, nil
 }
 
