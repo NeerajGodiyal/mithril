@@ -18,7 +18,7 @@ import (
 )
 
 func (fetcher *RpcClient) GetBlock(slot uint64) (*rpc.GetBlockResult, error) {
-	maxSupportedTxVer := uint64(1)
+	maxSupportedTxVer := rpc.MaxSupportedTransactionVersion1
 	return fetcher.client.GetBlockWithOpts(context.TODO(), slot, &rpc.GetBlockOpts{
 		MaxSupportedTransactionVersion: &maxSupportedTxVer,
 	})
@@ -26,7 +26,7 @@ func (fetcher *RpcClient) GetBlock(slot uint64) (*rpc.GetBlockResult, error) {
 
 func (fetcher *RpcClient) GetBlockConfirmed(slot uint64) (*rpc.GetBlockResult, error) {
 	includeRewards := true
-	maxSupportedTxVer := uint64(1)
+	maxSupportedTxVer := rpc.MaxSupportedTransactionVersion1
 
 	var result *rpc.GetBlockResult
 	var err error
@@ -64,7 +64,7 @@ var SlotSkipped = errors.New("slot skipped")
 // own scheduling/backoff and must never block the caller for long.
 func (fetcher *RpcClient) GetBlockFinalizedOnce(slot uint64) (*rpc.GetBlockResult, error) {
 	includeRewards := false
-	maxSupportedTxVer := uint64(1)
+	maxSupportedTxVer := rpc.MaxSupportedTransactionVersion1
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -93,7 +93,7 @@ func (fetcher *RpcClient) GetBlockFinalizedOnce(slot uint64) (*rpc.GetBlockResul
 // Uses a 30-second timeout to prevent worker stalls on hung RPC connections.
 func (fetcher *RpcClient) GetBlockConfirmedOnce(slot uint64) (*rpc.GetBlockResult, error) {
 	includeRewards := true
-	maxSupportedTxVer := uint64(1)
+	maxSupportedTxVer := rpc.MaxSupportedTransactionVersion1
 
 	// Use a timeout to prevent indefinite hangs on slow/stuck RPC connections
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -154,7 +154,7 @@ func (fetcher *RpcClient) getBlocksWithLimit(startSlot uint64, limit uint64, com
 
 func (fetcher *RpcClient) GetBlockFinalized(slot uint64) (*rpc.GetBlockResult, error) {
 	includeRewards := true
-	maxSupportedTxVer := uint64(1)
+	maxSupportedTxVer := rpc.MaxSupportedTransactionVersion1
 
 	var result *rpc.GetBlockResult
 	var err error
@@ -191,7 +191,7 @@ func (fetcher *RpcClient) GetRewardsForSlot(slot uint64) ([]rpc.BlockReward, err
 
 func (fetcher *RpcClient) GetRewardsForSlotWithCommitment(slot uint64, commitment rpc.CommitmentType, timeout time.Duration) ([]rpc.BlockReward, error) {
 	includeRewards := true
-	maxSupportedTxVer := uint64(1)
+	maxSupportedTxVer := rpc.MaxSupportedTransactionVersion1
 
 	ctx := context.TODO()
 	if timeout > 0 {
@@ -219,7 +219,7 @@ func (fetcher *RpcClient) GetRewardsForSlotWithCommitment(slot uint64, commitmen
 
 func (fetcher *RpcClient) GetNumRewardPartitions(slot uint64) (uint64, error) {
 	includeRewards := true
-	maxSupportedTxVer := uint64(1)
+	maxSupportedTxVer := rpc.MaxSupportedTransactionVersion1
 
 	var lastErr error
 
@@ -295,7 +295,7 @@ func (fetcher *RpcClient) GetStakingRewardSlots(startSlot uint64, numPartitions 
 
 func (fetcher *RpcClient) GetRewardSlots(slot uint64) ([]rpc.BlockReward, *uint64, error) {
 	includeRewards := true
-	maxSupportedTxVer := uint64(1)
+	maxSupportedTxVer := rpc.MaxSupportedTransactionVersion1
 
 	result, err := fetcher.client.GetBlockWithOpts(
 		context.TODO(),

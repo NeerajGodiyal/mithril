@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"runtime/trace"
 	"strings"
 	"sync"
@@ -48,6 +49,7 @@ var (
 	TxErrInvalidProgramForExecution        = errors.New("TxErrInvalidProgramForExecution")
 	TxErrInvalidBlockhash                  = errors.New("TxErrInvalidBlockhash")
 	TxErrSanitizeFailure                   = errors.New("TxErrSanitizeFailure")
+	TxErrUnsupportedVersion                = errors.New("TxErrUnsupportedVersion")
 )
 
 const (
@@ -392,29 +394,55 @@ func handleFailedTx(slotCtx *sealevel.SlotCtx, tx *solana.Transaction, instrs []
 		}()
 	}
 
+	if slotCtx == nil || tx == nil || len(tx.Message.AccountKeys) == 0 || computeBudgetLimits == nil {
+		return nil, fees.ErrFeePayerNotFound
+	}
 	txFeeInfo := fees.CalculateTxFees(tx, instrs, computeBudgetLimits, slotCtx.Features)
 
 	payerAcctKey := tx.Message.AccountKeys[0]
 	p, err := slotCtx.GetAccount(payerAcctKey)
 	if err != nil {
-		panic(fmt.Sprintf("unable to get slot account to update payer acct state after failed tx: %s", err))
+		if slotCtx.UnrootedRead == nil && slotCtx.AccountsDb == nil {
+			if recordMetrics {
+				metrics.GlobalBlockReplay.TxFailedPublicationPreparation.AddTimingSince(preparationStart)
+			}
+			return nil, fees.ErrFeePayerNotFound
+		}
+		p, err = slotCtx.GetAccountFromAccountsDb(payerAcctKey)
+		if err != nil {
+			if recordMetrics {
+				metrics.GlobalBlockReplay.TxFailedPublicationPreparation.AddTimingSince(preparationStart)
+			}
+			return nil, fees.ErrFeePayerNotFound
+		}
 	}
 
-	if txFeeInfo.TotalFee > p.Lamports {
+	rentSysvar := fees.RentForSlot(slotCtx)
+	if err := fees.ValidateFeePayerWithFeatures(p, txFeeInfo.TotalFee, rentSysvar, slotCtx.Features); err != nil {
 		if recordMetrics {
 			metrics.GlobalBlockReplay.TxFailedPublicationPreparation.AddTimingSince(preparationStart)
 		}
-		return nil, sealevel.InstrErrInsufficientFunds
+		return nil, err
 	}
 
 	if recordMetrics {
 		metrics.GlobalBlockReplay.TxFailedPublicationPreparation.AddTimingSince(preparationStart)
+	}
+	originalRentEpoch := p.RentEpoch
+	if p.RentEpoch != math.MaxUint64 && rentSysvar.IsExempt(p.Lamports, uint64(len(p.Data))) {
+		p.RentEpoch = math.MaxUint64
 	}
 	var payerStart time.Time
 	if recordMetrics {
 		payerStart = time.Now()
 	}
 	p.Lamports -= txFeeInfo.TotalFee
+	// Agave's ordinary-blockhash rollback preserves the payer's originally
+	// loaded rent epoch. Durable-nonce rollback intentionally keeps the
+	// normalized epoch alongside the advanced nonce state.
+	if sealevel.IsRecentBlockhashTransaction(tx, slotCtx) {
+		p.RentEpoch = originalRentEpoch
+	}
 	err = slotCtx.SetAccount(payerAcctKey, p)
 	if err != nil {
 		panic(fmt.Sprintf("unable to set slot account to update state of payer acct after failed t: %s", err))
@@ -763,10 +791,23 @@ func processTransactionForReplay(
 				}
 			}
 		}
+		if output.ProcessedAsNoOp {
+			var computeUnits uint64
+			if computeBudgetLimits != nil {
+				computeUnits = uint64(computeBudgetLimits.ComputeUnitLimit)
+			}
+			return output.FeeInfo, computeUnits, txErr.InstructionError
+		}
 
 		switch txErr.ErrorType {
 		case TransactionErrorSanitizeFailure:
-			return nil, processTransactionComputeUnits(execCtx), txErr
+			if txErr.InstructionError != nil {
+				return nil, processTransactionComputeUnits(execCtx), txErr.InstructionError
+			}
+			return nil, processTransactionComputeUnits(execCtx), TxErrSanitizeFailure
+
+		case TransactionErrorUnsupportedVersion:
+			return nil, processTransactionComputeUnits(execCtx), TxErrUnsupportedVersion
 
 		case TransactionErrorBlockhashNotFound:
 			return nil, processTransactionComputeUnits(execCtx), TxErrInvalidBlockhash
@@ -778,7 +819,9 @@ func processTransactionForReplay(
 			return txFeeInfo, processTransactionComputeUnits(execCtx), err
 
 		case TransactionErrorInsufficientFundsForFee:
-			return nil, processTransactionComputeUnits(execCtx), txErr
+			// A fee-payer validation failure is unprocessable unless SIMD-0290
+			// converted it to the no-op result handled above.
+			return nil, processTransactionComputeUnits(execCtx), txErr.InstructionError
 
 		case TransactionErrorInstructionError:
 			if !output.ExecutionStarted {

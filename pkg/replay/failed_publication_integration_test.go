@@ -208,9 +208,13 @@ func TestProcessTransactionFeePayerFailuresDoNotChargeFee(t *testing.T) {
 			feeInfo, _, processErr := ProcessTransaction(slotCtx, &sigverify, tx, nil, nil, nil, false)
 			sigverify.Wait()
 			require.Nil(t, feeInfo)
-			var txErr *TransactionError
-			require.ErrorAs(t, processErr, &txErr)
-			require.Equal(t, tc.wantType, txErr.ErrorType)
+			if tc.wantType == TransactionErrorInsufficientFundsForFee {
+				require.ErrorIs(t, processErr, fees.ErrInsufficientFundsForFee)
+			} else {
+				var txErr *TransactionError
+				require.ErrorAs(t, processErr, &txErr)
+				require.Equal(t, tc.wantType, txErr.ErrorType)
+			}
 			after, err := slotCtx.GetAccount(txfixture.PayerPubkey())
 			require.NoError(t, err)
 			require.Equal(t, before, after.Lamports)
