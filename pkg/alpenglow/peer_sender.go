@@ -1,6 +1,7 @@
 package alpenglow
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -13,6 +14,9 @@ const (
 	defaultVotorPeerSendQueue = 256
 	votorSendTimeout          = time.Second
 	votorSendWatchInterval    = 100 * time.Millisecond
+	votorConnectionLimitCode  = quic.ApplicationErrorCode(5)
+	votorConnectionRetryDelay = time.Second
+	votorRedundantSendDelay   = 5 * time.Millisecond
 )
 
 // VotorPeerQueueStats describes local queueing, not remote delivery. Counters
@@ -68,12 +72,18 @@ func (s *votorPeerSender) enqueue(job votorDatagram) {
 }
 
 func (s *votorPeerSender) run() {
+	var reconnectDelay time.Duration
 	defer s.b.wg.Done()
 	defer close(s.done)
+	defer func() {
+		if delay := votorReconnectDelay(context.Cause(s.conn.Context())); delay > reconnectDelay {
+			reconnectDelay = delay
+		}
+		s.b.queueConnectAfter(s.peer.Identity, reconnectDelay)
+	}()
 	// Cover both remote-close select and close detected after dequeuing a job.
 	// The queue is bounded/deduplicated; shutdown, departure and a healthy
 	// replacement connection suppress obsolete reconnect requests.
-	defer s.b.queueConnect(s.peer.Identity)
 	defer func() {
 		s.mu.Lock()
 		s.closed = true
@@ -121,7 +131,26 @@ func (s *votorPeerSender) run() {
 				return
 			}
 			s.mu.Unlock()
-			err := s.conn.SendDatagram(job.payload)
+			var err error
+			for copy := 0; copy < s.b.datagramCopies; copy++ {
+				if copy > 0 {
+					timer := time.NewTimer(votorRedundantSendDelay)
+					select {
+					case <-timer.C:
+					case <-s.b.done:
+						timer.Stop()
+						return
+					case <-s.conn.Context().Done():
+						timer.Stop()
+						return
+					}
+				}
+				err = s.conn.SendDatagram(job.payload)
+				if err != nil {
+					break
+				}
+				s.b.sends.Add(1)
+			}
 			s.mu.Lock()
 			s.sendingSince = time.Time{}
 			s.mu.Unlock()
@@ -131,13 +160,20 @@ func (s *votorPeerSender) run() {
 				if errors.As(err, &tooLarge) {
 					continue
 				}
+				reconnectDelay = votorReconnectDelay(err)
 				s.b.dropConnection(s.peer.Identity, s.conn)
-				s.b.queueConnect(s.peer.Identity)
 				return
 			}
-			s.b.sends.Add(1)
 		}
 	}
+}
+
+func votorReconnectDelay(err error) time.Duration {
+	var applicationErr *quic.ApplicationError
+	if errors.As(err, &applicationErr) && applicationErr.Remote && applicationErr.ErrorCode == votorConnectionLimitCode {
+		return votorConnectionRetryDelay
+	}
+	return 0
 }
 
 func (s *votorPeerSender) stats() VotorPeerQueueStats {
@@ -177,5 +213,4 @@ func (s *votorPeerSender) timeout() {
 	s.b.peerSendTimeouts.Add(1)
 	// Closing wakes SendDatagram without leaking a timeout goroutine.
 	s.b.dropConnection(s.peer.Identity, s.conn)
-	s.b.queueConnect(s.peer.Identity)
 }

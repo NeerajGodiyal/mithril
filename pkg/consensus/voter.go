@@ -70,6 +70,7 @@ type VotingStats struct {
 	LastNetworkLandedVoteType      alpenglow.VoteType              `json:"last_network_landed_vote_type,omitempty"`
 	LastNetworkCertificateType     alpenglow.CertificateType       `json:"last_network_certificate_type,omitempty"`
 	LastNetworkLandedAt            time.Time                       `json:"last_network_landed_at,omitempty"`
+	BroadcastDatagramCopies        int                             `json:"broadcast_datagram_copies"`
 	BroadcastMessagesQueued        uint64                          `json:"broadcast_messages_queued"`
 	BroadcastMessagesDropped       uint64                          `json:"broadcast_messages_dropped"`
 	BroadcastPeerSends             uint64                          `json:"broadcast_peer_sends"`
@@ -309,8 +310,9 @@ func newAlpenglowVoterWithStart(engine *AlpenglowObserverEngine, cfg VotingConfi
 		v.sets[set.Epoch] = cloneValidatorSet(set)
 	}
 	broadcaster, err := alpenglow.NewVotorBroadcaster(alpenglow.VotorBroadcasterConfig{
-		Identity:     cfg.Identity,
-		ShredVersion: engine.shredVersion,
+		Identity:       cfg.Identity,
+		ShredVersion:   engine.shredVersion,
+		DatagramCopies: 2,
 		Peers: func() []alpenglow.VotorPeer {
 			validators := v.votorTransportValidators()
 			if len(validators) == 0 {
@@ -1339,6 +1341,7 @@ func (v *alpenglowVoter) snapshot() VotingStats {
 	}
 	if v.broadcaster != nil {
 		broadcast := v.broadcaster.Stats()
+		stats.BroadcastDatagramCopies = broadcast.DatagramCopies
 		stats.BroadcastMessagesQueued = broadcast.MessagesQueued
 		stats.BroadcastMessagesDropped = broadcast.MessagesDropped
 		stats.BroadcastPeerSends = broadcast.PeerSends
@@ -1369,10 +1372,11 @@ func (v *alpenglowVoter) maybeLogStats() {
 	}
 	v.lastStatsLog = time.Now()
 	stats := v.snapshot()
-	mlog.Log.FileOnlyf("alpenglow voting stats: votes_cast_this_run=%d network_landed=%d last_landed_slot=%d broadcast_queued=%d broadcast_dropped=%d peer_sends=%d peer_sends_skipped=%d peer_send_errors=%d peer_queue_drops=%d peer_queue_discarded=%d peer_send_timeouts=%d peer_queue_max_delay=%s desired_peers=%d active_connections=%d pending_connections=%d connection_attempts=%d connection_errors=%d connection_jobs_dropped=%d reserved_history=%t signing_through=%d recovery_through=%d history_submitted=%d history_written=%d history_coalesced=%d",
+	mlog.Log.FileOnlyf("alpenglow voting stats: votes_cast_this_run=%d network_landed=%d last_landed_slot=%d broadcast_datagram_copies=%d broadcast_queued=%d broadcast_dropped=%d peer_sends=%d peer_sends_skipped=%d peer_send_errors=%d peer_queue_drops=%d peer_queue_discarded=%d peer_send_timeouts=%d peer_queue_max_delay=%s desired_peers=%d active_connections=%d pending_connections=%d connection_attempts=%d connection_errors=%d connection_jobs_dropped=%d reserved_history=%t signing_through=%d recovery_through=%d history_submitted=%d history_written=%d history_coalesced=%d",
 		stats.VotesCastThisRun,
 		stats.NetworkLandedVotes,
 		stats.LastNetworkLandedSlot,
+		stats.BroadcastDatagramCopies,
 		stats.BroadcastMessagesQueued,
 		stats.BroadcastMessagesDropped,
 		stats.BroadcastPeerSends,

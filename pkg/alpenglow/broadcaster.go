@@ -35,11 +35,15 @@ type VotorBroadcasterConfig struct {
 	ShredVersion uint16
 	Peers        VotorPeerSource
 	QueueSize    int
+	// DatagramCopies sends each message more than once on the same connection.
+	// Values below one retain the protocol default of one copy.
+	DatagramCopies int
 	// Workers bounds concurrent connection attempts. Sends are isolated per connection.
 	Workers int
 }
 
 type VotorBroadcasterStats struct {
+	DatagramCopies        int
 	MessagesQueued        uint64
 	MessagesDropped       uint64
 	PeerSends             uint64
@@ -78,6 +82,7 @@ type votorDial struct {
 
 type VotorBroadcaster struct {
 	shredVersion          uint16
+	datagramCopies        int
 	peers                 VotorPeerSource
 	tlsConfig             *tls.Config
 	quicConfig            *quic.Config
@@ -94,6 +99,7 @@ type VotorBroadcaster struct {
 	conns                 map[solana.PublicKey]votorConnection
 	dialing               map[solana.PublicKey]*votorDial
 	connectQueued         map[solana.PublicKey]struct{}
+	connectNotBefore      map[solana.PublicKey]time.Time
 	errorMu               sync.Mutex
 	lastSendError         string
 	lastSendErrorAt       time.Time
@@ -126,30 +132,35 @@ func NewVotorBroadcaster(cfg VotorBroadcasterConfig) (*VotorBroadcaster, error) 
 	if cfg.Workers <= 0 {
 		cfg.Workers = defaultVotorConnectWorkers
 	}
+	if cfg.DatagramCopies <= 0 {
+		cfg.DatagramCopies = 1
+	}
 	certificate, err := newVotorQUICCertificate(cfg.Identity)
 	if err != nil {
 		return nil, fmt.Errorf("Votor broadcaster certificate: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &VotorBroadcaster{
-		shredVersion: cfg.ShredVersion,
-		peers:        cfg.Peers,
+		shredVersion:   cfg.ShredVersion,
+		datagramCopies: cfg.DatagramCopies,
+		peers:          cfg.Peers,
 		tlsConfig: &tls.Config{
 			Certificates:       []tls.Certificate{certificate},
 			NextProtos:         []string{VotorQUICALPN},
 			MinVersion:         tls.VersionTLS13,
 			InsecureSkipVerify: true, // The validator SPKI is checked explicitly after the handshake.
 		},
-		quicConfig:    newVotorQUICConfig(),
-		ctx:           ctx,
-		cancel:        cancel,
-		queue:         make(chan Message, cfg.QueueSize),
-		jobs:          make(chan votorPeerJob, defaultVotorPeerJobQueue),
-		done:          make(chan struct{}),
-		desired:       make(map[solana.PublicKey]VotorPeer),
-		conns:         make(map[solana.PublicKey]votorConnection),
-		dialing:       make(map[solana.PublicKey]*votorDial),
-		connectQueued: make(map[solana.PublicKey]struct{}),
+		quicConfig:       newVotorQUICConfig(),
+		ctx:              ctx,
+		cancel:           cancel,
+		queue:            make(chan Message, cfg.QueueSize),
+		jobs:             make(chan votorPeerJob, defaultVotorPeerJobQueue),
+		done:             make(chan struct{}),
+		desired:          make(map[solana.PublicKey]VotorPeer),
+		conns:            make(map[solana.PublicKey]votorConnection),
+		dialing:          make(map[solana.PublicKey]*votorDial),
+		connectQueued:    make(map[solana.PublicKey]struct{}),
+		connectNotBefore: make(map[solana.PublicKey]time.Time),
 	}
 	b.wg.Add(2 + cfg.Workers)
 	for range cfg.Workers {
@@ -262,6 +273,11 @@ func (b *VotorBroadcaster) reconcilePeers() {
 		return
 	}
 	b.desired = next
+	for identity := range b.connectNotBefore {
+		if _, desired := next[identity]; !desired {
+			delete(b.connectNotBefore, identity)
+		}
+	}
 	for identity, existing := range b.conns {
 		peer, desired := next[identity]
 		if desired && peer.Addr.String() == existing.addr && existing.conn.Context().Err() == nil {
@@ -316,8 +332,22 @@ func (b *VotorBroadcaster) queueConnectLocked(identity solana.PublicKey) {
 	if !desired || b.closed.Load() {
 		return
 	}
-	if existing, ok := b.conns[identity]; ok && existing.addr == peer.Addr.String() && existing.conn.Context().Err() == nil {
+	if notBefore := b.connectNotBefore[identity]; time.Now().Before(notBefore) {
 		return
+	}
+	delete(b.connectNotBefore, identity)
+	if existing, ok := b.conns[identity]; ok && existing.addr == peer.Addr.String() {
+		if existing.conn.Context().Err() == nil {
+			return
+		}
+		if delay := votorReconnectDelay(context.Cause(existing.conn.Context())); delay > 0 {
+			if b.connectNotBefore == nil {
+				b.connectNotBefore = make(map[solana.PublicKey]time.Time)
+			}
+			b.connectNotBefore[identity] = time.Now().Add(delay)
+			delete(b.conns, identity)
+			return
+		}
 	}
 	if _, queued := b.connectQueued[identity]; queued || b.dialing[identity] != nil {
 		return
@@ -337,12 +367,39 @@ func (b *VotorBroadcaster) connectPeer(identity solana.PublicKey) {
 		delete(b.connectQueued, identity)
 		b.connMu.Unlock()
 	}()
+	b.connMu.Lock()
+	if notBefore := b.connectNotBefore[identity]; time.Now().Before(notBefore) {
+		b.connMu.Unlock()
+		return
+	}
+	delete(b.connectNotBefore, identity)
+	b.connMu.Unlock()
 	peer, desired := b.desiredPeer(identity)
 	if !desired || b.closed.Load() {
 		return
 	}
 	if _, err := b.connection(peer); err != nil && !errors.Is(err, errVotorPeerNotDesired) && !b.closed.Load() {
 		b.recordConnectionError(peer, err)
+	}
+}
+
+func (b *VotorBroadcaster) queueConnectAfter(identity solana.PublicKey, delay time.Duration) {
+	if delay <= 0 {
+		b.queueConnect(identity)
+		return
+	}
+	b.connMu.Lock()
+	if b.connectNotBefore == nil {
+		b.connectNotBefore = make(map[solana.PublicKey]time.Time)
+	}
+	b.connectNotBefore[identity] = time.Now().Add(delay)
+	b.connMu.Unlock()
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		b.queueConnect(identity)
+	case <-b.done:
 	}
 }
 
@@ -494,6 +551,7 @@ func (b *VotorBroadcaster) Stats() VotorBroadcasterStats {
 	lastConnectionError, lastConnectionErrorAt := b.lastConnectionError, b.lastConnectionErrorAt
 	b.errorMu.Unlock()
 	return VotorBroadcasterStats{
+		DatagramCopies:        b.datagramCopies,
 		MessagesQueued:        b.queued.Load(),
 		MessagesDropped:       b.dropped.Load(),
 		PeerSends:             b.sends.Load(),
