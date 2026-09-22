@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gagliardetto/solana-go"
+	"github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -83,6 +84,48 @@ func TestVotorPeerReconnectOnRemoteCloseWithoutReconcile(t *testing.T) {
 			require.Empty(t, b.jobs, "only one reconnect request per peer")
 		})
 	}
+}
+
+func TestVotorPeerPacesReconnectAfterRemoteConnectionLimit(t *testing.T) {
+	b, s, receiver := passiveVotorSender(t)
+	require.Eventually(t, func() bool {
+		receiver.mu.Lock()
+		defer receiver.mu.Unlock()
+		return len(receiver.conns) == 1
+	}, time.Second, time.Millisecond)
+	receiver.mu.Lock()
+	for conn := range receiver.conns {
+		require.NoError(t, conn.CloseWithError(votorConnectionLimitCode, "TOO_MANY_CONNECTIONS"))
+	}
+	receiver.mu.Unlock()
+
+	select {
+	case <-s.conn.Context().Done():
+	case <-time.After(6 * votorConnectionRetryDelay):
+		t.Fatal("remote connection limit close was not observed")
+	}
+	b.queueConnect(s.peer.Identity)
+	require.Never(t, func() bool { return len(b.jobs) != 0 }, votorConnectionRetryDelay/2, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return len(b.jobs) == 1 }, 2*votorConnectionRetryDelay, 10*time.Millisecond)
+	job := <-b.jobs
+	require.Equal(t, s.peer.Identity, job.peer.Identity)
+	require.Empty(t, b.jobs, "only one reconnect request per peer")
+}
+
+func TestVotorReconnectDelay(t *testing.T) {
+	require.Equal(t, votorConnectionRetryDelay, votorReconnectDelay(&quic.ApplicationError{
+		Remote:    true,
+		ErrorCode: votorConnectionLimitCode,
+	}))
+	require.Zero(t, votorReconnectDelay(&quic.ApplicationError{
+		Remote:    false,
+		ErrorCode: votorConnectionLimitCode,
+	}))
+	require.Zero(t, votorReconnectDelay(&quic.ApplicationError{
+		Remote:    true,
+		ErrorCode: votorConnectionLimitCode + 1,
+	}))
+	require.Zero(t, votorReconnectDelay(nil))
 }
 
 func TestVotorPeerDeadlineIncludesQueueAge(t *testing.T) {

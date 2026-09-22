@@ -83,6 +83,39 @@ func TestVotorBroadcasterPreconnectsBeforeFirstMessageAndDeliversDatagram(t *tes
 	require.EqualValues(t, 1, receiver.Stats().DatagramsReceived)
 }
 
+func TestVotorBroadcasterSendsConfiguredDatagramCopies(t *testing.T) {
+	serverIdentity := ed25519.NewKeyFromSeed(bytesOf(35, ed25519.SeedSize))
+	serverPubkey := testVotorPubkey(serverIdentity)
+	clientIdentity := ed25519.NewKeyFromSeed(bytesOf(36, ed25519.SeedSize))
+	observer := NewObserver()
+	receiver, err := NewReceiver(ReceiverConfig{
+		BindAddr:    "127.0.0.1:0",
+		Identity:    serverIdentity,
+		LogInterval: -1,
+		AdmitPeer:   func(solana.PublicKey) bool { return true },
+	}, observer)
+	require.NoError(t, err)
+	runVotorReceiver(t, receiver)
+
+	broadcaster, err := NewVotorBroadcaster(VotorBroadcasterConfig{
+		Identity:       clientIdentity,
+		DatagramCopies: 2,
+		Peers: func() []VotorPeer {
+			return []VotorPeer{{Identity: serverPubkey, Addr: cloneUDPAddr(receiver.Addr().(*net.UDPAddr))}}
+		},
+		Workers: 1,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, broadcaster.Close()) })
+	require.Eventually(t, func() bool { return broadcaster.Stats().Connections == 1 }, 3*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, broadcaster.Enqueue(NewVoteMessage(NewSkipVote(78), testSignatureSeq(0x42), 3)))
+	require.Eventually(t, func() bool {
+		return broadcaster.Stats().PeerSends == 2 && receiver.Stats().DatagramsReceived == 2 && observer.Snapshot().VotesObserved == 1
+	}, time.Second, 10*time.Millisecond)
+	require.Equal(t, 2, broadcaster.Stats().DatagramCopies)
+}
+
 func TestVotorBroadcasterRejectsUnexpectedServerIdentity(t *testing.T) {
 	serverIdentity := ed25519.NewKeyFromSeed(bytesOf(41, ed25519.SeedSize))
 	serverPubkey := testVotorPubkey(serverIdentity)
@@ -287,6 +320,7 @@ func TestVotorBroadcasterClosesDepartedPeer(t *testing.T) {
 
 	broadcaster.connMu.Lock()
 	departed := broadcaster.conns[serverPubkey].conn
+	broadcaster.connectNotBefore[serverPubkey] = time.Now().Add(time.Minute)
 	broadcaster.connMu.Unlock()
 	require.NotNil(t, departed)
 	peers.Set(nil)
@@ -295,6 +329,10 @@ func TestVotorBroadcasterClosesDepartedPeer(t *testing.T) {
 		stats := broadcaster.Stats()
 		return stats.DesiredPeers == 0 && stats.Connections == 0 && departed.Context().Err() != nil
 	}, time.Second, 10*time.Millisecond)
+	broadcaster.connMu.Lock()
+	_, retainedCooldown := broadcaster.connectNotBefore[serverPubkey]
+	broadcaster.connMu.Unlock()
+	require.False(t, retainedCooldown)
 }
 
 func TestVotorBroadcasterReplacesChangedPeerAddress(t *testing.T) {
